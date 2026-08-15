@@ -2,14 +2,13 @@
   {
     "identifier": "default",
     "description": "设置窗口与浏览器窗口的基础能力",
-    "windows": ["login", "browser-*"],
+    "windows": ["login", "browser-*", "winset-*"],
     "permissions": [
       "core:default",
       "core:window:default",
       "core:webview:default",
       "core:event:default",
-      "core:app:default",
-      "dialog:default"
+      "core:app:default"
     ]
   }
 ]

@@ -66,18 +66,18 @@
   });
 
   el("btn-go").addEventListener("click", launch);
-  el("btn-quit").addEventListener("click", function () {
-    el("btn-quit").disabled = true;
-    invoke("app_quit").catch(function () {
-      el("btn-quit").disabled = false;
-    });
-  });
   document.addEventListener("keydown", function (e) {
     if (e.key === "Enter") launch();
   });
 
   function launch() {
     hideBanners();
+    // 还原原版校验：username 为空 → 「缓存数据目录名不能为空」并阻止启动
+    if (!el("name").value.trim()) {
+      showBanner("err", "缓存数据目录名不能为空");
+      el("name").focus();
+      return;
+    }
     var n = parseInt(el("idx").value, 10);
     if (!(n >= 1 && n <= 9)) {
       showBanner("err", "老板键索引必须是 1~9 的数字");

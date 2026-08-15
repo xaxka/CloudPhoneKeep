@@ -38,6 +38,16 @@ pub fn platform_preset(id: &str) -> &'static PlatformPreset {
         .unwrap_or(&PLATFORMS[0])
 }
 
+/// Cookie 注入域（还原原版 CDP Network.setCookies 的 domain 参数）
+/// 移动 .139.com（源码明确指定）；联通 .wo-adv.cn（REVERSE.md 逆向结论）
+pub fn platform_cookie_domain(platform: &str) -> &'static str {
+    if platform == "unicom" {
+        ".wo-adv.cn"
+    } else {
+        ".139.com"
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 便携化：全部数据保存在 exe 所在目录（与原版 aardio 程序一致）
 //   config.json        总配置

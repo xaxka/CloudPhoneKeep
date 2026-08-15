@@ -22,10 +22,15 @@ pub fn get_slot(app: AppHandle, slot: u32) -> Result<SlotConfig, String> {
     Ok(s.normalized())
 }
 
-/// 设置窗口「进入」：保存配置并启动窗口（还原原版流程）。
+/// 设置窗口「进入」：保存配置并启动窗口（还原原版 login.aardio showWebForm 流程）。
+/// 还原原版校验：缓存数据目录名为空 → 阻止启动（原版弹 msgbox，这里返回错误由前端横幅展示）。
 /// 返回非致命警告（老板键被占用等）由前端醒目展示；Err 仅在窗口无法创建时返回。
 #[tauri::command]
 pub fn launch_slot(app: AppHandle, cfg: SlotConfig) -> Result<Vec<String>, String> {
+    if cfg.name.trim().is_empty() {
+        return Err("缓存数据目录名不能为空".into());
+    }
+
     {
         let state: tauri::State<AppState> = app.state();
         let mut app_cfg = state.config.lock().unwrap();
@@ -78,14 +83,19 @@ pub fn get_running(app: AppHandle) -> Vec<u32> {
     v
 }
 
-/// 关闭某个帐号窗口（停止保活）
+/// 当前生效分辨率（会话内覆盖优先，其次配置）——「窗口设置」小窗预填用
 #[tauri::command]
-pub fn stop_slot(app: AppHandle, slot: u32) -> Result<(), String> {
-    browser::stop_slot(&app, slot)
+pub fn get_slot_size(app: AppHandle, slot: u32) -> Result<(f64, f64), String> {
+    Ok(browser::slot_size(&app, slot))
 }
 
-/// 彻底退出程序（设置窗口「退出程序」按钮）
+/// 「窗口设置」小窗保存按钮（还原原版 settingWin：只改窗口与内存，不落盘）
 #[tauri::command]
-pub fn app_quit(app: AppHandle) {
-    browser::quit_all(&app);
+pub fn set_slot_size(app: AppHandle, slot: u32, w: f64, h: f64) -> Result<(), String> {
+    let (w, h) = if w < 280.0 || h < 400.0 {
+        return Err("分辨率过小（最小 280 x 400）".into());
+    } else {
+        (w, h)
+    };
+    browser::apply_slot_size(&app, slot, w, h)
 }

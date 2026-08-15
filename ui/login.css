@@ -73,9 +73,9 @@ body {
   min-height: 16px;
 }
 
-#btn-go,
-#btn-quit {
+#btn-go {
   height: 40px;
+  width: 100%;
   font-size: 16px;
   font-weight: 700;
   font-family: inherit;
@@ -87,19 +87,6 @@ body {
 
 #btn-go:hover { background: #e5f1fb; border-color: #0078d7; }
 #btn-go:active { background: #cce4f7; border-color: #005499; }
-
-#btn-quit:hover { background: #fdecea; border-color: #d93025; }
-#btn-quit:active { background: #f9d3d0; border-color: #a61c17; }
-
-.btn-row {
-  display: flex;
-  gap: 8px;
-  margin-top: 4px;
-}
-
-.btn-row button {
-  flex: 1;
-}
 
 /* 醒目横幅：启动失败(红) / 非致命警告(黄)，替代原先 12px 小灰字 */
 .banner {

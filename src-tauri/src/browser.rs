@@ -4,10 +4,9 @@ use crate::logger;
 use crate::state::SlotState;
 use crate::AppState;
 use std::sync::atomic::Ordering;
-use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+use tauri::tray::{TrayIconBuilder};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
-use tauri_plugin_notification::NotificationExt;
 
 pub const RELEASES_URL: &str = "https://github.com/xixka/CloudPhoneKeep/releases";
 /// WebView2 运行时官方下载页（窗口创建失败且疑似缺运行时时打开）
@@ -17,14 +16,13 @@ pub fn slot_label(slot: u32) -> String {
     format!("browser-{slot}")
 }
 
+fn winset_label(slot: u32) -> String {
+    format!("winset-{slot}")
+}
+
 // ---------------------------------------------------------------------------
 // 窗口生命周期
 // ---------------------------------------------------------------------------
-
-/// 启动（或聚焦）某个槽位的云手机窗口
-pub fn start_slot(app: &AppHandle, slot: u32) -> Result<(), String> {
-    start_slot_ex(app, slot).map(|_| ())
-}
 
 /// 启动（或聚焦）某个槽位的云手机窗口。
 /// 返回 Ok(warnings)：启动成功但存在非致命问题（老板键被占用等），由前端醒目提示；
@@ -83,14 +81,10 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
         cfg.name.trim().to_string()
     };
     let platform_label = config::platform_preset(&cfg.platform).label;
-    let has_boss_key = warnings.is_empty();
-    let title = if has_boss_key {
-        format!("{platform_label} - {name} - 老板键：Ctrl + {slot}")
-    } else {
-        format!("{platform_label} - {name} - 老板键不可用（Ctrl+{slot} 被占用）")
-    };
+    // 标题格式还原原版：移动云手机 - {name} - 老板键：Ctrl + {idx}
+    let title = format!("{platform_label} - {name} - 老板键：Ctrl + {slot}");
 
-    // 原生菜单栏（还原原版 aardio 主菜单）：创建失败同样降级为无菜单模式，不阻塞
+    // 原生菜单栏（还原原版 aardio 主菜单五项）：创建失败降级为无菜单模式，不阻塞
     let menu = match build_window_menu(app, slot) {
         Ok(m) => Some(m),
         Err(e) => {
@@ -106,9 +100,19 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
 
+    // 生效分辨率：会话内覆盖（旋转/窗口设置）优先，其次配置值（还原原版 userInfo 语义）
+    let (w, h) = {
+        let state: tauri::State<AppState> = app.state();
+        let states = state.states.lock().unwrap();
+        states
+            .get(&slot)
+            .and_then(|s| s.size_override)
+            .unwrap_or((cfg.width, cfg.height))
+    };
+
     let mut builder = WebviewWindowBuilder::new(app, slot_label(slot), WebviewUrl::External(web_url))
         .title(&title)
-        .inner_size(cfg.width, cfg.height)
+        .inner_size(w, h)
         .min_inner_size(280.0, 400.0)
         .resizable(true)
         .initialization_script(&init_script)
@@ -153,38 +157,18 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
         app,
         slot,
         "sys",
-        &format!("窗口已启动 platform={} url={} profile={profile_name} 老板键={}", cfg.platform, url, if has_boss_key { "已注册" } else { "不可用" }),
+        &format!("窗口已启动 platform={} url={} profile={profile_name}", cfg.platform, url),
     );
 
     {
         let w = win.clone();
         win.on_window_event(move |e| match e {
-            // 关闭按钮 → 隐藏（保活继续），老板键/托盘再次显示（与原版一致）
-            WindowEvent::CloseRequested { api, .. } => {
-                api.prevent_close();
-                let _ = w.hide();
+            // 还原原版 web.aardio onClose/onDestroy → win.quitMessage()：
+            // 点 X 即退出整个程序（所有窗口、全部保活一并结束）
+            WindowEvent::CloseRequested { .. } => {
                 let app = w.app_handle().clone();
-                let s = slot_of_label(&w.label());
-                sync_state(&app, s, |st| st.visible = false);
-                logger::log(&app, s, "sys", "窗口已隐藏（保活继续，看门狗驱动模式）");
-                // 首次隐藏弹通知，明确告知去哪里找回/退出，避免“关了就找不到、退不掉”
-                let first_hide = {
-                    let state: tauri::State<AppState> = app.state();
-                    let mut states = state.states.lock().unwrap();
-                    match states.get_mut(&s) {
-                        Some(st) => std::mem::replace(&mut st.hide_notified, true),
-                        None => false,
-                    }
-                };
-                if !first_hide {
-                    let _ = app
-                        .notification()
-                        .builder()
-                        .title("已隐藏到托盘，保活继续")
-                        .body(format!("Ctrl+{s} 或托盘图标可再次呼出；托盘菜单「退出」可彻底退出程序"))
-                        .show();
-                }
-                rebuild_tray(&app);
+                logger::log(&app, slot_of_label(&w.label()), "sys", "用户关闭窗口 → 退出程序");
+                quit_all(&app);
             }
             WindowEvent::Focused(true) => {
                 let app = w.app_handle().clone();
@@ -201,13 +185,13 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
     sync_state(app, slot, |s| {
         s.running = true;
         s.visible = true;
-        s.hide_notified = false;
         if s.last_status == "未启动" {
             s.last_status = "installed".into();
         }
     });
     spawn_watchdog(app.clone(), slot);
-    rebuild_tray(app);
+    // 还原原版：每个窗口创建自己的托盘图标
+    create_slot_tray(app, slot);
     Ok(warnings)
 }
 
@@ -215,7 +199,8 @@ fn slot_of_label(label: &str) -> u32 {
     label.strip_prefix("browser-").and_then(|s| s.parse().ok()).unwrap_or(0)
 }
 
-/// 原生菜单栏（每个窗口独立，id 带槽位后缀）
+/// 原生菜单栏（每个窗口独立，id 带槽位后缀）。
+/// 还原原版 aardio 主菜单五项：云手机首页/旋转/窗口置顶/设置/检查更新（无退出项）。
 fn build_window_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
     MenuBuilder::new(app)
         .item(&MenuItemBuilder::with_id(format!("home-{slot}"), "云手机首页").build(app)?)
@@ -223,7 +208,6 @@ fn build_window_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tau
         .item(&MenuItemBuilder::with_id(format!("top-{slot}"), "窗口置顶").build(app)?)
         .item(&MenuItemBuilder::with_id(format!("settings-{slot}"), "设置").build(app)?)
         .item(&MenuItemBuilder::with_id("update-check", "检查更新").build(app)?)
-        .item(&MenuItemBuilder::with_id(format!("quitapp-{slot}"), "退出程序").build(app)?)
         .build()
 }
 
@@ -232,28 +216,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
     // 全局项
     match id {
         "open-settings" => return show_login(app, None),
-        "show-all" => {
-            for slot in running_slots(app) {
-                show_slot(app, slot, true);
-            }
-            return;
-        }
-        "hide-all" => {
-            for slot in running_slots(app) {
-                show_slot(app, slot, false);
-            }
-            return;
-        }
         "open-logdir" => return open_log_dir(app),
-        "probe-all" => {
-            for slot in running_slots(app) {
-                if let Some(win) = app.get_webview_window(&slot_label(slot)) {
-                    let _ = win.eval("try{window.__CPK_PROBE__&&window.__CPK_PROBE__()}catch(e){}");
-                }
-            }
-            logger::log(app, 0, "sys", "已触发全部窗口 DOM 采样，结果见 logs/ 目录");
-            return;
-        }
         "quit" => {
             quit_all(app);
             return;
@@ -266,7 +229,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
         _ => {}
     }
 
-    // 带槽位后缀的项：home-3 / rotate-3 / top-3 / settings-3 / show-3 / hide-3 / close-3 / quitapp-3
+    // 带槽位后缀的项：home-3 / rotate-3 / top-3 / settings-3 / show-3 / hide-3
     if let Some((action, n)) = id.rsplit_once('-') {
         if let Ok(slot) = n.parse::<u32>() {
             match action {
@@ -298,21 +261,69 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                         .unwrap_or(false);
                     let _ = set_topmost(app, slot, top);
                 }
-                "settings" => show_login(app, Some(slot)),
+                // 还原原版：菜单「设置」打开只调分辨率的「窗口设置」小窗
+                "settings" => open_winset(app, slot),
                 "show" => show_slot(app, slot, true),
                 "hide" => show_slot(app, slot, false),
-                "close" => {
-                    let _ = stop_slot(app, slot);
-                }
-                "quitapp" => quit_all(app),
                 _ => {}
             }
         }
     }
 }
 
-/// 彻底退出程序：置退出标志（停用托盘重建等收尾动作，避免退出流程卡死），
-/// 销毁全部云手机窗口后退出进程。
+/// 「窗口设置」小窗（还原原版 settingWin：仅分辨率输入 + 保存，会话内生效不落盘，
+/// 同一窗口单实例，关闭后可再次打开）
+pub fn open_winset(app: &AppHandle, slot: u32) {
+    let label = winset_label(slot);
+    if let Some(win) = app.get_webview_window(&label) {
+        // 单实例：已打开则聚焦（还原原版 isWinHwnd 拦截重复打开）
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+    let _ = WebviewWindowBuilder::new(
+        app,
+        label,
+        WebviewUrl::App(std::path::PathBuf::from("winset.html")),
+    )
+    .title("窗口设置")
+    .inner_size(275.0, 150.0)
+    .resizable(false)
+    .build();
+    logger::log(app, slot, "sys", "打开窗口设置（分辨率，仅本会话生效）");
+}
+
+/// 当前生效分辨率（会话内覆盖优先，其次配置值）
+pub fn slot_size(app: &AppHandle, slot: u32) -> (f64, f64) {
+    let state: tauri::State<AppState> = app.state();
+    let cfg = state.config.lock().unwrap();
+    let base = cfg
+        .slots
+        .iter()
+        .find(|s| s.slot == slot)
+        .map(|s| (s.width, s.height))
+        .unwrap_or((414.0, 896.0));
+    drop(cfg);
+    let states = state.states.lock().unwrap();
+    states
+        .get(&slot)
+        .and_then(|s| s.size_override)
+        .unwrap_or(base)
+}
+
+/// 「窗口设置」保存 / 立即改尺寸：只改窗口与内存，不写配置（还原原版 settingWin 语义）
+pub fn apply_slot_size(app: &AppHandle, slot: u32, w: f64, h: f64) -> Result<(), String> {
+    sync_state(app, slot, |s| s.size_override = Some((w, h)));
+    if let Some(win) = app.get_webview_window(&slot_label(slot)) {
+        win.set_size(tauri::LogicalSize::new(w, h))
+            .map_err(|e| e.to_string())?;
+    }
+    logger::log(app, slot, "sys", &format!("分辨率已调整（仅本会话）：{w} x {h}"));
+    Ok(())
+}
+
+/// 彻底退出程序：置退出标志（跳过收尾动作，避免退出流程被卡死），
+/// 移除全部托盘、销毁全部窗口后退出进程（还原原版 win.quitMessage）。
 pub fn quit_all(app: &AppHandle) {
     if app
         .state::<AppState>()
@@ -322,8 +333,10 @@ pub fn quit_all(app: &AppHandle) {
         return; // 已在退出流程中，避免重复触发
     }
     logger::log(app, 0, "sys", "开始退出程序：销毁全部窗口");
+    // 移除全部托盘图标（还原原版退出前 tray.delete()）
+    app.state::<AppState>().trays.lock().unwrap().clear();
     for (label, win) in app.webview_windows() {
-        if label.starts_with("browser-") {
+        if label.starts_with("browser-") || label.starts_with("winset-") {
             let _ = win.destroy();
         }
     }
@@ -346,15 +359,7 @@ pub fn show_login(app: &AppHandle, slot: Option<u32>) {
     }
 }
 
-fn running_slots(app: &AppHandle) -> Vec<u32> {
-    let state: tauri::State<AppState> = app.state();
-    let states = state.states.lock().unwrap();
-    let mut v: Vec<u32> = states.iter().filter(|(_, s)| s.running).map(|(k, _)| *k).collect();
-    v.sort();
-    v
-}
-
-/// 槽位清理：热键注销、看门狗终止、托盘刷新
+/// 槽位清理：热键注销、看门狗终止、移除该窗口托盘
 fn cleanup_slot(app: &AppHandle, slot: u32) {
     if !(1..=9).contains(&slot) {
         return;
@@ -368,34 +373,25 @@ fn cleanup_slot(app: &AppHandle, slot: u32) {
     if let Some(h) = old_watchdog {
         h.abort();
     }
+    // 移除该窗口的托盘图标（还原原版窗口销毁时托盘随之移除）
+    app.state::<AppState>().trays.lock().unwrap().remove(&slot);
     sync_state(app, slot, |s| {
         s.running = false;
         s.visible = false;
         s.last_status = "已停止".into();
     });
     logger::log(app, slot, "sys", "窗口已关闭");
-    if !app.state::<AppState>().quitting.load(Ordering::SeqCst) {
-        rebuild_tray(app);
-    }
 }
 
 /// 原生看门狗：窗口隐藏时页面定时器可能被浏览器节流，
 /// 由 Rust 侧周期性 eval 调用页面内 tick，保证后台保活不掉线。
+/// 周期 1 秒 = 原版 stopTimer；页面内 tick 自行分流：
+///   - 每 1 秒：退出/到期检测（stopTimer 语义）
+///   - 每 intervalMs：保活动作（runTimer 5 秒语义）
 fn spawn_watchdog(app: AppHandle, slot: u32) {
-    let interval_ms = {
-        let state: tauri::State<AppState> = app.state();
-        let cfg = state.config.lock().unwrap();
-        cfg.slots
-            .iter()
-            .find(|s| s.slot == slot)
-            .map(|s| s.interval_ms)
-            .unwrap_or(5000)
-            .max(1000)
-    };
-
     let task_app = app.clone();
     let handle = tauri::async_runtime::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(1000));
         loop {
             ticker.tick().await;
             let win = match task_app.get_webview_window(&slot_label(slot)) {
@@ -424,47 +420,22 @@ fn spawn_watchdog(app: AppHandle, slot: u32) {
     }
 }
 
-/// 停止槽位：真正关闭窗口并退出该帐号保活
-pub fn stop_slot(app: &AppHandle, slot: u32) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window(&slot_label(slot)) {
-        let _ = win.destroy();
-    } else {
-        cleanup_slot(app, slot);
-    }
-    Ok(())
-}
-
-/// 老板键：可见则瞬间隐藏，隐藏则显示并置前
+/// 老板键：可见则瞬间隐藏，隐藏则显示并置前（还原原版 reghotkey Ctrl+N）
 pub fn toggle_slot(app: &AppHandle, slot: u32) {
     if let Some(win) = app.get_webview_window(&slot_label(slot)) {
         match win.is_visible() {
             Ok(true) => {
                 let _ = win.hide();
-                let first_hide = {
-                    let state: tauri::State<AppState> = app.state();
-                    let mut states = state.states.lock().unwrap();
-                    match states.get_mut(&slot) {
-                        Some(st) => std::mem::replace(&mut st.hide_notified, true),
-                        None => false,
-                    }
-                };
                 sync_state(app, slot, |s| s.visible = false);
                 logger::log(app, slot, "sys", "窗口已隐藏（保活切换为看门狗驱动模式）");
-                if !first_hide {
-                    let _ = app
-                        .notification()
-                        .builder()
-                        .title("已隐藏到托盘，保活继续")
-                        .body(format!("Ctrl+{slot} 可再次呼出；托盘菜单「退出」可彻底退出程序"))
-                        .show();
-                }
-                rebuild_tray(app);
+                refresh_slot_tray(app, slot);
             }
             _ => {
                 let _ = win.show();
                 let _ = win.set_focus();
                 sync_state(app, slot, |s| s.visible = true);
                 logger::log(app, slot, "sys", "窗口已显示");
+                refresh_slot_tray(app, slot);
             }
         }
     }
@@ -479,6 +450,7 @@ pub fn show_slot(app: &AppHandle, slot: u32, visible: bool) {
             let _ = win.hide();
         }
         sync_state(app, slot, |s| s.visible = visible);
+        refresh_slot_tray(app, slot);
     }
 }
 
@@ -494,32 +466,19 @@ pub fn set_topmost(app: &AppHandle, slot: u32, top: bool) -> Result<(), String> 
     }
 }
 
-/// 旋转：交换宽高（横竖屏切换）并刷新页面
+/// 旋转：交换宽高并刷新页面（还原原版：仅改内存不落盘，重启后回到配置分辨率）
 pub fn rotate_slot(app: &AppHandle, slot: u32) -> Result<(f64, f64), String> {
-    let (w, h) = {
-        let state: tauri::State<AppState> = app.state();
-        let mut cfg = state.config.lock().unwrap();
-        let s = cfg
-            .slots
-            .iter_mut()
-            .find(|s| s.slot == slot)
-            .ok_or("帐号配置不存在")?;
-        std::mem::swap(&mut s.width, &mut s.height);
-        s.screen_model = if s.screen_model == "vertical" {
-            "horizontal".into()
-        } else {
-            "vertical".into()
-        };
-        let size = (s.width, s.height);
-        config::save(&cfg).ok();
-        size
-    };
+    let (w, h) = slot_size(app, slot);
+    let swapped = (h, w);
+    sync_state(app, slot, |s| s.size_override = Some(swapped));
 
     if let Some(win) = app.get_webview_window(&slot_label(slot)) {
-        let _ = win.set_size(tauri::LogicalSize::new(w, h));
+        let _ = win.set_size(tauri::LogicalSize::new(swapped.0, swapped.1));
+        // 还原原版 myWebView.go(location)：刷新当前页
         let _ = win.eval("try{location.reload()}catch(e){}");
     }
-    Ok((w, h))
+    logger::log(app, slot, "sys", &format!("旋转：{} x {}（仅本会话生效）", swapped.0, swapped.1));
+    Ok(swapped)
 }
 
 /// 导航（云手机首页 / 地址栏跳转）
@@ -574,13 +533,31 @@ fn sync_state(app: &AppHandle, slot: u32, f: impl FnOnce(&mut SlotState)) {
 }
 
 // ---------------------------------------------------------------------------
-// 托盘（动态：只显示运行中的帐号，与原版每窗口托盘一致）
+// 托盘（还原原版：每个云手机窗口创建自己的 win.util.tray）
+// 菜单：显示(●)/隐藏(●)/分隔/打开设置（新开帐号）/打开日志目录/分隔/退出
+// （● 前缀标记当前状态，与原版 appConfig.windowShown 判断一致；左键无动作也与原版一致）
 // ---------------------------------------------------------------------------
 
-pub fn create_tray(app: &AppHandle) -> Result<(), tauri::Error> {
-    let menu = tray_menu(app)?;
-    let mut builder = TrayIconBuilder::with_id("main-tray")
-        .tooltip("云手机保活")
+/// 为某个槽位窗口创建独立托盘图标
+pub fn create_slot_tray(app: &AppHandle, slot: u32) {
+    let menu = match slot_tray_menu(app, slot) {
+        Ok(m) => m,
+        Err(e) => {
+            logger::log(app, slot, "error", &format!("托盘创建失败（不影响保活）：{e}"));
+            return;
+        }
+    };
+    let platform_label = {
+        let state: tauri::State<AppState> = app.state();
+        let cfg = state.config.lock().unwrap();
+        cfg.slots
+            .iter()
+            .find(|s| s.slot == slot)
+            .map(|s| config::platform_preset(&s.platform).label.to_string())
+            .unwrap_or_else(|| "云手机保活".into())
+    };
+    let mut builder = TrayIconBuilder::with_id(format!("tray-{slot}"))
+        .tooltip(&platform_label)
         .menu(&menu)
         .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()));
 
@@ -588,94 +565,54 @@ pub fn create_tray(app: &AppHandle) -> Result<(), tauri::Error> {
         builder = builder.icon(icon.clone());
     }
 
-    let tray = builder.build(app)?;
-    tray.on_tray_icon_event(|tray, event| {
-        // 左键点击托盘 → 显示设置窗口（与原版行为一致）
-        if let TrayIconEvent::Click {
-            button: MouseButton::Left,
-            button_state: MouseButtonState::Up,
-            ..
-        } = event
-        {
-            let app = tray.app_handle().clone();
-            show_login(&app, None);
+    match builder.build(app) {
+        Ok(tray) => {
+            app.state::<AppState>().trays.lock().unwrap().insert(slot, tray);
+            logger::log(app, slot, "sys", "托盘已创建（本窗口）");
         }
-    });
-    *app.state::<AppState>().tray.lock().unwrap() = Some(tray);
-    Ok(())
+        Err(e) => {
+            logger::log(app, slot, "error", &format!("托盘创建失败（不影响保活）：{e}"));
+        }
+    }
 }
 
-/// 重建托盘菜单（窗口启停后调用）。退出流程中跳过：关闭窗口的 Destroyed 事件
-/// 会级联触发本函数，退出时持锁重建菜单存在卡死风险，且毫无必要。
-pub fn rebuild_tray(app: &AppHandle) {
-    if app.state::<AppState>().quitting.load(Ordering::SeqCst) {
-        return;
-    }
-    let menu = match tray_menu(app) {
+/// 窗口显隐后刷新该槽位托盘菜单的 ● 状态标记
+fn refresh_slot_tray(app: &AppHandle, slot: u32) {
+    let menu = match slot_tray_menu(app, slot) {
         Ok(m) => m,
         Err(_) => return,
     };
     let state: tauri::State<AppState> = app.state();
-    let guard = state.tray.lock().unwrap();
-    if let Some(tray) = guard.as_ref() {
+    let trays = state.trays.lock().unwrap();
+    if let Some(tray) = trays.get(&slot) {
         let _ = tray.set_menu(Some(menu));
     }
 }
 
-fn tray_menu(app: &AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
-    let open_settings = MenuItemBuilder::with_id("open-settings", "打开设置（新开帐号）").build(app)?;
-    let show_all = MenuItemBuilder::with_id("show-all", "显示全部窗口").build(app)?;
-    let hide_all = MenuItemBuilder::with_id("hide-all", "隐藏全部窗口").build(app)?;
+fn slot_tray_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
+    let visible = {
+        let state: tauri::State<AppState> = app.state();
+        let states = state.states.lock().unwrap();
+        states.get(&slot).map(|s| s.visible).unwrap_or(true)
+    };
+    // 还原原版菜单文案：appConfig.windowShown ? "&● 显示" : "&   显示"
+    let show = MenuItemBuilder::with_id(format!("show-{slot}"), if visible { "● 显示" } else { "　 显示" }).build(app)?;
+    let hide = MenuItemBuilder::with_id(format!("hide-{slot}"), if !visible { "● 隐藏" } else { "　 隐藏" }).build(app)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
-    let probe = MenuItemBuilder::with_id("probe-all", "DOM 采样（全部窗口）").build(app)?;
+    let open_settings = MenuItemBuilder::with_id("open-settings", "打开设置（新开帐号）").build(app)?;
     let logdir = MenuItemBuilder::with_id("open-logdir", "打开日志目录").build(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
 
-    let mut mb = MenuBuilder::new(app)
+    let menu = MenuBuilder::new(app)
+        .item(&show)
+        .item(&hide)
+        .item(&sep1)
         .item(&open_settings)
-        .item(&show_all)
-        .item(&hide_all)
-        .item(&sep1);
-
-    // 运行中的帐号：子菜单 显示/隐藏/关闭（还原原版每窗口托盘）
-    let slots = {
-        let state: tauri::State<AppState> = app.state();
-        let cfg = state.config.lock().unwrap();
-        let states = state.states.lock().unwrap();
-        (1..=9u32)
-            .filter(|n| states.get(n).map(|s| s.running).unwrap_or(false))
-            .map(|n| {
-                let name = cfg
-                    .slots
-                    .iter()
-                    .find(|s| s.slot == n)
-                    .map(|s| {
-                        if s.name.trim().is_empty() {
-                            format!("帐号{n}")
-                        } else {
-                            s.name.trim().to_string()
-                        }
-                    })
-                    .unwrap_or_else(|| format!("帐号{n}"));
-                (n, name)
-            })
-            .collect::<Vec<_>>()
-    };
-
-    for (n, name) in &slots {
-        let sub = SubmenuBuilder::new(app, format!("{name}（Ctrl+{n}）"))
-            .item(&MenuItemBuilder::with_id(format!("show-{n}"), "显示").build(app)?)
-            .item(&MenuItemBuilder::with_id(format!("hide-{n}"), "隐藏").build(app)?)
-            .item(&MenuItemBuilder::with_id(format!("close-{n}"), "关闭窗口（退出保活）").build(app)?)
-            .build()?;
-        mb = mb.item(&sub);
-    }
-    if !slots.is_empty() {
-        mb = mb.separator();
-    }
-
-    let menu = mb.item(&probe).item(&logdir).item(&sep2).item(&quit).build()?;
+        .item(&logdir)
+        .item(&sep2)
+        .item(&quit)
+        .build()?;
     Ok(menu)
 }
 

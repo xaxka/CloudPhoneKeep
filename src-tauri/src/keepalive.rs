@@ -1,22 +1,28 @@
-use crate::config::SlotConfig;
+use crate::config::{self, SlotConfig};
 
 /// 内嵌的触点光标 PNG（28×28，青圈白点，热点居中），避免引用任何第三方资源
 const CURSOR_PNG_B64: &str = include_str!("../assets/cursor.b64");
 
 /// 生成注入到云手机页面的保活初始化脚本。
 ///
+/// 定时器结构忠实还原原版 web.aardio 的双定时器：
+///   stopTimer 1000ms → 本脚本 stopCheck()：退出检测(#tabbar/.title-bar) + 到期「知道了」
+///   runTimer  5000ms → 本脚本 actionTick()：重连/进入/确认弹窗点击 + 解锁区/进入云机
+/// （窗口隐藏时由 Rust 看门狗每 1 秒 eval __CPK_TICK__ 驱动，tick 内自行按周期分流）
+///
 /// 按槽位配置的 platform 分流（unicom 联通 / mobile 移动）：
 /// 联通：试用弹窗(.try-content/.try-btn)、无法连接(.phone-dialog-wrap)、
 ///       详情页进入云机(.detail-info-container/.enter-intance)、到期(.van-dialog__confirm)、
 ///       退回首页检测(.title-bar)
-/// 移动：解锁区进入云机(.unlocked/.enter-intance)、重连按钮按文字匹配、
-///       到期(.van-dialog__confirm)、退回 H5 首页检测(#tabbar)
-/// 通用：注入触点光标、屏蔽右键、可选 Cookie 注入、空闲鼠标活动模拟、
+/// 移动：解锁区进入云机(.unlocked/.enter-intance)、重连/进入/确认按钮按文字包含匹配、
+///       到期「知道了」(.van-dialog__confirm)、退回 H5 首页检测(#tabbar)
+/// 通用：注入触点光标、屏蔽右键、Cookie 一次性按平台域注入、空闲鼠标活动模拟、
 ///       状态通过 127.0.0.1 回环 HTTP 上报给 Rust 侧（绕过跨域与远程 IPC 限制）
 pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
+    // 还原原版 string.lines(cookieStr, ";\s*")：同时兼容「a=b; c=d」单行与「a=b」多行
     let cookies: Vec<String> = cfg
         .cookies
-        .lines()
+        .split([';', '\n'])
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect();
@@ -38,6 +44,8 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
         "customCursor": cfg.custom_cursor,
         "blockContextMenu": cfg.block_context_menu,
         "cookies": cookies,
+        // 还原原版 CDP Network.setCookies 的 domain 参数（.139.com / .wo-adv.cn）
+        "cookieDomain": config::platform_cookie_domain(&platform),
     });
 
     let cfg_json = serde_json::to_string(&inject).unwrap_or_else(|_| "{}".into());
@@ -49,6 +57,9 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
   window.__CPK_INSTALLED__ = true;
   var CFG = {cfg_json};
   var PORT = CFG.port, SLOT = CFG.slot;
+
+  var state = {{ ticks: 0, clicks: 0, last: '', diagAt: {{}}, lastUrl: '', wasExited: false, stopDone: false, n: 0 }};
+  window.__CPK_STATE__ = state;
 
   function send(status){{
     try{{
@@ -69,7 +80,7 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
         method: 'POST',
         headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }},
         body: body, mode: 'no-cors', cache: 'no-store'
-      }}).catch(function(){{}});
+      }}).catch(function(e){{}});
     }} catch(e){{}}
   }}
 
@@ -144,24 +155,31 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     if (on) {{ addrInput.value = location.href; addrInput.focus(); addrInput.select(); }}
   }};
 
+  // ===== Cookie 注入（还原原版：go() 之前经 CDP Network.setCookies 一次性写入，
+  // domain=.139.com / .wo-adv.cn）。这里在文档开始时一次性写入，随后刷新一次，
+  // 让首个真正加载的请求就携带 Cookie（等价于原版「导航前生效」）。
+  // 不做周期性重刷：避免覆盖用户会话中更新的登录态。 =====
   if (CFG.cookies && CFG.cookies.length) {{
-    var applyCookies = function(){{
+    try {{
+      var wrote = 0;
       for (var i = 0; i < CFG.cookies.length; i++){{
         var line = CFG.cookies[i];
         var eq = line.indexOf('=');
         if (eq < 1) continue;
         var name = line.slice(0, eq).trim();
         var value = line.slice(eq + 1).split(';')[0].trim();
-        var kv = name + '=' + value + '; path=/';
-        try {{ document.cookie = kv; }} catch(e){{}}
+        document.cookie = name + '=' + value + '; path=/; domain=' + CFG.cookieDomain;
+        wrote++;
       }}
-    }};
-    applyCookies();
-    setInterval(applyCookies, 60000);
+      if (wrote && !sessionStorage.getItem('cpk_ck')) {{
+        sessionStorage.setItem('cpk_ck', '1');
+        diag('sys', 'Cookie 已按域 ' + CFG.cookieDomain + ' 注入 ' + wrote + ' 条，刷新使首个请求即携带');
+        location.reload();
+        return; // 本文档终止执行，刷新后的文档继续安装保活脚本
+      }}
+      diag('sys', 'Cookie 注入（本次导航）' + wrote + ' 条 domain=' + CFG.cookieDomain);
+    }} catch(e){{}}
   }}
-
-  var state = {{ ticks: 0, clicks: 0, last: '', diagAt: {{}}, lastUrl: '', wasExited: false }};
-  window.__CPK_STATE__ = state;
 
   function vis(el){{ return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length)); }}
   function q(s){{ try {{ return document.querySelector(s); }} catch(e) {{ return null; }} }}
@@ -176,23 +194,58 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     return null;
   }}
 
-  function tick(){{
-    state.ticks++;
-    // 路由变化检测（SPA 页面改版定位的第一线索）
-    if (state.lastUrl !== location.href) {{
-      state.lastUrl = location.href;
-      diag('nav', '进入 ' + location.href.slice(0, 300) + ' title=' + (document.title || '').slice(0, 40));
+  // ===== stopTimer 语义（原版 1000ms）：退出/到期检测 =====
+  // 还原原版：任一分支触发后 topTimerStatus=true，stopTimer 停用（本会话内只检测一次）
+  function stopCheck(){{
+    if (state.stopDone) return;
+    if (CFG.platform === 'mobile') {{
+      var tb = q('#tabbar');
+      if (vis(tb)) {{
+        state.stopDone = true; state.wasExited = true;
+        diag('exit', '已退出云机（检测到 #tabbar 首页特征），DOM 采样: ' + domSample());
+        send('exited');
+        return;
+      }}
+      var cf = q('.van-dialog__confirm');
+      var cfTxt = vis(cf) ? ((cf.innerText || '').trim()) : '';
+      if (cfTxt && cfTxt.indexOf('知道了') >= 0) {{
+        state.stopDone = true;
+        cf.click();
+        state.clicks++;
+        diag('click', 'expired(知道了) -> ' + desc(cf));
+        send('expired');
+      }}
+    }} else {{
+      if (vis(q('.title-bar'))) {{
+        state.stopDone = true; state.wasExited = true;
+        diag('exit', '已退出云机（检测到 .title-bar 首页特征），DOM 采样: ' + domSample());
+        send('exited');
+        return;
+      }}
+      var cf2 = q('.van-dialog__confirm');
+      if (vis(cf2)) {{
+        state.stopDone = true;
+        cf2.click();
+        state.clicks++;
+        diag('click', 'expired(confirm) -> ' + desc(cf2));
+        send('expired');
+      }}
     }}
+  }}
+
+  // ===== runTimer 语义（原版 5000ms）：保活动作 =====
+  function actionTick(){{
+    state.ticks++;
     if (!CFG.keepAlive) {{ send('paused'); return; }}
     var acted = '';
-    var exited = false;
+    var exitedNow = state.wasExited;
     // 选择器命中摘要：beat 日志核心数据，全 0 = 疑似改版
     var hits = [];
     try {{
       if (CFG.platform === 'mobile') {{
         // ===== 移动云手机（cloudphoneh5.buy.139.com，逻辑忠实还原原作者 aardio 源码）=====
-        // .van-dialog__confirm 是万能确认按钮，按按钮文字区分语义：
-        //   重连/重新连接→断线重连  进入→超时重连  确认/知道了→到期与提示
+        // .van-dialog__confirm 万能确认按钮，按文字包含匹配（还原原版 string.keywords）：
+        //   含 重连 → 断线重连；含 进入 → 超时重进；含 确认 → 到期/提示确认
         var cf = q('.van-dialog__confirm');
         var cfTxt = vis(cf) ? ((cf.innerText || '').trim()) : '';
         var ul = q('.unlocked');
@@ -205,19 +258,19 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
         );
 
         if (cfTxt) {{
-          if (cfTxt.indexOf('重连') >= 0 || cfTxt.indexOf('重新连接') >= 0) {{
+          if (cfTxt.indexOf('重连') >= 0) {{
             cf.click(); acted = 'retry'; diag('click', 'retry(confirm) -> ' + desc(cf));
           }} else if (cfTxt.indexOf('进入') >= 0) {{
             cf.click(); acted = 'retry'; diag('click', 're-enter(confirm) -> ' + desc(cf));
-          }} else if (cfTxt === '确认' || cfTxt === '知道了') {{
-            cf.click(); acted = 'expired-confirm'; diag('click', 'confirm(' + cfTxt + ') -> ' + desc(cf));
+          }} else if (cfTxt.indexOf('确认') >= 0) {{
+            cf.click(); acted = 'confirm'; diag('click', 'confirm -> ' + desc(cf));
           }} else {{
             // 未知文字的确认弹窗：记录下来供改版分析，不盲点
             diag('miss', 'confirm 按钮出现未知文字 "' + cfTxt + '"，未点击');
           }}
         }}
 
-        // 解锁区：原作者直接点击 .unlocked 容器本身（整个区域可点）
+        // 解锁区：原作者直接点击 .unlocked 容器本身（文字含 进入 即可点）
         if (!acted && vis(ul) && ((ul.innerText || '').indexOf('进入') >= 0)) {{
           ul.click(); acted = 'enter'; diag('click', 'enter(unlocked) -> ' + desc(ul));
         }}
@@ -226,9 +279,6 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
         if (!acted && vis(ei) && ((ei.innerText || '').indexOf('进入云机') >= 0)) {{
           ei.click(); acted = 'enter'; diag('click', 'enter(enter-intance) -> ' + desc(ei));
         }}
-
-        // 检测到 #tabbar = 退回 H5 首页，即云机已退出
-        exited = vis(q('#tabbar'));
       }} else {{
         // ===== 联通云手机（uphone.wo-adv.cn）=====
         // 1. 试用弹窗 -> 立即启用云手机
@@ -255,37 +305,25 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
           if (eb2) {{ eb2.click(); if (!acted) acted = 'enter'; diag('click', 'enter -> ' + desc(eb2)); }}
           else diag('miss', '.detail-info-container 可见但未找到进入按钮，疑似改版 | ' + desc(dic));
         }}
-        // 4. 到期/提示弹窗 -> 知道了
-        var cf2 = q('.van-dialog__confirm');
-        hits.push('van-confirm:' + (vis(cf2) ? 1 : 0), 'title-bar:' + (vis(q('.title-bar')) ? 1 : 0));
-        if (vis(cf2)) {{ cf2.click(); if (!acted) acted = 'expired-confirm'; }}
-        // 5. 检测到 .title-bar = 退回首页，即云机已退出
-        exited = vis(q('.title-bar'));
+        hits.push('title-bar:' + (vis(q('.title-bar')) ? 1 : 0));
       }}
 
       // 状态上报
-      if (exited) {{
-        if (!state.wasExited) {{
-          state.wasExited = true;
-          diag('exit', '已退出云机（检测到退回首页特征），DOM 采样: ' + domSample());
-        }}
+      if (exitedNow) {{
         send('exited');
+      }} else if (acted) {{
+        state.clicks++;
+        send(acted);
       }} else {{
-        state.wasExited = false;
-        if (acted) {{
-          state.clicks++;
-          send(acted);
-        }} else {{
-          send('alive');
-          // 心跳采样：每 20 tick 记录一次选择器命中全貌
-          if (state.ticks % 20 === 1) {{
-            diag('beat', 'tick=' + state.ticks + ' url=' + location.pathname.slice(0, 60) +
-                 ' platform=' + CFG.platform + ' hits=[' + hits.join(',') + '] 全0即疑似改版');
-          }}
+        send('alive');
+        // 心跳采样：每 20 次动作周期记录一次选择器命中全貌
+        if (state.ticks % 20 === 1) {{
+          diag('beat', 'tick=' + state.ticks + ' url=' + location.pathname.slice(0, 60) +
+               ' platform=' + CFG.platform + ' hits=[' + hits.join(',') + '] 全0即疑似改版');
         }}
       }}
 
-      // 6. 空闲时模拟轻微鼠标活动，防止会话闲置断开
+      // 空闲时模拟轻微鼠标活动，防止会话闲置断开
       if (CFG.simulateActivity && !acted) {{
         try {{
           document.dispatchEvent(new MouseEvent('mousemove', {{
@@ -302,15 +340,26 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     }}
   }}
 
-  // 手动诊断入口：前端「DOM 采样」按钮触发，输出当前页面结构快照
+  // ===== 双定时器调度（还原原版 runTimer/stopTimer 周期）=====
+  function tick(){{
+    // 路由变化检测（SPA 页面改版定位的第一线索）
+    if (state.lastUrl !== location.href) {{
+      state.lastUrl = location.href;
+      diag('nav', '进入 ' + location.href.slice(0, 300) + ' title=' + (document.title || '').slice(0, 40));
+    }}
+    stopCheck();                                    // 原版 stopTimer：每 1 秒
+    var every = Math.max(1, Math.round((CFG.intervalMs || 5000) / 1000));
+    if (++state.n >= every) {{ state.n = 0; actionTick(); }}  // 原版 runTimer：每 5 秒
+  }}
+
+  // 手动诊断入口：输出当前页面结构快照
   window.__CPK_PROBE__ = function(){{
     diag('probe', '手动采样: ' + domSample());
-    tick();
+    actionTick();
     return 'ok';
   }};
 
   // ===== 页面加载诊断：白屏/加载失败时给出可见的重试入口，不再让用户对着空白页 =====
-  // 页面运行异常统一上报（改版/脚本错误排查的第一手证据）
   window.addEventListener('error', function(ev){{
     try {{ diag('error', '页面异常: ' + (ev.message || '') + ' @' + (ev.filename || '').slice(0, 80) + ':' + (ev.lineno || 0)); }} catch(e){{}}
   }}, true);
@@ -349,10 +398,10 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
   }}, 15000);
 
   window.__CPK_TICK__ = tick;
-  // 页面内定时器（窗口可见时生效）
-  setInterval(function(){{ try {{ tick(); }} catch(e){{}} }}, CFG.intervalMs || 5000);
+  // 页面内定时器（窗口可见时生效，1 秒驱动；隐藏时由 Rust 看门狗驱动）
+  setInterval(function(){{ try {{ tick(); }} catch(e){{}} }}, 1000);
   send('installed');
-  diag('sys', '保活脚本已注入 platform=' + CFG.platform + ' interval=' + (CFG.intervalMs || 5000) + 'ms url=' + location.href.slice(0, 120));
+  diag('sys', '保活脚本已注入 platform=' + CFG.platform + ' 动作周期=' + (CFG.intervalMs || 5000) + 'ms 检测周期=1000ms url=' + location.href.slice(0, 120));
 }})();"#,
         cfg_json = cfg_json,
         __CPK_CURSOR__ = cursor_b64

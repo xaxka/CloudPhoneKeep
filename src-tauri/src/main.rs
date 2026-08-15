@@ -27,9 +27,9 @@ pub struct AppState {
     pub shortcut_ids: Mutex<HashMap<u32, u32>>,
     /// 当前聚焦的浏览器窗口槽位（Ctrl+U 地址栏作用目标）
     pub focused: Mutex<u32>,
-    /// 托盘句柄（窗口启停后重建菜单）
-    pub tray: Mutex<Option<tauri::tray::TrayIcon>>,
-    /// 正在退出：置位后不再重建托盘菜单，避免退出流程被卡死
+    /// 每个云手机窗口独立的托盘图标（还原原版：每个 webForm 各建一个 win.util.tray）
+    pub trays: Mutex<HashMap<u32, tauri::tray::TrayIcon>>,
+    /// 正在退出：置位后跳过收尾动作，避免退出流程被卡死
     pub quitting: AtomicBool,
 }
 
@@ -42,7 +42,7 @@ impl AppState {
             watchdogs: Mutex::new(HashMap::new()),
             shortcut_ids: Mutex::new(HashMap::new()),
             focused: Mutex::new(0),
-            tray: Mutex::new(None),
+            trays: Mutex::new(HashMap::new()),
             quitting: AtomicBool::new(false),
         }
     }
@@ -82,7 +82,6 @@ fn main() {
         .manage(AppState::new())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(browser::shortcut_handler)
@@ -93,8 +92,8 @@ fn main() {
             commands::get_slot,
             commands::launch_slot,
             commands::get_running,
-            commands::stop_slot,
-            commands::app_quit
+            commands::get_slot_size,
+            commands::set_slot_size
         ])
         .setup(|app| {
             // 启动即写日志：版本 / exe 目录 / 门户，保证 logs/ 目录与文件一定生成（可诊断性）
@@ -120,62 +119,20 @@ fn main() {
             // 启动本地回环上报服务（页面内脚本回传保活状态）
             report_server::spawn(app.handle().clone());
 
-            // 托盘（注意：老板键不再在启动时全局注册，改为按窗口注册，
-            // 多实例/二次启动时不会因热键冲突而崩溃）
-            browser::create_tray(app.handle())?;
-            logger::log(app.handle(), 0, "sys", "托盘已创建");
+            // 托盘不再全局创建：还原原版语义——每个云手机窗口启动时各建自己的托盘
+            // （见 browser.rs create_slot_tray）
 
             // 设置窗口已创建 = WebView2 运行时可用（它本身就是一个 WebView2 窗口）
             logger::log(app.handle(), 0, "sys", "设置窗口已创建，WebView2 运行时正常");
 
-            // 设置窗口关闭语义：
-            //   有云手机窗口在运行 → 弹窗让用户选择「退出程序」或「隐藏到托盘继续保活」
-            //   没有任何窗口      → 直接退出
+            // 设置窗口关闭语义（还原原版 login.aardio onClose → win.quitMessage）：
+            // 点 X 即退出整个程序
             if let Some(login) = app.get_webview_window("login") {
                 let win = login.clone();
                 login.on_window_event(move |e| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = e {
+                    if let tauri::WindowEvent::CloseRequested { .. } = e {
                         let app = win.app_handle().clone();
-                        let running: Vec<u32> = {
-                            let state: tauri::State<AppState> = app.state();
-                            let states = state.states.lock().unwrap();
-                            let mut v: Vec<u32> = states
-                                .iter()
-                                .filter(|(_, s)| s.running)
-                                .map(|(k, _)| *k)
-                                .collect();
-                            v.sort();
-                            v
-                        };
-                        if running.is_empty() {
-                            return; // 不阻止关闭 → 全部窗口关闭 → 进程退出
-                        }
-                        api.prevent_close();
-                        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
-                        let ok_app = app.clone();
-                        let ok_win = win.clone();
-                        app.dialog()
-                            .message(format!(
-                                "还有 {} 个云手机窗口正在保活（索引：{}）。\n\n确定 = 退出程序并停止全部保活\n取消 = 隐藏到托盘继续保活",
-                                running.len(),
-                                running
-                                    .iter()
-                                    .map(|n| n.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join("、")
-                            ))
-                            .title("退出 云手机保活？")
-                            .buttons(MessageDialogButtons::OkCancelCustom(
-                                "退出程序".into(),
-                                "隐藏到托盘".into(),
-                            ))
-                            .show(move |ok| {
-                                if ok {
-                                    browser::quit_all(&ok_app);
-                                } else {
-                                    let _ = ok_win.hide();
-                                }
-                            });
+                        browser::quit_all(&app);
                     }
                 });
             }

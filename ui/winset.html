@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8" />
+  <title>窗口设置</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+      font-size: 12px;
+      background: #f0f0f0;
+      user-select: none;
+    }
+
+    .dlg {
+      padding: 10px 12px;
+    }
+
+    .lbl {
+      margin: 8px 0 4px;
+      color: #333;
+    }
+
+    .ctl {
+      box-sizing: border-box;
+      width: 100%;
+      height: 26px;
+      font-size: 13px;
+      font-family: inherit;
+      border: 1px solid #999;
+      padding: 0 5px;
+      background: #fff;
+      outline: none;
+    }
+
+    .ctl:focus {
+      border-color: #0078d7;
+    }
+
+    #btn-save {
+      margin-top: 12px;
+      width: 100%;
+      height: 32px;
+      font-size: 14px;
+      font-weight: 700;
+      font-family: inherit;
+      background: #e1e1e1;
+      border: 1px solid #adadad;
+      color: #000;
+      cursor: pointer;
+    }
+
+    #btn-save:hover { background: #e5f1fb; border-color: #0078d7; }
+    #btn-save:active { background: #cce4f7; border-color: #005499; }
+
+    #msg {
+      margin-top: 6px;
+      color: #b3261e;
+      min-height: 16px;
+    }
+
+    .foot {
+      margin-top: 6px;
+      text-align: center;
+      font-size: 11px;
+      color: #777;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="dlg">
+    <div class="lbl">分辨率(宽)</div>
+    <input id="w" class="ctl" type="number" min="280" max="4096" />
+
+    <div class="lbl">分辨率(高)</div>
+    <input id="h" class="ctl" type="number" min="400" max="4096" />
+
+    <div id="msg"></div>
+
+    <button id="btn-save">保存</button>
+    <div class="foot">仅本次会话生效，关闭程序后恢复（还原原版行为）</div>
+  </div>
+
+  <script>
+    (function () {
+      var el = function (id) { return document.getElementById(id); };
+      function invoke(cmd, args) {
+        return window.__TAURI__.core.invoke(cmd, args || {});
+      }
+
+      // 从自身窗口标签 winset-{slot} 取槽位号（Tauri 全局 API）
+      var slot = 0;
+      function findSlot(tries) {
+        try {
+          var w = window.__TAURI__.window;
+          if (w && w.getCurrentWebviewWindow) {
+            var m = String(w.getCurrentWebviewWindow().label).match(/winset-(\d)/);
+            if (m) slot = parseInt(m[1], 10);
+            loadSize();
+            return;
+          }
+        } catch (e) {}
+        if (tries > 40) { loadSize(); return; }
+        setTimeout(function () { findSlot(tries + 1); }, 120);
+      }
+      findSlot(0);
+
+      function loadSize() {
+        invoke("get_slot_size", { slot: slot }).then(function (size) {
+          el("w").value = size[0];
+          el("h").value = size[1];
+        }).catch(function (err) {
+          el("msg").textContent = "读取失败：" + String(err);
+        });
+      }
+
+      el("btn-save").addEventListener("click", function () {
+        el("msg").textContent = "";
+        var w = parseFloat(el("w").value);
+        var h = parseFloat(el("h").value);
+        invoke("set_slot_size", { slot: slot, w: w, h: h })
+          .then(function () { el("msg").textContent = ""; })
+          .catch(function (err) { el("msg").textContent = String(err); });
+      });
+      document.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") el("btn-save").click();
+      });
+    })();
+  </script>
+</body>
+
+</html>

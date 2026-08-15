@@ -2,7 +2,8 @@ use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 上报状态中视为"自动点击动作"的集合（用于统计点击次数）
-pub const ACTION_STATUSES: [&str; 4] = ["try-enable", "retry", "enter", "expired-confirm"];
+/// 视为「主动点击」的上报状态（计入 clicks 统计）
+pub const ACTION_STATUSES: [&str; 5] = ["try-enable", "retry", "enter", "confirm", "expired"];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,8 +15,8 @@ pub struct SlotState {
     pub last_status: String,
     pub last_at: i64,
     pub clicks: u64,
-    /// 本次会话是否已提示过「隐藏到托盘」通知（避免每次隐藏都打扰）
-    pub hide_notified: bool,
+    /// 会话内分辨率覆盖（旋转/窗口设置只改内存，不落盘——还原原版语义）
+    pub size_override: Option<(f64, f64)>,
 }
 
 impl SlotState {
@@ -28,7 +29,7 @@ impl SlotState {
             last_status: "未启动".to_string(),
             last_at: 0,
             clicks: 0,
-            hide_notified: false,
+            size_override: None,
         }
     }
 }

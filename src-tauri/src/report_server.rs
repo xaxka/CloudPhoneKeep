@@ -191,7 +191,7 @@ fn on_report(app: &tauri::AppHandle, slot: u32, status: &str) {
                         ));
                     }
                 }
-                "expired-confirm" => {
+                "expired" => {
                     notify = Some((
                         "时间已到期".into(),
                         format!("帐号槽位 {slot} 云手机使用时间已到期"),
