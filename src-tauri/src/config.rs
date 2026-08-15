@@ -3,6 +3,41 @@ use std::path::PathBuf;
 use tauri::Manager;
 
 pub const DEFAULT_WEB_URI: &str = "https://uphone.wo-adv.cn/cloudphone/#/home";
+/// 移动云手机 H5 入口
+pub const MOBILE_WEB_URI: &str = "https://cloudphoneh5.buy.139.com";
+
+/// 支持的平台预设
+pub struct PlatformPreset {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub web_uri: &'static str,
+    pub width: f64,
+    pub height: f64,
+}
+
+pub const PLATFORMS: [PlatformPreset; 2] = [
+    PlatformPreset {
+        id: "unicom",
+        label: "联通云手机",
+        web_uri: DEFAULT_WEB_URI,
+        width: 405.0,
+        height: 720.0,
+    },
+    PlatformPreset {
+        id: "mobile",
+        label: "移动云手机",
+        web_uri: MOBILE_WEB_URI,
+        width: 414.0,
+        height: 896.0,
+    },
+];
+
+pub fn platform_preset(id: &str) -> &'static PlatformPreset {
+    PLATFORMS
+        .iter()
+        .find(|p| p.id == id)
+        .unwrap_or(&PLATFORMS[0])
+}
 /// 更新检查默认指向本仓库自己的 GitHub Releases。
 /// 仅获取版本信息用于提示，绝不自动下载或执行任何文件。
 pub const DEFAULT_UPDATE_URL: &str =
@@ -18,6 +53,8 @@ pub struct SlotConfig {
     pub enabled: bool,
     /// 帐号名称（建议填手机号），用于缓存目录隔离
     pub name: String,
+    /// 平台：unicom 联通云手机 / mobile 移动云手机
+    pub platform: String,
     /// 浏览器地址
     pub web_uri: String,
     /// 自定义 Cookie（每行 name=value; 可选 domain=...）
@@ -46,6 +83,7 @@ impl Default for SlotConfig {
             slot: 1,
             enabled: false,
             name: String::new(),
+            platform: "unicom".to_string(),
             web_uri: DEFAULT_WEB_URI.to_string(),
             cookies: String::new(),
             width: 405.0,
@@ -147,7 +185,11 @@ pub fn load(app: &tauri::AppHandle) -> AppConfig {
             // 补齐缺失槽位，保持 1..=9
             let mut slots: Vec<SlotConfig> = Vec::new();
             for i in 1..=9u32 {
-                if let Some(found) = cfg.slots.iter().find(|s| s.slot == i).cloned() {
+                if let Some(mut found) = cfg.slots.iter().find(|s| s.slot == i).cloned() {
+                    // 兼容旧配置：platform 为空时回落到 unicom
+                    if found.platform.trim().is_empty() {
+                        found.platform = "unicom".into();
+                    }
                     slots.push(found);
                 } else {
                     let mut s = SlotConfig::default();

@@ -16,6 +16,12 @@ const STATUS_TEXT = {
   "error": ["脚本异常", "err"],
 };
 
+/* 与 Rust 端 config::PLATFORMS 保持一致 */
+const PLATFORM_PRESETS = {
+  unicom: { label: "联通云手机", webUri: "https://uphone.wo-adv.cn/cloudphone/#/home", width: 405, height: 720 },
+  mobile: { label: "移动云手机", webUri: "https://cloudphoneh5.buy.139.com", width: 414, height: 896 },
+};
+
 const tauri = () => window.__TAURI__;
 let config = null;
 let states = {};
@@ -109,7 +115,15 @@ function renderSlotCard(s) {
     </div>
 
     <div class="field-grid">
-      <div class="field span2">
+      <div class="field">
+        <label>平台
+          <select data-k="platform">
+            <option value="unicom" ${(s.platform || "unicom") === "unicom" ? "selected" : ""}>联通云手机</option>
+            <option value="mobile" ${s.platform === "mobile" ? "selected" : ""}>移动云手机</option>
+          </select>
+        </label>
+      </div>
+      <div class="field">
         <label>缓存目录名 / 帐号标识（建议手机号，各窗口数据隔离）
           <input type="text" data-k="name" value="${escapeAttr(s.name)}" placeholder="帐号${s.slot}" />
         </label>
@@ -191,6 +205,7 @@ function bindCardInputs(card, s) {
     screenModel: "screenModel", cookies: "cookies", intervalMs: "intervalMs",
     keepAlive: "keepAlive", enabled: "enabled", simulateActivity: "simulateActivity",
     customCursor: "customCursor", blockContextMenu: "blockContextMenu",
+    platform: "platform",
   };
   card.querySelectorAll("[data-k]").forEach((el) => {
     const k = el.dataset.k;
@@ -202,6 +217,19 @@ function bindCardInputs(card, s) {
       else if (el.type === "number") v = Number(el.value) || 0;
       else v = el.value;
       s[field] = v;
+      // 切换平台：联动浏览器地址与默认分辨率
+      if (k === "platform") {
+        const preset = PLATFORM_PRESETS[v] || PLATFORM_PRESETS.unicom;
+        s.webUri = preset.webUri;
+        s.width = preset.width;
+        s.height = preset.height;
+        s.screenModel = "vertical";
+        card.querySelector('[data-k="webUri"]').value = preset.webUri;
+        card.querySelector('[data-k="width"]').value = preset.width;
+        card.querySelector('[data-k="height"]').value = preset.height;
+        card.querySelector('[data-k="screenModel"]').value = "vertical";
+        toast(`帐号${s.slot} 已切换为 ${preset.label}，注意需重新登录`);
+      }
       markDirty();
     });
   });

@@ -52,7 +52,8 @@ pub fn start_slot(app: &AppHandle, slot: u32) -> Result<(), String> {
     } else {
         cfg.name.trim().to_string()
     };
-    let title = format!("联通云手机 - {name} - 老板键 Ctrl+{slot}");
+    let platform_label = config::platform_preset(&cfg.platform).label;
+    let title = format!("{platform_label} - {name} - 老板键 Ctrl+{slot}");
 
     let mut builder = WebviewWindowBuilder::new(app, slot_label(slot), WebviewUrl::External(web_url))
         .title(&title)

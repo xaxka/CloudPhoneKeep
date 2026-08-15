@@ -5,14 +5,14 @@ const CURSOR_PNG_B64: &str = include_str!("../assets/cursor.b64");
 
 /// 生成注入到云手机页面的保活初始化脚本。
 ///
-/// 该脚本实现的能力：
-/// 1. 等待并自动点击「试用 / 立即启用云手机」弹窗（.try-content / .try-btn）
-/// 2. 「无法连接」弹窗自动点「再次尝试」（.phone-dialog-wrap）
-/// 3. 详情页自动点「进入云机」（.detail-info-container / .enter / .enter-intance）
-/// 4. 到期提示自动点「知道了」（.van-dialog__confirm）
-/// 5. 检测到 .title-bar（已退回首页=云机退出）→ 上报 exited
-/// 6. 注入触点光标、屏蔽右键、可选 Cookie 注入、空闲鼠标活动模拟
-/// 7. 状态通过 127.0.0.1 回环 HTTP 上报给 Rust 侧（绕过跨域与远程 IPC 限制）
+/// 按槽位配置的 platform 分流（unicom 联通 / mobile 移动）：
+/// 联通：试用弹窗(.try-content/.try-btn)、无法连接(.phone-dialog-wrap)、
+///       详情页进入云机(.detail-info-container/.enter-intance)、到期(.van-dialog__confirm)、
+///       退回首页检测(.title-bar)
+/// 移动：解锁区进入云机(.unlocked/.enter-intance)、重连按钮按文字匹配、
+///       到期(.van-dialog__confirm)、退回 H5 首页检测(#tabbar)
+/// 通用：注入触点光标、屏蔽右键、可选 Cookie 注入、空闲鼠标活动模拟、
+///       状态通过 127.0.0.1 回环 HTTP 上报给 Rust 侧（绕过跨域与远程 IPC 限制）
 pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     let cookies: Vec<String> = cfg
         .cookies
@@ -21,9 +21,16 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect();
 
+    let platform = if cfg.platform.trim().is_empty() {
+        "unicom".to_string()
+    } else {
+        cfg.platform.trim().to_string()
+    };
+
     let inject = serde_json::json!({
         "slot": cfg.slot,
         "port": port,
+        "platform": platform,
         "keepAlive": cfg.keep_alive,
         "intervalMs": cfg.interval_ms,
         "simulateActivity": cfg.simulate_activity,
@@ -99,30 +106,53 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     state.ticks++;
     if (!CFG.keepAlive) {{ send('paused'); return; }}
     var acted = '';
+    var exited = false;
     try {{
-      // 1. 试用弹窗 -> 立即启用云手机
-      if (vis(q('.try-content'))) {{
-        var b = q('.nut-popup--center .try-btn') || q('.try-btn') || findBtn(document.body, ['立即启用云手机']);
-        if (b) {{ b.click(); acted = 'try-enable'; }}
+      if (CFG.platform === 'mobile') {{
+        // ===== 移动云手机（cloudphoneh5.buy.139.com）=====
+        // 1. 详情页解锁区 -> 进入云机
+        if (vis(q('.unlocked')) || vis(q('.enter-intance'))) {{
+          var eb = q('.enter-intance') || q('.enter') || findBtn(document.body, ['进入云机', '进入']);
+          if (eb) {{ eb.click(); acted = 'enter'; }}
+        }}
+        // 2. 连接断开/重连弹窗 -> 按文字匹配重连按钮
+        if (!acted) {{
+          var rb = findBtn(document.body, ['重连', '重新连接', '再次尝试', '重试']);
+          if (rb) {{ rb.click(); acted = 'retry'; }}
+        }}
+        // 3. 到期/提示弹窗 -> 知道了
+        var cf = q('.van-dialog__confirm');
+        if (vis(cf)) {{ cf.click(); if (!acted) acted = 'expired-confirm'; }}
+        // 4. 检测到 #tabbar = 退回 H5 首页，即云机已退出
+        exited = vis(q('#tabbar'));
+      }} else {{
+        // ===== 联通云手机（uphone.wo-adv.cn）=====
+        // 1. 试用弹窗 -> 立即启用云手机
+        if (vis(q('.try-content'))) {{
+          var b = q('.nut-popup--center .try-btn') || q('.try-btn') || findBtn(document.body, ['立即启用云手机']);
+          if (b) {{ b.click(); acted = 'try-enable'; }}
+        }}
+        // 2. 无法连接 -> 再次尝试
+        var pdw = q('.phone-dialog-wrap');
+        if (vis(pdw)) {{
+          var rb2 = findBtn(pdw, ['再次尝试', '重试', '重新连接', '重新载入']);
+          if (rb2) {{ rb2.click(); if (!acted) acted = 'retry'; }}
+        }}
+        // 3. 详情页 -> 进入云机
+        var dic = q('.detail-info-container');
+        if (vis(dic)) {{
+          var eb2 = q('.enter-intance') || q('.enter') || findBtn(dic, ['进入云机', '进入', '确认', '重连']);
+          if (eb2) {{ eb2.click(); if (!acted) acted = 'enter'; }}
+        }}
+        // 4. 到期/提示弹窗 -> 知道了
+        var cf2 = q('.van-dialog__confirm');
+        if (vis(cf2)) {{ cf2.click(); if (!acted) acted = 'expired-confirm'; }}
+        // 5. 检测到 .title-bar = 退回首页，即云机已退出
+        exited = vis(q('.title-bar'));
       }}
-      // 2. 无法连接 -> 再次尝试
-      var pdw = q('.phone-dialog-wrap');
-      if (vis(pdw)) {{
-        var rb = findBtn(pdw, ['再次尝试', '重试', '重新连接', '重新载入']);
-        if (rb) {{ rb.click(); if (!acted) acted = 'retry'; }}
-      }}
-      // 3. 详情页 -> 进入云机
-      var dic = q('.detail-info-container');
-      if (vis(dic)) {{
-        var eb = q('.enter-intance') || q('.enter') || findBtn(dic, ['进入云机', '进入', '确认', '重连']);
-        if (eb) {{ eb.click(); if (!acted) acted = 'enter'; }}
-      }}
-      // 4. 到期/提示弹窗 -> 知道了
-      var cf = q('.van-dialog__confirm');
-      if (vis(cf)) {{ cf.click(); if (!acted) acted = 'expired-confirm'; }}
 
-      // 5. 状态上报
-      if (vis(q('.title-bar'))) {{
+      // 状态上报
+      if (exited) {{
         send('exited');
       }} else if (acted) {{
         state.clicks++;
