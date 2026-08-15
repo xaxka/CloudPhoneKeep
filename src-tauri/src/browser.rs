@@ -333,8 +333,10 @@ pub fn apply_slot_size(app: &AppHandle, slot: u32, w: f64, h: f64) -> Result<(),
     Ok(())
 }
 
-/// 彻底退出程序：置退出标志（跳过收尾动作，避免退出流程被卡死），
-/// 移除全部托盘、销毁全部窗口后退出进程（还原原版 win.quitMessage）。
+/// 彻底退出程序（还原原版 win.quitMessage 语义）：
+/// 1. 常规路径：移除托盘 → 销毁全部窗口 → app.exit(0)
+/// 2. 硬杀兜底：1.5 秒后进程仍未退出（插件/托盘/事件循环卡死）则 std::process::exit
+///    直接终止——保证「退出」在任何异常下都一定生效
 pub fn quit_all(app: &AppHandle) {
     if app
         .state::<AppState>()
@@ -344,6 +346,12 @@ pub fn quit_all(app: &AppHandle) {
         return; // 已在退出流程中，避免重复触发
     }
     logger::log(app, 0, "sys", "开始退出程序：销毁全部窗口");
+    // 硬杀兜底（selftest 模式下退出码为 98，可区分「靠兜底才退掉」）
+    let guard_code = app.state::<AppState>().force_exit_code.load(Ordering::SeqCst);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        std::process::exit(guard_code);
+    });
     // 移除全部托盘图标（还原原版退出前 tray.delete()）
     app.state::<AppState>().trays.lock().unwrap().clear();
     for (label, win) in app.webview_windows() {

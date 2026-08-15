@@ -6,10 +6,11 @@ mod config;
 mod keepalive;
 mod logger;
 mod report_server;
+mod selftest;
 mod state;
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicI32};
 use std::sync::Mutex;
 
 use tauri::Manager;
@@ -29,6 +30,8 @@ pub struct AppState {
     pub focused: Mutex<u32>,
     /// 每个云手机窗口独立的托盘图标（还原原版：每个 webForm 各建一个 win.util.tray）
     pub trays: Mutex<HashMap<u32, tauri::tray::TrayIcon>>,
+    /// 硬杀兜底的退出码（默认 0；selftest 置 98 以区分「靠兜底才退掉」）
+    pub force_exit_code: AtomicI32,
     /// 正在退出：置位后跳过收尾动作，避免退出流程被卡死
     pub quitting: AtomicBool,
 }
@@ -43,6 +46,7 @@ impl AppState {
             shortcut_ids: Mutex::new(HashMap::new()),
             focused: Mutex::new(0),
             trays: Mutex::new(HashMap::new()),
+            force_exit_code: AtomicI32::new(0),
             quitting: AtomicBool::new(false),
         }
     }
@@ -80,6 +84,14 @@ fn main() {
 
     tauri::Builder::default()
         .manage(AppState::new())
+        // 单实例必须最先注册：二次启动直接聚焦已有实例的设置窗口并退出，
+        // 防止双实例争抢同一 data 目录（WebView2 用户数据目录锁死 → 窗口创建失败）
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("login") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(
@@ -121,6 +133,11 @@ fn main() {
 
             // 托盘不再全局创建：还原原版语义——每个云手机窗口启动时各建自己的托盘
             // （见 browser.rs create_slot_tray）
+
+            // --selftest：CI 真实 Windows 环境自动化验证（窗口创建/页面加载/退出）
+            if selftest::enabled() {
+                selftest::spawn(app.handle().clone());
+            }
 
             // 设置窗口已创建 = WebView2 运行时可用（它本身就是一个 WebView2 窗口）
             logger::log(app.handle(), 0, "sys", "设置窗口已创建，WebView2 运行时正常");

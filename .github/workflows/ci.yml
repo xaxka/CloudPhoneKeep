@@ -34,6 +34,28 @@ jobs:
         if: github.event_name != 'pull_request'
         run: cargo build --release --manifest-path src-tauri/Cargo.toml
 
+      # 真实 Windows + WebView2 运行时验证：窗口创建 / 外部页面加载 / 退出能否退干净
+      - name: Selftest on real Windows
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        run: |
+          $exe = "src-tauri/target/release/CloudPhoneKeep.exe"
+          Write-Host "运行 $exe --selftest ..."
+          $p = Start-Process -FilePath $exe -ArgumentList "--selftest" -PassThru
+          if (-not $p.WaitForExit(100000)) {
+            Write-Host "::error::selftest 超时未退出（退出卡死）"
+            Stop-Process -Id $p.Id -Force
+            Get-Content "src-tauri/target/release/logs/selftest.log" -ErrorAction SilentlyContinue | Write-Host
+            exit 1
+          }
+          Write-Host "SELFTEST 退出码: $($p.ExitCode)"
+          $logDir = "src-tauri/target/release/logs"
+          if (Test-Path "$logDir/selftest.log") {
+            Write-Host "----- selftest.log -----"
+            Get-Content "$logDir/selftest.log" | Write-Host
+          }
+          if ($p.ExitCode -ne 0) { exit 1 }
+
       - name: Upload exe to Release
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2

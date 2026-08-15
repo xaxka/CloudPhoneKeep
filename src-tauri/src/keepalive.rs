@@ -61,6 +61,16 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
   var state = {{ ticks: 0, clicks: 0, last: '', diagAt: {{}}, lastUrl: '', wasExited: false, stopDone: false, n: 0 }};
   window.__CPK_STATE__ = state;
 
+  // document_start 阶段 body/head 可能尚未解析（初始化脚本在文档创建时执行）：
+  // 所有 DOM 挂载必须等就绪后进行，否则 appendChild 抛错会让整个脚本静默死亡
+  function whenDom(cb){{
+    if (document.body || document.documentElement) {{ cb(); return; }}
+    var t = setInterval(function(){{
+      try {{ if (document.body || document.documentElement) {{ clearInterval(t); cb(); }} }} catch(e){{}}
+    }}, 10);
+    setTimeout(function(){{ try{{clearInterval(t);}}catch(e){{}} }}, 30000);
+  }}
+
   function send(status){{
     try{{
       var qs = 'slot=' + SLOT + '&status=' + encodeURIComponent(status) + '&t=' + Date.now();
@@ -126,7 +136,7 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
       var st = document.createElement('style');
       st.type = 'text/css';
       st.innerHTML = '*{{cursor:url("data:image/png;base64,{__CPK_CURSOR__}") 14 14, default;}}';
-      (document.head || document.documentElement).appendChild(st);
+      whenDom(function(){{ (document.head || document.documentElement).appendChild(st); }});
     }} catch(e){{}}
   }}
 
@@ -149,7 +159,7 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     ev.stopPropagation();
   }});
   addrBar.appendChild(addrInput);
-  (document.body || document.documentElement).appendChild(addrBar);
+  whenDom(function(){{ (document.body || document.documentElement).appendChild(addrBar); }});
   window.__CPK_ADDR__ = function(on){{
     addrBar.style.display = on ? 'block' : 'none';
     if (on) {{ addrInput.value = location.href; addrInput.focus(); addrInput.select(); }}
