@@ -65,6 +65,10 @@ pub fn start_slot(app: &AppHandle, slot: u32) -> Result<(), String> {
 
     // Windows / macOS: 每个帐号独立数据目录，实现 Cookie/缓存隔离
     let profile = config::profile_dir(app, slot, &name);
+    let profile_name = profile
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
     builder = builder.data_directory(profile);
 
     let win = builder.build().map_err(|e| format!("创建窗口失败: {e}"))?;
@@ -73,7 +77,7 @@ pub fn start_slot(app: &AppHandle, slot: u32) -> Result<(), String> {
         app,
         slot,
         "sys",
-        &format!("窗口已启动 platform={} url={} profile={:?}", cfg.platform, url, profile.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()),
+        &format!("窗口已启动 platform={} url={} profile={profile_name}", cfg.platform, url),
     );
 
     // 关闭按钮 → 隐藏（保活继续），通过托盘/老板键再次显示
@@ -147,7 +151,7 @@ fn spawn_watchdog(app: AppHandle, slot: u32) {
     };
     if let Some(old) = old {
         old.abort();
-        logger::log(app, slot, "sys", "看门狗已替换（旧任务终止）");
+        logger::log(&app, slot, "sys", "看门狗已替换（旧任务终止）");
     }
 }
 
