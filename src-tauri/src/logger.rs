@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-/// 诊断日志：
-/// 1. 写入 exe目录/logs/cpk-YYYYMMDD.log，按天滚动，保留最近 7 天；
-///    每天只有一个日志文件——多实例同写一份（追加模式），不再按进程号分文件
-///    （此前每天可能留下一个从未写入的空文件）
-/// 2. 每行日志带 [pid=N] 前缀，多实例混写也能按进程过滤
-/// 3. 控制台模式（--console / CPK_CONSOLE=1）下同步镜像到终端
+/// 诊断日志（按目录分流）：
+/// 1. 帐号级（slot=N）：写到该帐号数据目录 AppData\LocalLow\CloudPhoneKeep\<目录名>\，
+///    与 WebView2 数据同目录——一个帐号一个目录，日志跟着数据走
+/// 2. 程序级（slot=0/sys）：写到数据根目录 AppData\LocalLow\CloudPhoneKeep\
+/// 3. 按天滚动，保留最近 7 天；每行日志带 [pid=N] 前缀，多实例混写也能按进程过滤
+/// 4. 控制台模式（--console / CPK_CONSOLE=1）下同步镜像到终端
 ///
 /// 格式：`HH:mm:ss.SSS [pid=N] [slot=N|sys] [level] message`
 /// level 约定：
@@ -37,7 +37,9 @@ struct Sink {
     day: String,
 }
 
-static SINK: Mutex<Option<Sink>> = Mutex::new(None);
+/// 每个目录一个缓存句柄（slot=0 → 数据根目录；slot=N → 帐号 N 的数据目录）
+static SINKS: Mutex<std::collections::HashMap<u32, Sink>> =
+    Mutex::new(std::collections::HashMap::new());
 
 /// UTC+8 毫秒时间 → (日期 YYYYMMDD, HH:mm:ss.SSS, 天序号)
 fn now_parts() -> (String, String, i64) {
@@ -72,11 +74,31 @@ fn day_str(z: i64) -> String {
     format!("{y:04}{m:02}{d:02}")
 }
 
-fn log_dir(_app: &tauri::AppHandle) -> PathBuf {
-    // 便携化：日志固定保存在 exe 目录下的 logs/（与原版程序数据目录行为一致）
-    let dir = crate::config::base_dir().join("logs");
-    let _ = fs::create_dir_all(&dir);
-    dir
+/// 某条日志的落盘目录：帐号级 → 该帐号数据目录；程序级(slot=0) → 数据根目录。
+/// 目录来自启动时的登记表（register_slot_dir），logger 不读 AppState/config 锁——
+/// 任何「持着配置锁写日志」的调用路径都不会死锁
+static SLOT_DIRS: Mutex<std::collections::HashMap<u32, PathBuf>> =
+    Mutex::new(std::collections::HashMap::new());
+
+/// 登记某槽位的日志目录（= 数据目录）。启动载入配置后登记全部已配置槽位，
+/// 窗口启动 / 数据目录兜底切换（-r2/-r3）时更新
+pub fn register_slot_dir(slot: u32, dir: PathBuf) {
+    if slot == 0 {
+        return;
+    }
+    SLOT_DIRS.lock().unwrap().insert(slot, dir);
+}
+
+fn log_dir(slot: u32) -> PathBuf {
+    if slot == 0 {
+        return crate::config::base_dir();
+    }
+    SLOT_DIRS
+        .lock()
+        .unwrap()
+        .get(&slot)
+        .cloned()
+        .unwrap_or_else(crate::config::base_dir)
 }
 
 /// 清理过期日志（仅在天切换时触发一次）。
@@ -123,30 +145,31 @@ fn date_to_days(s: &str) -> Result<i64, ()> {
     Ok(era * 146_097 + doe - 719_468)
 }
 
-/// 追加一行日志（线程安全，文件句柄缓存复用）
-fn append(app: &tauri::AppHandle, line: &str) {
-    let dir = log_dir(app);
+/// 追加一行日志（线程安全，每个目录缓存一个句柄）
+fn append(slot: u32, line: &str) {
+    let dir = log_dir(slot);
     let (day, _, days) = now_parts();
     let path = dir.join(format!("cpk-{day}.log"));
 
-    let mut guard = SINK.lock().unwrap();
-    let need_reopen = match guard.as_ref() {
+    let mut sinks = SINKS.lock().unwrap();
+    let need_reopen = match sinks.get(&slot) {
         Some(s) => s.day != day,
         None => true,
     };
     if need_reopen {
         if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path) {
-            *guard = Some(Sink { file: f, day: day.clone() });
+            sinks.insert(slot, Sink { file: f, day: day.clone() });
             cleanup(&dir, days);
         }
     }
-    if let Some(s) = guard.as_mut() {
+    if let Some(s) = sinks.get_mut(&slot) {
         let _ = s.file.write_all(line.as_bytes());
     }
 }
 
-/// 统一入口：写文件（+ 控制台模式时镜像到终端）
-pub fn log(app: &tauri::AppHandle, slot: u32, level: &str, msg: &str) {
+/// 统一入口：写文件（+ 控制台模式时镜像到终端）。
+/// app 参数仅为兼容既有调用点保留（落盘目录由登记表决定），不读任何状态锁
+pub fn log(_app: &tauri::AppHandle, slot: u32, level: &str, msg: &str) {
     let msg: String = msg.chars().take(4000).collect();
     let (_, ts, _) = now_parts();
     let pid = std::process::id();
@@ -155,7 +178,7 @@ pub fn log(app: &tauri::AppHandle, slot: u32, level: &str, msg: &str) {
     if CONSOLE_MIRROR.load(Ordering::Relaxed) {
         eprintln!("{line}");
     }
-    append(app, &format!("{line}\n"));
+    append(slot, &format!("{line}\n"));
 }
 
 #[cfg(test)]

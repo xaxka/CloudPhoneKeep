@@ -4,7 +4,7 @@
 //!   3. 退出能退干净（quit_all 后 7 秒内进程必须消失，1.5 秒硬杀兜底触发则以 98 区分）
 //!
 //! 由 CI（windows-latest，自带 WebView2 Evergreen 运行时）运行，结果写入
-//! exe目录/logs/selftest.log，退出码：
+//! 数据根目录 selftest.log，退出码：
 //!   0=全部通过；20=对照窗口创建失败；21=门户窗口创建失败；
 //!   22=启动成功后设置窗口未被隐藏（「点击进入设置不消失」回归）
 //!   30=对照页面无加载证据；31=门户页面无加载证据（对照通过说明是站点可达性问题）
@@ -24,8 +24,7 @@ pub fn enabled() -> bool {
 
 fn out(app: &tauri::AppHandle, line: &str) {
     eprintln!("[selftest] {line}");
-    let dir = config::base_dir().join("logs");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = config::base_dir();
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -36,21 +35,32 @@ fn out(app: &tauri::AppHandle, line: &str) {
     logger::log(app, 0, "sys", &format!("[selftest] {line}"));
 }
 
-/// 读取运行日志（cpk-*.log）全文
+/// 读取运行日志（cpk-*.log）全文：数据根目录（程序级）+ 一层子目录（各帐号数据目录）
 fn read_run_log() -> String {
-    let dir = config::base_dir().join("logs");
     let mut s = String::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
+    let root = config::base_dir();
+    collect_logs(&root, &mut s);
+    if let Ok(entries) = std::fs::read_dir(&root) {
         for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with("cpk-") && name.ends_with(".log") {
-                if let Ok(c) = std::fs::read_to_string(e.path()) {
-                    s.push_str(&c);
-                }
+            if e.path().is_dir() {
+                collect_logs(&e.path(), &mut s);
             }
         }
     }
     s
+}
+
+fn collect_logs(dir: &std::path::Path, out: &mut String) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("cpk-") && name.ends_with(".log") {
+                if let Ok(c) = std::fs::read_to_string(e.path()) {
+                    out.push_str(&c);
+                }
+            }
+        }
+    }
 }
 
 /// 页面加载证据：注入脚本上报过 [nav]（任意 URL 变化）或「页面加载正常」

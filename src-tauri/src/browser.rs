@@ -109,6 +109,8 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
     };
 
     let profile = config::profile_dir(slot, &name);
+    // 日志目录登记更新（改名重进 / 新帐号时以本次目录为准）
+    logger::register_slot_dir(slot, profile.clone());
     // 旧版目录命名（slot-N-名字）一次性迁移为 data/名字，尽量保住已有登录态
     if let Some(msg) = config::migrate_legacy_profile(slot, &name) {
         logger::log(app, slot, "sys", &msg);
@@ -154,7 +156,7 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
             .min_inner_size(280.0, 400.0)
             .resizable(true)
             .initialization_script(&init_script)
-            // 每个帐号独立数据目录（Cookie/缓存隔离），保存在 exe 目录 data/ 下
+            // 每个帐号独立数据目录（Cookie/缓存隔离），保存在 AppData\LocalLow\CloudPhoneKeep\<目录名>
             .data_directory(profile.clone())
             // 页面加载事件落盘（debug 级）：「窗口开了但白屏/加载不出来」时，
             // 据此分辨是导航根本没开始（网络/站点问题）还是加载完了但渲染异常
@@ -200,7 +202,7 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
                                 "error",
                                 &format!("数据目录被占用（{e}）：尝试清扫残留 WebView2 进程后重试"),
                             );
-                            if crate::kill_zombie_webview2(app) {
+                            if crate::kill_zombie_webview2(app, &profile) {
                                 // 被杀进程的文件句柄释放需要一点时间，稍等再重试
                                 std::thread::sleep(std::time::Duration::from_millis(800));
                                 continue;
@@ -209,6 +211,8 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
                         // 第二步：换用新数据目录重试（原登录态留在旧目录，可能需重新登录）
                         let suffix = if attempt == 1 { "-r2" } else { "-r3" };
                         let fresh = config::profile_dir_with_suffix(slot, &name, suffix);
+                        // 日志跟着新目录走
+                        logger::register_slot_dir(slot, fresh.clone());
                         logger::log(
                             app,
                             slot,
@@ -326,10 +330,10 @@ fn slot_of_label(label: &str) -> u32 {
 }
 
 /// 原生菜单栏（每个窗口独立，id 带槽位后缀）。
-/// 还原原版 aardio 主菜单五项：云手机首页/旋转/窗口置顶/设置/检查更新（无退出项）。
+/// 还原原版 aardio 主菜单五项：首页/旋转/窗口置顶/设置/检查更新（无退出项）。
 fn build_window_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
     MenuBuilder::new(app)
-        .item(&MenuItemBuilder::with_id(format!("home-{slot}"), "云手机首页").build(app)?)
+        .item(&MenuItemBuilder::with_id(format!("home-{slot}"), "首页").build(app)?)
         .item(&MenuItemBuilder::with_id(format!("rotate-{slot}"), "旋转").build(app)?)
         .item(&MenuItemBuilder::with_id(format!("top-{slot}"), "窗口置顶").build(app)?)
         .item(&MenuItemBuilder::with_id(format!("settings-{slot}"), "窗口设置").build(app)?)
@@ -363,7 +367,6 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
     // 全局项
     match id {
         "open-settings" => return show_login(app, None),
-        "open-logdir" => return open_log_dir(app),
         "quit" => {
             quit_all(app);
             return;
@@ -376,7 +379,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
         _ => {}
     }
 
-    // 带槽位后缀的项：home-3 / rotate-3 / top-3 / settings-3 / show-3 / hide-3
+    // 带槽位后缀的项：home-3 / rotate-3 / top-3 / settings-3 / show-3 / hide-3 / data-3
     if let Some((action, n)) = id.rsplit_once('-') {
         if let Ok(slot) = n.parse::<u32>() {
             match action {
@@ -412,6 +415,8 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 "settings" => open_winset(app, slot),
                 "show" => show_slot(app, slot, true),
                 "hide" => show_slot(app, slot, false),
+                // 打开该帐号的数据目录（含 WebView2 数据与本帐号日志）
+                "data" => open_slot_data_dir(app, slot),
                 _ => {}
             }
         }
@@ -643,7 +648,16 @@ pub fn set_topmost(app: &AppHandle, slot: u32, top: bool) -> Result<(), String> 
         win.set_always_on_top(top)
             .map_err(|e| format!("置顶设置失败: {e}"))?;
         sync_state(app, slot, |s| s.topmost = top);
-        logger::log(app, slot, "sys", if top { "窗口已置顶" } else { "已取消置顶" });
+        logger::log(
+            app,
+            slot,
+            "sys",
+            if top {
+                "窗口已置顶（悬浮于其他窗口之上；再次点击「窗口置顶」取消）"
+            } else {
+                "已取消置顶"
+            },
+        );
         Ok(())
     } else {
         Err("窗口未启动".into())
@@ -721,10 +735,24 @@ pub fn toggle_address_bar(app: &AppHandle) {
     }
 }
 
-fn open_log_dir(app: &AppHandle) {
+/// 打开某帐号的数据目录（AppData\LocalLow\CloudPhoneKeep\<目录名>，含日志；
+/// 查不到配置时打开数据根目录）
+fn open_slot_data_dir(app: &AppHandle, slot: u32) {
     use tauri_plugin_opener::OpenerExt;
-    let dir = crate::config::base_dir().join("logs");
-    let _ = std::fs::create_dir_all(&dir);
+    let name = {
+        let state: tauri::State<AppState> = app.state();
+        let cfg = state.config.lock().unwrap();
+        cfg.slots
+            .iter()
+            .find(|s| s.slot == slot)
+            .map(|s| s.name.clone())
+            .unwrap_or_default()
+    };
+    let dir = if name.trim().is_empty() {
+        config::base_dir()
+    } else {
+        config::profile_dir(slot, &name)
+    };
     let _ = app
         .opener()
         .open_path(dir.to_string_lossy().to_string(), None::<&str>);
@@ -738,8 +766,8 @@ fn sync_state(app: &AppHandle, slot: u32, f: impl FnOnce(&mut SlotState)) {
 
 // ---------------------------------------------------------------------------
 // 托盘（还原原版：每个云手机窗口创建自己的 win.util.tray）
-// 菜单：显示(●)/隐藏(●)/分隔/打开设置（新开帐号）/打开日志目录/分隔/退出
-// （● 前缀标记当前状态，与原版 appConfig.windowShown 判断一致；左键无动作也与原版一致）
+// 菜单：显示(●)/隐藏(●)/分隔/打开设置（新开帐号）/打开数据目录/分隔/退出
+// （● = 当前状态；左键单击=打开窗口，右键=弹出菜单）
 // ---------------------------------------------------------------------------
 
 /// 为某个槽位窗口创建独立托盘图标
@@ -763,7 +791,30 @@ pub fn create_slot_tray(app: &AppHandle, slot: u32) {
     let mut builder = TrayIconBuilder::with_id(format!("tray-{slot}"))
         .tooltip(&platform_label)
         .menu(&menu)
-        .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()));
+        // 左键不再弹菜单（默认 true）：左键=打开窗口，右键=弹出菜单
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))
+        .on_tray_icon_event(|tray, event| {
+            // 左键单击（抬起）= 显示并聚焦该托盘对应的云手机窗口
+            if let tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle().clone();
+                let n = tray
+                    .id()
+                    .as_ref()
+                    .strip_prefix("tray-")
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+                if (1..=9).contains(&n) {
+                    logger::log(&app, n, "sys", "托盘左键 → 显示窗口");
+                    show_slot(&app, n, true);
+                }
+            }
+        });
 
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
@@ -799,12 +850,13 @@ fn slot_tray_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tauri:
         let states = state.states.lock().unwrap();
         states.get(&slot).map(|s| s.visible).unwrap_or(true)
     };
-    // 还原原版菜单文案：appConfig.windowShown ? "&● 显示" : "&   显示"
-    let show = MenuItemBuilder::with_id(format!("show-{slot}"), if visible { "● 显示" } else { "　 显示" }).build(app)?;
-    let hide = MenuItemBuilder::with_id(format!("hide-{slot}"), if !visible { "● 隐藏" } else { "　 隐藏" }).build(app)?;
+    // 当前状态用 ● 标记（○ = 未处于该状态）。原版用「&● 显示 / 空格 显示」对齐，
+    // 全角空格在部分系统渲染成多余空格，改用 ○ 天然等宽对齐
+    let show = MenuItemBuilder::with_id(format!("show-{slot}"), if visible { "● 显示" } else { "○ 显示" }).build(app)?;
+    let hide = MenuItemBuilder::with_id(format!("hide-{slot}"), if !visible { "● 隐藏" } else { "○ 隐藏" }).build(app)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let open_settings = MenuItemBuilder::with_id("open-settings", "打开设置（新开帐号）").build(app)?;
-    let logdir = MenuItemBuilder::with_id("open-logdir", "打开日志目录").build(app)?;
+    let datadir = MenuItemBuilder::with_id(format!("data-{slot}"), "打开数据目录").build(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
 
@@ -813,7 +865,7 @@ fn slot_tray_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tauri:
         .item(&hide)
         .item(&sep1)
         .item(&open_settings)
-        .item(&logdir)
+        .item(&datadir)
         .item(&sep2)
         .item(&quit)
         .build()?;
@@ -840,6 +892,7 @@ pub fn register_slot_shortcut(app: &AppHandle, slot: u32) -> Result<(), String> 
         .lock()
         .unwrap()
         .insert(sc.id(), slot);
+    logger::log(app, slot, "sys", &format!("老板键 {code} 已注册（全局热键：按一下隐藏窗口，再按一下显示）"));
     Ok(())
 }
 
@@ -896,6 +949,12 @@ pub fn shortcut_handler(
         let map = state.shortcut_ids.lock().unwrap();
         map.get(&id).copied()
     };
+    // 触发即留痕：老板键「没反应」时，凭日志能立刻区分
+    // 「热键没注册上/被别的程序占了」还是「触发但切换逻辑有问题」
+    if let Some(n) = slot {
+        let desc = if n == 0 { "Ctrl+U 地址栏".to_string() } else { format!("老板键 Ctrl+{n}") };
+        logger::log(app, n, "sys", &format!("全局热键触发：{desc}"));
+    }
     match slot {
         Some(0) => toggle_address_bar(app),
         Some(n) => toggle_slot(app, n),

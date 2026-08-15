@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "CloudPhoneKeep",
-  "version": "1.7.2",
+  "version": "1.8.0",
   "identifier": "com.xixka.cloudphonekeep",
   "build": {
     "frontendDist": "../ui"
@@ -14,7 +14,7 @@
         "title": "设置",
         "url": "login.html",
         "width": 330,
-        "height": 496,
+        "height": 440,
         "resizable": false,
         "maximizable": false,
         "center": true

@@ -1,4 +1,4 @@
-use crate::config::{self, SlotConfig};
+use crate::config::SlotConfig;
 
 /// 内嵌的触点光标 PNG（26×26，热点居中 13,13）。安卓官方风格触点指示器：
 /// Android 品牌绿(#3DDC84)主圆环 + 外层淡绿光晕 + 白色半透明触点面，
@@ -21,17 +21,9 @@ const CURSOR_PNG_B64: &str = include_str!("../assets/cursor.b64");
 ///       到期「知道了」(.van-dialog__confirm)、退回 H5 首页检测(#tabbar)
 /// 通用：触点光标（默认关闭，系统默认指针）、屏蔽右键、鼠标→触摸操控模拟
 ///       （WebView2 里页面自带的模拟器不加载，鼠标拖不动云机——移植页面同款 TouchEmulator 补上）、
-///       Cookie 一次性按平台域注入、空闲鼠标活动模拟、
+///       空闲鼠标活动模拟、
 ///       状态通过 127.0.0.1 回环 HTTP 上报给 Rust 侧（绕过跨域与远程 IPC 限制）
 pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
-    // 还原原版 string.lines(cookieStr, ";\s*")：同时兼容「a=b; c=d」单行与「a=b」多行
-    let cookies: Vec<String> = cfg
-        .cookies
-        .split([';', '\n'])
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect();
-
     let platform = if cfg.platform.trim().is_empty() {
         "unicom".to_string()
     } else {
@@ -48,9 +40,6 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
         "simulateActivity": cfg.simulate_activity,
         "customCursor": cfg.custom_cursor,
         "blockContextMenu": cfg.block_context_menu,
-        "cookies": cookies,
-        // 还原原版 CDP Network.setCookies 的 domain 参数（.139.com / .wo-adv.cn）
-        "cookieDomain": config::platform_cookie_domain(&platform),
     });
 
     let cfg_json = serde_json::to_string(&inject).unwrap_or_else(|_| "{}".into());
@@ -262,32 +251,6 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     addrBar.style.display = on ? 'block' : 'none';
     if (on) {{ addrInput.value = location.href; addrInput.focus(); addrInput.select(); }}
   }};
-
-  // ===== Cookie 注入（还原原版：go() 之前经 CDP Network.setCookies 一次性写入，
-  // domain=.139.com / .wo-adv.cn）。这里在文档开始时一次性写入，随后刷新一次，
-  // 让首个真正加载的请求就携带 Cookie（等价于原版「导航前生效」）。
-  // 不做周期性重刷：避免覆盖用户会话中更新的登录态。 =====
-  if (CFG.cookies && CFG.cookies.length) {{
-    try {{
-      var wrote = 0;
-      for (var i = 0; i < CFG.cookies.length; i++){{
-        var line = CFG.cookies[i];
-        var eq = line.indexOf('=');
-        if (eq < 1) continue;
-        var name = line.slice(0, eq).trim();
-        var value = line.slice(eq + 1).split(';')[0].trim();
-        document.cookie = name + '=' + value + '; path=/; domain=' + CFG.cookieDomain;
-        wrote++;
-      }}
-      if (wrote && !sessionStorage.getItem('cpk_ck')) {{
-        sessionStorage.setItem('cpk_ck', '1');
-        diag('sys', 'Cookie 已按域 ' + CFG.cookieDomain + ' 注入 ' + wrote + ' 条，刷新使首个请求即携带');
-        location.reload();
-        return; // 本文档终止执行，刷新后的文档继续安装保活脚本
-      }}
-      diag('sys', 'Cookie 注入（本次导航）' + wrote + ' 条 domain=' + CFG.cookieDomain);
-    }} catch(e){{}}
-  }}
 
   function vis(el){{ return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length)); }}
   function q(s){{ try {{ return document.querySelector(s); }} catch(e) {{ return null; }} }}

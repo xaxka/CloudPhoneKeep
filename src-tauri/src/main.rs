@@ -54,7 +54,7 @@ impl AppState {
     }
 }
 
-/// panic 记录到 exe 目录 logs/panic-p{pid}.log（带进程号，多开互不覆盖），
+/// panic 记录到数据根目录 panic-p{pid}.log（带进程号，多开互不覆盖），
 /// 避免静默闪退无法排查
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
@@ -64,8 +64,7 @@ fn install_panic_hook() {
             std::process::id(),
             chrono_like_now()
         );
-        let dir = config::base_dir().join("logs");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = config::base_dir();
         let _ = std::fs::write(dir.join(format!("panic-p{}.log", std::process::id())), &msg);
         default_hook(info);
     }));
@@ -81,7 +80,7 @@ fn install_panic_hook() {
 /// 调用方直接换新数据目录兜底，绝不把另一个实例的窗口杀掉。
 /// 返回 true = 已执行清扫（可以原地重试）。
 #[cfg(windows)]
-pub fn kill_zombie_webview2(app: &tauri::AppHandle) -> bool {
+pub fn kill_zombie_webview2(app: &tauri::AppHandle, dir: &std::path::Path) -> bool {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -96,12 +95,16 @@ pub fn kill_zombie_webview2(app: &tauri::AppHandle) -> bool {
         return false;
     }
 
-    let marker = config::base_dir().join("data").to_string_lossy().to_string();
+    // 标记 = 被锁的数据目录本身（按帐号目录精确匹配，同实例其它帐号的活窗口不受影响）
+    // + 旧版 exe/data 目录（覆盖从旧版升级后残留进程仍锁着旧目录的场景）
+    let marker_new = dir.to_string_lossy().to_string();
+    let marker_legacy = config::exe_dir().join("data").to_string_lossy().to_string();
     // PowerShell 单引号字符串内的单引号需翻倍转义（路径含引号时仍安全）
-    let ps_marker = marker.replace('\'', "''");
+    let ps_new = marker_new.replace('\'', "''");
+    let ps_legacy = marker_legacy.replace('\'', "''");
     let script = format!(
-        "$m='{ps_marker}'.ToLower(); Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | \
-         Where-Object {{ $_.CommandLine -and $_.CommandLine.ToLower().Contains($m) }} | \
+        "$m1='{ps_new}'.ToLower(); $m2='{ps_legacy}'.ToLower(); Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | \
+         Where-Object {{ $_.CommandLine -and ($_.CommandLine.ToLower().Contains($m1) -or $_.CommandLine.ToLower().Contains($m2)) }} | \
          ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; Write-Output $_.ProcessId }}"
     );
 
@@ -135,7 +138,7 @@ pub fn kill_zombie_webview2(app: &tauri::AppHandle) -> bool {
 }
 
 #[cfg(not(windows))]
-pub fn kill_zombie_webview2(_app: &tauri::AppHandle) -> bool {
+pub fn kill_zombie_webview2(_app: &tauri::AppHandle, _dir: &std::path::Path) -> bool {
     true
 }
 
@@ -256,22 +259,26 @@ fn main() {
             commands::set_slot_size
         ])
         .setup(|app| {
-            // 启动即写日志：版本 / pid / exe 目录，保证 logs/ 目录与文件一定生成（可诊断性）。
-            // 每个进程实例一份独立日志文件（cpk-日期-p进程号.log），多开时互不混淆
+            // 启动即写日志：版本 / pid / 数据根目录与 exe 目录（保证数据目录与日志文件一定生成）
             logger::log(
                 app.handle(),
                 0,
                 "sys",
                 &format!(
-                    "程序启动 v{} pid={} exe目录={}",
+                    "程序启动 v{} pid={} 数据根目录={} exe目录={}",
                     app.package_info().version,
                     std::process::id(),
-                    config::base_dir().display()
+                    config::base_dir().display(),
+                    config::exe_dir().display()
                 ),
             );
 
-            // 载入配置（exe 目录下的 config.json，便携化）
+            // 载入配置（AppData\LocalLow\CloudPhoneKeep\config.json；旧版 exe 目录配置自动迁移）
             let cfg = config::load();
+            // 登记各帐号日志目录（= 数据目录），此后帐号级日志各自落盘
+            for s in cfg.slots.iter() {
+                logger::register_slot_dir(s.slot, config::profile_dir(s.slot, &s.name));
+            }
             {
                 let state: tauri::State<AppState> = app.state();
                 *state.config.lock().unwrap() = cfg;

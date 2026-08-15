@@ -46,7 +46,7 @@ jobs:
             Build: #${{ github.run_number }}
             时间: ${{ github.run_started_at }} UTC
 
-            单文件免安装：exe 放到任意目录运行，配置/数据/日志都生成在 exe 所在目录。
+            单文件免安装：exe 放到任意目录运行，配置/数据/日志都在 AppData\LocalLow\CloudPhoneKeep。
           files: |
             src-tauri/target/release/CloudPhoneKeep.exe
           prerelease: true

@@ -60,7 +60,6 @@
         el("name").value = cfg.name || "";
         el("width").value = cfg.width;
         el("height").value = cfg.height;
-        el("cookies").value = cfg.cookies || "";
       })
       .catch(function () {});
   }
@@ -119,7 +118,6 @@
       name: el("name").value.trim(),
       platform: platform,
       webUri: p.url,
-      cookies: el("cookies").value,
       width: parseFloat(el("width").value) || p.width,
       height: parseFloat(el("height").value) || p.height,
       keepAlive: true,
@@ -131,7 +129,7 @@
     };
     el("btn-go").disabled = true;
     dlog("点击「进入」：slot=" + cfg.slot + " 目录名=" + cfg.name + " 平台=" + platform +
-      " " + cfg.width + "x" + cfg.height + " cookie行数=" + (cfg.cookies ? cfg.cookies.split(/[\n;]/).filter(function (l) { return l.trim(); }).length : 0));
+      " " + cfg.width + "x" + cfg.height);
 
     // 还原原版 showWebForm：先立即隐藏设置窗口（loginForm.show(false)），再开云手机窗口
     hideSelf();

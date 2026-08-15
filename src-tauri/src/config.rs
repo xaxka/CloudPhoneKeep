@@ -38,25 +38,39 @@ pub fn platform_preset(id: &str) -> &'static PlatformPreset {
         .unwrap_or(&PLATFORMS[0])
 }
 
-/// Cookie 注入域（还原原版 CDP Network.setCookies 的 domain 参数）
-/// 移动 .139.com（源码明确指定）；联通 .wo-adv.cn（REVERSE.md 逆向结论）
-pub fn platform_cookie_domain(platform: &str) -> &'static str {
-    if platform == "unicom" {
-        ".wo-adv.cn"
-    } else {
-        ".139.com"
-    }
+// ---------------------------------------------------------------------------
+// 数据根目录：%USERPROFILE%\AppData\LocalLow\CloudPhoneKeep（标准 Windows 本地数据位）
+//   config.json           总配置（根目录）
+//   <目录名>/             每个帐号的浏览器数据目录（Cookie/缓存隔离，日志也在这里）
+//   cpk-*.log             程序级日志（根目录）；帐号级日志在各自数据目录内
+// ---------------------------------------------------------------------------
+
+/// 数据根目录：AppData\LocalLow\CloudPhoneKeep（不存在则创建）
+pub fn base_dir() -> PathBuf {
+    let dir = data_root();
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
-// ---------------------------------------------------------------------------
-// 便携化：全部数据保存在 exe 所在目录（与原版 aardio 程序一致）
-//   config.json        总配置
-//   data/slot-N-名字   每个帐号的浏览器数据目录（Cookie/缓存隔离）
-//   logs/cpk-*.log     诊断日志
-// ---------------------------------------------------------------------------
+/// 解析 LocalLow 路径。LocalLow 没有独立环境变量：优先从 USERPROFILE 拼，
+/// 失败时用 LOCALAPPDATA 的同级目录兜底
+fn data_root() -> PathBuf {
+    if let Some(p) = std::env::var_os("USERPROFILE") {
+        return PathBuf::from(p)
+            .join("AppData")
+            .join("LocalLow")
+            .join("CloudPhoneKeep");
+    }
+    if let Some(p) = std::env::var_os("LOCALAPPDATA") {
+        if let Some(parent) = PathBuf::from(p).parent() {
+            return parent.join("LocalLow").join("CloudPhoneKeep");
+        }
+    }
+    PathBuf::from(".")
+}
 
-/// exe 所在目录（便携根目录）
-pub fn base_dir() -> PathBuf {
+/// exe 所在目录（仅用于旧版便携数据的一次性迁移判断）
+pub fn exe_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
@@ -81,52 +95,66 @@ fn safe_name(name: &str) -> String {
         .collect::<String>()
 }
 
+/// 目录名（安全化）：填 1 → "1"；为空时兜底 slot-{N}
+fn slot_folder(slot: u32, name: &str) -> String {
+    let safe = safe_name(name);
+    if safe.is_empty() {
+        format!("slot-{slot}")
+    } else {
+        safe
+    }
+}
+
 /// 每个帐号独立的 WebView 数据目录（Cookie / 缓存隔离）。
-/// 目录名 = 用户填的「缓存数据目录名」本身（如填 1 → data/1），
-/// 与原版程序语义一致；为空时兜底 slot-{N}。
+/// 目录名 = 用户填的「缓存数据目录名」本身（如填 1 → AppData\LocalLow\CloudPhoneKeep\1），
+/// 与原版程序语义一致；日志也写在这个目录里。
 pub fn profile_dir(slot: u32, name: &str) -> PathBuf {
     profile_dir_with_suffix(slot, name, "")
 }
 
 /// 带后缀的数据目录（数据目录被残留进程锁定时的兜底新目录，如 1-r2）
 pub fn profile_dir_with_suffix(slot: u32, name: &str, suffix: &str) -> PathBuf {
-    let safe = safe_name(name);
-    let folder = if safe.is_empty() {
-        format!("slot-{slot}{suffix}")
-    } else {
-        format!("{safe}{suffix}")
-    };
-    let p = base_dir().join("data").join(folder);
-    std::fs::create_dir_all(&p).ok();
+    let folder = format!("{}{}", slot_folder(slot, name), suffix);
+    let p = base_dir().join(folder);
+    let _ = std::fs::create_dir_all(&p);
     p
 }
 
-/// 旧版目录命名（slot-N-名字）→ 新版（data/名字）一次性迁移，保留登录态。
-/// 返回 Some(结果描述) 表示尝试过迁移（成功或失败都写日志告知用户）。
+/// 旧版便携目录（exe 目录下 data/名字）一次性迁移到 LocalLow 数据根目录，
+/// 保留登录态。返回 Some(结果描述) 表示尝试过迁移（成功或失败都写日志告知用户）。
 pub fn migrate_legacy_profile(slot: u32, name: &str) -> Option<String> {
     let safe = safe_name(name);
-    let legacy_name = if safe.is_empty() {
-        format!("slot-{slot}")
+    let folder = slot_folder(slot, name);
+    // 两代旧命名都认：exe/data/slot-N-名字（更早）与 exe/data/名字（上一版）
+    let candidates = if safe.is_empty() {
+        vec![format!("slot-{slot}")]
     } else {
-        format!("slot-{slot}-{safe}")
+        vec![format!("{safe}"), format!("slot-{slot}-{safe}")]
     };
-    let legacy = base_dir().join("data").join(&legacy_name);
     let target = profile_dir(slot, name);
-    if !legacy.exists() || target.exists() {
-        return None; // 没有旧目录 / 新目录已在用，无需迁移
+    if target.exists() {
+        return None; // 新目录已在用，无需迁移
     }
-    let target_name = target
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    match std::fs::rename(&legacy, &target) {
-        Ok(_) => Some(format!(
-            "旧数据目录 {legacy_name} 已改名为 {target_name}（登录态保留）"
-        )),
-        Err(e) => Some(format!(
-            "旧数据目录 {legacy_name} 迁移失败（{e}），本次使用新目录 {target_name}，可能需重新登录一次"
-        )),
+    for legacy_name in candidates {
+        let legacy = exe_dir().join("data").join(&legacy_name);
+        if !legacy.exists() {
+            continue;
+        }
+        match std::fs::rename(&legacy, &target) {
+            Ok(_) => {
+                return Some(format!(
+                    "旧数据目录 {legacy_name} 已迁移到 {}（登录态保留）",
+                    target.display()
+                ))
+            }
+            Err(e) => {
+                return Some(format!(
+                    "旧数据目录 {legacy_name} 迁移失败（{e}，跨盘移动或被占用），本次使用新目录 {folder}，可能需重新登录一次"
+                ))
+            }
+        }
     }
+    None
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,8 +168,6 @@ pub struct SlotConfig {
     pub platform: String,
     /// 浏览器地址
     pub web_uri: String,
-    /// 自定义 Cookie（每行 name=value）
-    pub cookies: String,
     /// 窗口宽
     pub width: f64,
     /// 窗口高
@@ -166,7 +192,6 @@ impl Default for SlotConfig {
             name: String::new(),
             platform: "mobile".to_string(),
             web_uri: MOBILE_WEB_URI.to_string(),
-            cookies: String::new(),
             width: 414.0,
             height: 896.0,
             keep_alive: true,
@@ -224,6 +249,19 @@ pub fn load() -> AppConfig {
     if let Ok(text) = std::fs::read_to_string(&path) {
         if let Ok(cfg) = serde_json::from_str::<AppConfig>(&text) {
             return normalize(cfg);
+        }
+    }
+    // 新位置没有配置：把旧版（exe 目录）的 config.json 迁移过来（改名搬移，避免双份）
+    let legacy = exe_dir().join("config.json");
+    if legacy.exists() {
+        if std::fs::rename(&legacy, &path).is_err() {
+            // 跨盘等 rename 失败：退化为复制（旧文件残留不影响，新位置优先）
+            let _ = std::fs::copy(&legacy, &path);
+        }
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(cfg) = serde_json::from_str::<AppConfig>(&text) {
+                return normalize(cfg);
+            }
         }
     }
     AppConfig::with_slots()

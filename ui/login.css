@@ -59,12 +59,6 @@ body {
 
 .x { font-weight: 700; color: #444; }
 
-#cookies {
-  resize: none;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
 .hint {
   margin: 8px 0 4px;
   text-align: center;
