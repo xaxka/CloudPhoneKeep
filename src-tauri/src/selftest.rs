@@ -6,6 +6,7 @@
 //! 由 CI（windows-latest，自带 WebView2 Evergreen 运行时）运行，结果写入
 //! exe目录/logs/selftest.log，退出码：
 //!   0=全部通过；20=对照窗口创建失败；21=门户窗口创建失败；
+//!   22=启动成功后设置窗口未被隐藏（「点击进入设置不消失」回归）
 //!   30=对照页面无加载证据；31=门户页面无加载证据（对照通过说明是站点可达性问题）
 //!   97=quit_all 被阻塞；98=退出靠硬杀兜底才完成（仍算退出失败，需修）
 use crate::browser;
@@ -124,6 +125,20 @@ pub fn spawn(app: tauri::AppHandle) {
 
         // 阶段1：对照页（example.com，排除门户站点本身的可达性因素）
         let r1 = phase(&app, 9, "https://example.com/", "control", 15, 20, 30);
+
+        // 进入成功后设置窗口必须被隐藏（回归验证：用户反馈「点击进入设置窗口不消失」）
+        let login_visible = app
+            .get_webview_window("login")
+            .map(|w| w.is_visible().unwrap_or(true))
+            .unwrap_or(false);
+        if login_visible {
+            out(&app, "设置窗口未被隐藏（进入成功后仍可见）");
+            dump_tail(&app);
+            out(&app, "VERDICT: FAIL（设置窗口未隐藏，码 22）");
+            std::process::exit(22);
+        }
+        out(&app, "设置窗口已正确隐藏");
+
         // 阶段2：真实门户（移动云手机 H5）
         let r2 = phase(&app, 1, config::MOBILE_WEB_URI, "portal", 20, 21, 31);
 

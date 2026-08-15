@@ -61,6 +61,9 @@
         el("width").value = cfg.width;
         el("height").value = cfg.height;
         el("cookies").value = cfg.cookies || "";
+        // 滚轮滑动默认开；触点光标默认关（老配置里存过 true 的会回显勾选，可手动取消）
+        el("wheel").checked = cfg.wheelScroll !== false;
+        el("cursor").checked = !!cfg.customCursor;
       })
       .catch(function () {});
   }
@@ -111,7 +114,8 @@
       keepAlive: true,
       intervalMs: 5000,
       simulateActivity: true,
-      customCursor: true,
+      customCursor: el("cursor").checked,
+      wheelScroll: el("wheel").checked,
       blockContextMenu: true
     };
     el("btn-go").disabled = true;

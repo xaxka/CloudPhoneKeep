@@ -128,8 +128,33 @@ fn chrono_like_now() -> String {
     format!("day{days} {h:02}:{m:02}:{s:02}")
 }
 
+/// 把日志同时输出到启动本程序的终端：加 `--console` 参数或设 CPK_CONSOLE=1 启动。
+/// GUI 程序默认不挂控制台；AttachConsole 挂到父终端后，本程序日志（[debug] 等全部级别）
+/// 与 WebView2/Chromium 内部日志都会直接打在终端里，实时排查用
+#[cfg(windows)]
+fn attach_parent_console() {
+    let want = std::env::args().any(|a| a.eq_ignore_ascii_case("--console"))
+        || std::env::var_os("CPK_CONSOLE").is_some();
+    if !want {
+        return;
+    }
+    extern "system" {
+        fn AttachConsole(dw_process_id: u32) -> i32;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    let ok = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } != 0;
+    logger::set_console_mirror(true);
+    if !ok {
+        eprintln!("[cpk] --console：未能附加到终端（双击启动没有父终端），日志仍写 logs/ 目录");
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_parent_console() {}
+
 fn main() {
     install_panic_hook();
+    attach_parent_console();
 
     // WebView2/Chromium 级调试日志：让 msedgewebview2 把内部错误写进各数据目录，
     // 用于定位「窗口开了但页面空白/加载失败」这类 Rust 层完全看不到的问题。
@@ -210,7 +235,7 @@ fn main() {
                 app.handle(),
                 0,
                 "debug",
-                "WebView2 调试日志已开启（--enable-logging --v=1）：Chromium 级错误日志写在各 data/slot-*/ 目录内；设置环境变量 CPK_NETLOG=1 可再记录网络事件 netlog.json",
+                "WebView2 调试日志已开启（--enable-logging --v=1）：Chromium 级错误日志写在各 data/ 目录内；CPK_NETLOG=1 可再记录网络事件 netlog.json；加 --console 启动可把日志实时打到终端",
             );
 
             // 设置窗口关闭语义（还原原版 login.aardio onClose → win.quitMessage）：

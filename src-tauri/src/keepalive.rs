@@ -42,6 +42,7 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
         "intervalMs": cfg.interval_ms,
         "simulateActivity": cfg.simulate_activity,
         "customCursor": cfg.custom_cursor,
+        "wheelScroll": cfg.wheel_scroll,
         "blockContextMenu": cfg.block_context_menu,
         "cookies": cookies,
         // 还原原版 CDP Network.setCookies 的 domain 参数（.139.com / .wo-adv.cn）
@@ -138,6 +139,63 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
       st.innerHTML = '*{{cursor:url("data:image/png;base64,{__CPK_CURSOR__}") 14 14, default;}}';
       whenDom(function(){{ (document.head || document.documentElement).appendChild(st); }});
     }} catch(e){{}}
+  }}
+
+  // ===== 滚轮滑动优化（默认开）：云手机 H5 是触摸页面，鼠标滚轮常常滚不动。
+  // 策略：先找光标下的原生可滚容器代滚；没有则合成 touchstart/touchmove
+  // 交给页面自身的触摸滚动逻辑；两者都无则滚根元素。停滚 250ms 补 touchend 收尾 =====
+  if (CFG.wheelScroll) {{
+    var wsT = null, wsLast = 0;
+    function wsFire(type, t, el){{
+      try {{
+        var list = type === 'touchend' ? [] : [t];
+        el.dispatchEvent(new TouchEvent(type, {{touches: list, targetTouches: list, changedTouches: [t], bubbles: true, cancelable: true}}));
+        return true;
+      }} catch(e) {{ return false; }}
+    }}
+    function wsScrollable(el){{
+      try {{
+        for (var n = el; n && n.nodeType === 1 && n !== document.body; n = n.parentElement) {{
+          if (n.scrollHeight > n.clientHeight + 4) {{
+            var st = getComputedStyle(n);
+            if (st.overflowY === 'auto' || st.overflowY === 'scroll') return n;
+          }}
+        }}
+      }} catch(e){{}}
+      return null;
+    }}
+    document.addEventListener('wheel', function(ev){{
+      try {{
+        wsLast = Date.now();
+        if (ev.defaultPrevented) return;
+        var dy = ev.deltaY;
+        if (!dy) return;
+        var el = (ev.target && ev.target.nodeType === 1) ? ev.target : document.body;
+        if (!el) return;
+        // 1) 光标下有原生可滚容器：直接代滚（接管默认行为，不会双滚）
+        var sc = wsScrollable(el);
+        if (sc) {{ sc.scrollTop += dy; ev.preventDefault(); return; }}
+        // 2) 合成触摸事件：页面用 touch 实现的滚动（移动端 H5 常见）由此生效
+        if (typeof Touch !== 'undefined' && typeof TouchEvent !== 'undefined') {{
+          if (wsT && wsT.el !== el) {{ wsFire('touchend', wsT.t, wsT.el); wsT = null; }}
+          if (!wsT) {{
+            var t0 = new Touch({{identifier: 9527, target: el, clientX: ev.clientX, clientY: ev.clientY, radiusX: 12, radiusY: 12, rotationAngle: 0, force: 1}});
+            if (!wsFire('touchstart', t0, el)) return;
+            wsT = {{el: el, t: t0, y: ev.clientY}};
+          }}
+          var ny = wsT.y - dy * 0.9;
+          var t1 = new Touch({{identifier: 9527, target: wsT.el, clientX: ev.clientX, clientY: ny, radiusX: 12, radiusY: 12, rotationAngle: 0, force: 1}});
+          if (wsFire('touchmove', t1, wsT.el)) {{ wsT.t = t1; wsT.y = ny; ev.preventDefault(); }}
+          return;
+        }}
+        // 3) 兜底：滚根元素
+        var d = document.scrollingElement || document.documentElement;
+        if (d && d.scrollHeight > d.clientHeight + 4) {{ d.scrollTop += dy; ev.preventDefault(); }}
+      }} catch(e){{}}
+    }}, {{passive: false}});
+    setInterval(function(){{
+      if (wsT && Date.now() - wsLast > 250) {{ try {{ wsFire('touchend', wsT.t, wsT.el); }} catch(e){{}} wsT = null; }}
+    }}, 150);
   }}
 
   // 地址栏（Ctrl+U 呼出/收起，回车跳转，Esc 关闭）—— 还原原版 address.aardio

@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::Emitter;
 
@@ -20,6 +21,14 @@ use tauri::Emitter;
 ///   sys    Rust 侧窗口/看门狗生命周期事件
 
 const KEEP_DAYS: u64 = 7;
+
+/// 终端镜像开关：--console / CPK_CONSOLE=1 启动时置位，
+/// 之后每条日志在写文件的同时也打到启动它的终端里
+static CONSOLE_MIRROR: AtomicBool = AtomicBool::new(false);
+
+pub fn set_console_mirror(on: bool) {
+    CONSOLE_MIRROR.store(on, Ordering::Relaxed);
+}
 
 struct Sink {
     file: File,
@@ -110,12 +119,16 @@ fn append(app: &tauri::AppHandle, line: &str) {
     }
 }
 
-/// 统一入口：写文件 + 推送前端
+/// 统一入口：写文件 + 推送前端（+ 控制台模式时镜像到终端）
 pub fn log(app: &tauri::AppHandle, slot: u32, level: &str, msg: &str) {
     let msg: String = msg.chars().take(4000).collect();
     let (_, ts, _) = now_parts();
     let tag = if slot == 0 { "sys".into() } else { format!("slot={slot}") };
-    append(app, &format!("{ts} [{tag}] [{level}] {msg}\n"));
+    let line = format!("{ts} [{tag}] [{level}] {msg}");
+    if CONSOLE_MIRROR.load(Ordering::Relaxed) {
+        eprintln!("{line}");
+    }
+    append(app, &format!("{line}\n"));
     let _ = app.emit(
         "cpk://log",
         serde_json::json!({ "slot": slot, "level": level, "msg": msg, "at": crate::state::now_ms() }),

@@ -51,6 +51,7 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
         });
         // 托盘菜单的 ● 显隐标记需要同步刷新（此前漏掉，重开后标记停留在旧状态）
         refresh_slot_tray(app, slot);
+        hide_login(app);
         return Ok(Vec::new());
     }
 
@@ -106,6 +107,10 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
     };
 
     let profile = config::profile_dir(slot, &name);
+    // 旧版目录命名（slot-N-名字）一次性迁移为 data/名字，尽量保住已有登录态
+    if let Some(msg) = config::migrate_legacy_profile(slot, &name) {
+        logger::log(app, slot, "sys", &msg);
+    }
     let profile_name = profile
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -277,7 +282,28 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
     spawn_watchdog(app.clone(), slot);
     // 还原原版：每个窗口创建自己的托盘图标
     create_slot_tray(app, slot);
+    // 启动成功：隐藏设置窗口（还原原版 loginForm.show(false)）。
+    // 经主线程派发执行，避免从后台线程直接调窗口 API 的兼容性问题
+    hide_login(app);
     Ok(warnings)
+}
+
+/// 隐藏设置窗口（进入成功后）。派发到主线程执行；失败会写 error 日志，
+/// 不再静默吞掉（此前失败无感知，用户看到的就是「设置窗口不消失」）
+pub fn hide_login(app: &AppHandle) {
+    let h = app.clone();
+    let res = app.run_on_main_thread(move || {
+        if let Some(w) = h.get_webview_window("login") {
+            if let Err(e) = w.hide() {
+                logger::log(&h, 0, "error", &format!("设置窗口隐藏失败：{e}"));
+            }
+        } else {
+            logger::log(&h, 0, "error", "设置窗口隐藏失败：找不到 login 窗口");
+        }
+    });
+    if let Err(e) = res {
+        logger::log(app, 0, "error", &format!("设置窗口隐藏失败（主线程派发）：{e}"));
+    }
 }
 
 fn slot_of_label(label: &str) -> u32 {

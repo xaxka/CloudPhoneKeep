@@ -92,11 +92,8 @@ pub async fn launch_slot(app: AppHandle, cfg: SlotConfig) -> Result<Vec<String>,
         }
     };
 
-    // 启动成功后隐藏设置窗口（与原版一致：loginForm.show(false)）
-    logger::log(&app, cfg.slot, "debug", "窗口启动完成，隐藏设置窗口");
-    if let Some(win) = app.get_webview_window("login") {
-        let _ = win.hide();
-    }
+    // 设置窗口的隐藏由 start_slot_ex 成功路径统一处理（主线程派发，失败写日志）
+    logger::log(&app, cfg.slot, "debug", "launch_slot 流程完成");
     Ok(warnings)
 }
 
