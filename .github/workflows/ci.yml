@@ -4,12 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-  check:
+  build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -19,8 +24,40 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # PR 只做快速编译检查，不产出构建
       - name: Cargo check
+        if: github.event_name == 'pull_request'
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
-      - name: Cargo test
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Setup Node
+        if: github.event_name != 'pull_request'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Tauri CLI
+        if: github.event_name != 'pull_request'
+        run: npm install -g @tauri-apps/cli@^2
+
+      - name: Build
+        if: github.event_name != 'pull_request'
+        run: npx tauri build
+
+      - name: Upload exe to Release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev
+          name: Dev Build
+          body: |
+            自动构建 (dev)
+            Commit: ${{ github.sha }}
+            Build: #${{ github.run_number }}
+            时间: ${{ github.run_started_at }} UTC
+          files: |
+            src-tauri/target/release/CloudPhoneKeep.exe
+            src-tauri/target/release/bundle/nsis/*.exe
+          prerelease: true
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

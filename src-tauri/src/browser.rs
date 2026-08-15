@@ -108,17 +108,18 @@ fn spawn_watchdog(app: AppHandle, slot: u32) {
             .max(1000)
     };
 
+    let task_app = app.clone();
     let handle = tauri::async_runtime::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
         loop {
             ticker.tick().await;
-            let win = match app.get_webview_window(&slot_label(slot)) {
+            let win = match task_app.get_webview_window(&slot_label(slot)) {
                 Some(w) => w,
                 None => break,
             };
             // 更新可见性状态
             let visible = win.is_visible().unwrap_or(true);
-            sync_state(&app, slot, |s| {
+            sync_state(&task_app, slot, |s| {
                 s.running = true;
                 s.visible = visible;
             });
@@ -127,8 +128,12 @@ fn spawn_watchdog(app: AppHandle, slot: u32) {
         }
     });
 
-    let state: tauri::State<AppState> = app.state();
-    if let Some(old) = state.watchdogs.lock().unwrap().insert(slot, handle) {
+    let old = {
+        let state: tauri::State<AppState> = app.state();
+        let old = state.watchdogs.lock().unwrap().insert(slot, handle);
+        old
+    };
+    if let Some(old) = old {
         old.abort();
     }
 }
@@ -138,7 +143,8 @@ pub fn stop_slot(app: &AppHandle, slot: u32) -> Result<(), String> {
     let label = slot_label(slot);
     let old_watchdog = {
         let state: tauri::State<AppState> = app.state();
-        state.watchdogs.lock().unwrap().remove(&slot)
+        let old = state.watchdogs.lock().unwrap().remove(&slot);
+        old
     };
     if let Some(h) = old_watchdog {
         h.abort();
