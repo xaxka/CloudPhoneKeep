@@ -5,9 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 /// 诊断日志：
-/// 1. 写入 exe目录/logs/cpk-YYYYMMDD-p{pid}.log，按天滚动，保留最近 7 天；
-///    文件名带进程号——同时启动多个程序时各写各的文件，互不混淆
-/// 2. 每行日志带 [pid=N] 前缀，即使合并查看也能按实例过滤
+/// 1. 写入 exe目录/logs/cpk-YYYYMMDD.log，按天滚动，保留最近 7 天；
+///    每天只有一个日志文件——多实例同写一份（追加模式），不再按进程号分文件
+///    （此前每天可能留下一个从未写入的空文件）
+/// 2. 每行日志带 [pid=N] 前缀，多实例混写也能按进程过滤
 /// 3. 控制台模式（--console / CPK_CONSOLE=1）下同步镜像到终端
 ///
 /// 格式：`HH:mm:ss.SSS [pid=N] [slot=N|sys] [level] message`
@@ -126,7 +127,7 @@ fn date_to_days(s: &str) -> Result<i64, ()> {
 fn append(app: &tauri::AppHandle, line: &str) {
     let dir = log_dir(app);
     let (day, _, days) = now_parts();
-    let path = dir.join(format!("cpk-{day}-p{}.log", std::process::id()));
+    let path = dir.join(format!("cpk-{day}.log"));
 
     let mut guard = SINK.lock().unwrap();
     let need_reopen = match guard.as_ref() {

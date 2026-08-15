@@ -61,8 +61,6 @@
         el("width").value = cfg.width;
         el("height").value = cfg.height;
         el("cookies").value = cfg.cookies || "";
-        // 触点光标默认开（还原原版 mobile_cloud 无条件注入）；老配置存过 false 的回显为取消，可手动改
-        el("cursor").checked = cfg.customCursor !== false;
       })
       .catch(function () {});
   }
@@ -127,7 +125,8 @@
       keepAlive: true,
       intervalMs: 5000,
       simulateActivity: true,
-      customCursor: el("cursor").checked,
+      // 触点光标固定启用（界面不再提供开关，老配置里的 false 也会被归一化改回 true）
+      customCursor: true,
       blockContextMenu: true
     };
     el("btn-go").disabled = true;

@@ -1,8 +1,8 @@
 use crate::config::{self, SlotConfig};
 
-/// 内嵌的触点光标 PNG（26×26 圆点触控光标：中心实心点+白色圆面+深色描边，热点居中）。
-/// 复刻原版 mobile_cloud 注入的 Dotter.cur 风格（原外链已失效 403，本地重绘，
-/// 消除第三方网络依赖）
+/// 内嵌的触点光标 PNG（26×26，热点居中 13,13）。安卓官方风格触点指示器：
+/// Android 品牌绿(#3DDC84)主圆环 + 外层淡绿光晕 + 白色半透明触点面，
+/// 本地程序化绘制（抗锯齿），零第三方网络依赖
 const CURSOR_PNG_B64: &str = include_str!("../assets/cursor.b64");
 
 /// 生成注入到云手机页面的保活初始化脚本。
@@ -61,6 +61,16 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
   window.__CPK_INSTALLED__ = true;
   var CFG = {cfg_json};
   var PORT = CFG.port, SLOT = CFG.slot;
+
+  // ===== 统一触摸环境（关键修复：重载后鼠标点不动云机）=====
+  // 页面 app.js 的逻辑：'ontouchstart' in window 为 false 时才懒加载自带的
+  // 鼠标→触摸 polyfill，且该 chunk 只在部分路由加载。桌面 WebView2 里
+  // ontouchstart 通常不存在 → 首页路由由页面 polyfill 负责转换；一旦重新
+  // 加载/直达云机路由，polyfill 不在 → 鼠标事件没有任何转换 → 点不动。
+  // 这里在页面脚本运行前补齐 ontouchstart，页面从此不再加载自家 polyfill，
+  // 鼠标→触摸一律由下方内置模拟器接管：任何路由、任何重载后都生效，
+  // 且两个转换器天然互斥，绝不会双重转换。
+  try {{ if (!('ontouchstart' in window)) window.ontouchstart = null; }} catch(e){{}}
 
   var state = {{ ticks: 0, clicks: 0, last: '', diagAt: {{}}, lastUrl: '', wasExited: false, stopDone: false, n: 0 }};
   window.__CPK_STATE__ = state;
@@ -147,10 +157,9 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
   // ===== 操控模拟（还原 mobile_cloud 可用鼠标操控云手机的体验）=====
   // 云手机 H5 只监听 touch 事件。页面自带的「鼠标→触摸」模拟器（TouchEmulator）
   // 仅在 "ontouchstart" in window 为 false 时才加载（其 app.js 源码：
-  // "ontouchstart"in window||加载polyfill chunk）。WebView2 环境里 ontouchstart
-  // 常年存在（尤其触摸屏机器）→ 页面模拟器不加载 → 鼠标点不动云机、拖动全是
-  // 选择文本。这里移植页面同款模拟器逻辑：仅当 ontouchstart 存在时安装，
-  // 与页面自带版天然互斥，任何环境都绝不会双重转换。
+  // "ontouchstart"in window||加载polyfill chunk）。脚本开头已把 ontouchstart
+  // 补齐 → 页面模拟器永不加载，鼠标→触摸一律由这里内置的同款模拟器负责，
+  // 两者天然互斥，任何路由、任何重载后都生效。
   var tsOn = false;
   if ('ontouchstart' in window) {{
     tsOn = true;
@@ -220,6 +229,10 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     // 拖动中彻底禁止选字/拖拽（触摸语义）
     document.addEventListener('selectstart', function(e){{ if (tsDown) e.preventDefault(); }}, true);
     document.addEventListener('dragstart', function(e){{ if (tsDown) e.preventDefault(); }}, true);
+    // 复位保护：在页面外松开鼠标收不到 mouseup 时 tsDown 会卡在 true，
+    // 之后所有 mousemove 都被当成拖动、点击全部失灵
+    window.addEventListener('blur', function(){{ tsDown = false; tsEl = null; }}, true);
+    document.addEventListener('mouseleave', function(){{ tsDown = false; tsEl = null; }}, true);
   }}
 
   // 地址栏（Ctrl+U 呼出/收起，回车跳转，Esc 关闭）—— 还原原版 address.aardio
@@ -454,8 +467,9 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
   }};
 
   // ===== 页面加载诊断：白屏/加载失败时给出可见的重试入口，不再让用户对着空白页 =====
-  window.addEventListener('error', function(ev){{
-    try {{ diag('error', '页面异常: ' + (ev.message || '') + ' @' + (ev.filename || '').slice(0, 80) + ':' + (ev.lineno || 0)); }} catch(e){{}}
+  window.addEventListener('error', function(ev){
+    // message 为空的是跨域资源加载失败（img/script），无排查价值且量大，跳过
+    try {{ if (!ev.message) return; diag('error', '页面异常: ' + ev.message + ' @' + (ev.filename || '').slice(0, 80) + ':' + (ev.lineno || 0)); }} catch(e){{}}
   }}, true);
 
   function showLoadBar(msg){{

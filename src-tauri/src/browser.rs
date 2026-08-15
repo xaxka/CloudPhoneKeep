@@ -4,6 +4,7 @@ use crate::logger;
 use crate::state::SlotState;
 use crate::AppState;
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::{TrayIconBuilder};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -45,6 +46,7 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
     if let Some(win) = app.get_webview_window(&slot_label(slot)) {
         let _ = win.show();
         let _ = win.set_focus();
+        reapply_topmost(app, slot);
         sync_state(app, slot, |s| {
             s.running = true;
             s.visible = true;
@@ -262,12 +264,16 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
     {
         let w = win.clone();
         win.on_window_event(move |e| match e {
-            // 还原原版 web.aardio onClose/onDestroy → win.quitMessage()：
-            // 点 X 即退出整个程序（所有窗口、全部保活一并结束）
-            WindowEvent::CloseRequested { .. } => {
+            // 云手机窗口点 X = 隐藏到托盘继续保活（不再退出整个程序；
+            // 要退出请用托盘菜单「退出」）
+            WindowEvent::CloseRequested { api, .. } => {
                 let app = w.app_handle().clone();
-                logger::log(&app, slot_of_label(&w.label()), "sys", "用户关闭窗口 → 退出程序");
-                quit_all(&app);
+                let slot = slot_of_label(&w.label());
+                api.prevent_close();
+                let _ = w.hide();
+                logger::log(&app, slot, "sys", "用户点击关闭 → 隐藏到托盘（保活继续，退出请用托盘菜单）");
+                sync_state(&app, slot, |s| s.visible = false);
+                refresh_slot_tray(&app, slot);
             }
             WindowEvent::Focused(true) => {
                 let app = w.app_handle().clone();
@@ -326,13 +332,34 @@ fn build_window_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tau
         .item(&MenuItemBuilder::with_id(format!("home-{slot}"), "云手机首页").build(app)?)
         .item(&MenuItemBuilder::with_id(format!("rotate-{slot}"), "旋转").build(app)?)
         .item(&MenuItemBuilder::with_id(format!("top-{slot}"), "窗口置顶").build(app)?)
-        .item(&MenuItemBuilder::with_id(format!("settings-{slot}"), "设置").build(app)?)
+        .item(&MenuItemBuilder::with_id(format!("settings-{slot}"), "窗口设置").build(app)?)
         .item(&MenuItemBuilder::with_id("update-check", "检查更新").build(app)?)
         .build()
 }
 
+/// 菜单事件去重：Windows 下每次菜单点击会触发【两次】menu event（muda 已知行为，
+/// 实测两次间隔约 5~6ms）。不去重的后果（用户日志实锤）：
+///   「旋转」连转两次 = 没转；「窗口置顶」开了立即被取消；
+///   「窗口设置」一次点出两个小窗。
+/// 同一 id 在 300ms 内的重复事件直接丢弃。
+fn menu_event_dup(id: &str) -> bool {
+    static LAST: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
+    let mut g = LAST.lock().unwrap();
+    let now = std::time::Instant::now();
+    if let Some((last_id, at)) = g.as_ref() {
+        if last_id == id && now.duration_since(*at) < std::time::Duration::from_millis(300) {
+            return true;
+        }
+    }
+    *g = Some((id.to_string(), now));
+    false
+}
+
 /// 应用级菜单事件（窗口菜单 + 托盘菜单统一在此处理）
 pub fn handle_menu_event(app: &AppHandle, id: &str) {
+    if menu_event_dup(id) {
+        return;
+    }
     // 全局项
     match id {
         "open-settings" => return show_login(app, None),
@@ -391,6 +418,10 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
     }
 }
 
+/// 防重复标记：菜单快速连点时，「查窗口不存在 → 建窗」两步之间没有原子性，
+/// 两个线程都会走到建窗 → 出现 2 个窗口设置。建窗期间按槽位加锁去重。
+static WINSET_OPENING: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
 /// 「窗口设置」小窗（还原原版 settingWin：仅分辨率输入 + 保存，会话内生效不落盘，
 /// 同一窗口单实例，关闭后可再次打开）
 pub fn open_winset(app: &AppHandle, slot: u32) {
@@ -400,6 +431,13 @@ pub fn open_winset(app: &AppHandle, slot: u32) {
         let _ = win.show();
         let _ = win.set_focus();
         return;
+    }
+    {
+        let mut opening = WINSET_OPENING.lock().unwrap();
+        if opening.contains(&slot) {
+            return; // 已有一个正在创建中，忽略连击
+        }
+        opening.push(slot);
     }
     // 已知 Windows 陷阱（wry#583）：在菜单事件回调里同步创建 WebView2 窗口可能死锁，
     // 丢到独立线程创建，回调立即返回
@@ -415,6 +453,8 @@ pub fn open_winset(app: &AppHandle, slot: u32) {
         .inner_size(275.0, 218.0)
         .resizable(false)
         .build();
+        // 建窗结束（无论成败）解除防重复：成功后窗口已可查到，失败则允许重试
+        WINSET_OPENING.lock().unwrap().retain(|s| *s != slot);
         match built {
             Ok(_) => logger::log(&app2, slot, "sys", "打开窗口设置（分辨率，仅本会话生效）"),
             Err(e) => logger::log(&app2, slot, "error", &format!("窗口设置打开失败：{e}")),
@@ -575,6 +615,7 @@ pub fn toggle_slot(app: &AppHandle, slot: u32) {
             _ => {
                 let _ = win.show();
                 let _ = win.set_focus();
+                reapply_topmost(app, slot);
                 sync_state(app, slot, |s| s.visible = true);
                 logger::log(app, slot, "sys", "窗口已显示");
                 refresh_slot_tray(app, slot);
@@ -588,6 +629,7 @@ pub fn show_slot(app: &AppHandle, slot: u32, visible: bool) {
         if visible {
             let _ = win.show();
             let _ = win.set_focus();
+            reapply_topmost(app, slot);
         } else {
             let _ = win.hide();
         }
@@ -608,6 +650,22 @@ pub fn set_topmost(app: &AppHandle, slot: u32, top: bool) -> Result<(), String> 
     }
 }
 
+/// 窗口重新显示后重新应用置顶。Windows 下 hide/show 循环会丢失
+/// WS_EX_TOPMOST（老板键隐藏再呼出、托盘显隐后「置顶失效」的根因），
+/// 每次显示时按记录状态补一次。
+fn reapply_topmost(app: &AppHandle, slot: u32) {
+    let top = {
+        let state: tauri::State<AppState> = app.state();
+        let states = state.states.lock().unwrap();
+        states.get(&slot).map(|s| s.topmost).unwrap_or(false)
+    };
+    if top {
+        if let Some(win) = app.get_webview_window(&slot_label(slot)) {
+            let _ = win.set_always_on_top(true);
+        }
+    }
+}
+
 /// 旋转：交换宽高并刷新页面（还原原版：仅改内存不落盘，重启后回到配置分辨率）
 pub fn rotate_slot(app: &AppHandle, slot: u32) -> Result<(f64, f64), String> {
     let (w, h) = slot_size(app, slot);
@@ -617,8 +675,16 @@ pub fn rotate_slot(app: &AppHandle, slot: u32) -> Result<(f64, f64), String> {
 
     if let Some(win) = app.get_webview_window(&slot_label(slot)) {
         let _ = win.set_size(tauri::LogicalSize::new(swapped.0, swapped.1));
-        // 还原原版 myWebView.go(location)：刷新当前页
-        let _ = win.eval("try{location.reload()}catch(e){}");
+        // 还原原版 myWebView.go(location)：刷新当前页。但必须等新的窗口尺寸
+        // 真正应用到 WebView2 之后再刷——立即 reload 时页面读到的是旧视口
+        // 尺寸，云手机画面仍按旧方向渲染（=「旋转不生效」）
+        let app2 = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            if let Some(w) = app2.get_webview_window(&slot_label(slot)) {
+                let _ = w.eval("try{location.reload()}catch(e){}");
+            }
+        });
     }
     logger::log(app, slot, "sys", &format!("旋转：{} x {}（仅本会话生效）", swapped.0, swapped.1));
     Ok(swapped)
