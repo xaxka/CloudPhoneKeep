@@ -136,11 +136,12 @@ fn spawn_watchdog(app: AppHandle, slot: u32) {
 /// 停止槽位：关闭窗口并终止看门狗
 pub fn stop_slot(app: &AppHandle, slot: u32) -> Result<(), String> {
     let label = slot_label(slot);
-    {
+    let old_watchdog = {
         let state: tauri::State<AppState> = app.state();
-        if let Some(h) = state.watchdogs.lock().unwrap().remove(&slot) {
-            h.abort();
-        }
+        state.watchdogs.lock().unwrap().remove(&slot)
+    };
+    if let Some(h) = old_watchdog {
+        h.abort();
     }
     if let Some(win) = app.get_webview_window(&label) {
         let _ = win.destroy();
@@ -213,8 +214,9 @@ pub fn rotate_slot(app: &AppHandle, slot: u32) -> Result<(f64, f64), String> {
         } else {
             "vertical".into()
         };
+        let size = (s.width, s.height);
         config::save(app, &cfg).ok();
-        (s.width, s.height)
+        size
     };
 
     if let Some(win) = app.get_webview_window(&slot_label(slot)) {

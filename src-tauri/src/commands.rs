@@ -16,16 +16,18 @@ pub struct AppInfo {
 #[tauri::command]
 pub fn get_app_info(app: AppHandle) -> AppInfo {
     let state: tauri::State<AppState> = app.state();
+    let port = *state.port.lock().unwrap();
     AppInfo {
         version: app.package_info().version.to_string(),
-        port: *state.port.lock().unwrap(),
+        port,
     }
 }
 
 #[tauri::command]
 pub fn get_config(app: AppHandle) -> AppConfig {
     let state: tauri::State<AppState> = app.state();
-    state.config.lock().unwrap().clone()
+    let cfg = state.config.lock().unwrap().clone();
+    cfg
 }
 
 /// 保存配置（前端提交完整配置，保存后热更新已打开窗口的保活参数）
@@ -39,7 +41,7 @@ pub fn save_config(app: AppHandle, cfg: AppConfig) -> Result<(), String> {
             return Err("配置必须包含 9 个帐号槽位".into());
         }
         *cur = cfg;
-        config::save(&app, cur).map_err(|e| e.to_string())?;
+        config::save(&app, &cur).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -106,7 +108,8 @@ pub fn reload_slot(app: AppHandle, slot: u32) -> Result<(), String> {
 #[tauri::command]
 pub fn get_states(app: AppHandle) -> HashMap<u32, SlotState> {
     let state: tauri::State<AppState> = app.state();
-    state.states.lock().unwrap().clone()
+    let states = state.states.lock().unwrap().clone();
+    states
 }
 
 #[tauri::command]

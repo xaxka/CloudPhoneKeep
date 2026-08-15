@@ -58,7 +58,7 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
       // 本地内嵌触点光标（无任何第三方网络依赖）
       var st = document.createElement('style');
       st.type = 'text/css';
-      st.innerHTML = '*{{cursor:url("data:image/png;base64,__CPK_CURSOR__") 14 14, default;}}';
+      st.innerHTML = '*{{cursor:url("data:image/png;base64,{__CPK_CURSOR__}") 14 14, default;}}';
       (document.head || document.documentElement).appendChild(st);
     }} catch(e){{}}
   }}

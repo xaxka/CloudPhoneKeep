@@ -21,7 +21,7 @@ pub struct AppState {
     /// 每个帐号槽位的运行状态
     pub states: Mutex<HashMap<u32, state::SlotState>>,
     /// 每个槽位的原生看门狗任务（窗口隐藏时由 Rust 侧驱动页面 tick）
-    pub watchdogs: Mutex<HashMap<u32, tokio::task::JoinHandle<()>>>,
+    pub watchdogs: Mutex<HashMap<u32, tauri::async_runtime::JoinHandle<()>>>,
     /// 全局热键 id -> 槽位
     pub shortcut_ids: Mutex<HashMap<u32, u32>>,
     /// 主面板关闭提示只弹一次

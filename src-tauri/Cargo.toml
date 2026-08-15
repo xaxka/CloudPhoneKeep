@@ -1,7 +1,7 @@
 [package]
 name = "cloudphonekeep"
 version = "1.0.0"
-description = "联通云手机网页版多开保活工具（Tauri 重写版）"
+description = "联通云手机网页版多开保活工具"
 authors = ["xixka"]
 license = "MIT"
 edition = "2021"
