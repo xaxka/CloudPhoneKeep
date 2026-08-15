@@ -2,7 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// 诊断日志（按目录分流）：
 /// 1. 帐号级（slot=N）：写到该帐号数据目录 AppData\LocalLow\CloudPhoneKeep\<目录名>\，
@@ -37,9 +37,12 @@ struct Sink {
     day: String,
 }
 
-/// 每个目录一个缓存句柄（slot=0 → 数据根目录；slot=N → 帐号 N 的数据目录）
-static SINKS: Mutex<std::collections::HashMap<u32, Sink>> =
-    Mutex::new(std::collections::HashMap::new());
+/// 每个目录一个缓存句柄（slot=0 → 数据根目录；slot=N → 帐号 N 的数据目录）。
+/// HashMap::new() 不是 const fn，static 里不能直接构造 → OnceLock 惰性初始化
+fn sinks() -> &'static Mutex<std::collections::HashMap<u32, Sink>> {
+    static SINKS: OnceLock<Mutex<std::collections::HashMap<u32, Sink>>> = OnceLock::new();
+    SINKS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
 
 /// UTC+8 毫秒时间 → (日期 YYYYMMDD, HH:mm:ss.SSS, 天序号)
 fn now_parts() -> (String, String, i64) {
@@ -76,9 +79,12 @@ fn day_str(z: i64) -> String {
 
 /// 某条日志的落盘目录：帐号级 → 该帐号数据目录；程序级(slot=0) → 数据根目录。
 /// 目录来自启动时的登记表（register_slot_dir），logger 不读 AppState/config 锁——
-/// 任何「持着配置锁写日志」的调用路径都不会死锁
-static SLOT_DIRS: Mutex<std::collections::HashMap<u32, PathBuf>> =
-    Mutex::new(std::collections::HashMap::new());
+/// 任何「持着配置锁写日志」的调用路径都不会死锁。
+/// 同上：HashMap 不能 const 构造，OnceLock 惰性初始化
+fn slot_dirs() -> &'static Mutex<std::collections::HashMap<u32, PathBuf>> {
+    static SLOT_DIRS: OnceLock<Mutex<std::collections::HashMap<u32, PathBuf>>> = OnceLock::new();
+    SLOT_DIRS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
 
 /// 登记某槽位的日志目录（= 数据目录）。启动载入配置后登记全部已配置槽位，
 /// 窗口启动 / 数据目录兜底切换（-r2/-r3）时更新
@@ -86,14 +92,14 @@ pub fn register_slot_dir(slot: u32, dir: PathBuf) {
     if slot == 0 {
         return;
     }
-    SLOT_DIRS.lock().unwrap().insert(slot, dir);
+    slot_dirs().lock().unwrap().insert(slot, dir);
 }
 
 fn log_dir(slot: u32) -> PathBuf {
     if slot == 0 {
         return crate::config::base_dir();
     }
-    SLOT_DIRS
+    slot_dirs()
         .lock()
         .unwrap()
         .get(&slot)
@@ -151,7 +157,7 @@ fn append(slot: u32, line: &str) {
     let (day, _, days) = now_parts();
     let path = dir.join(format!("cpk-{day}.log"));
 
-    let mut sinks = SINKS.lock().unwrap();
+    let mut sinks = sinks().lock().unwrap();
     let need_reopen = match sinks.get(&slot) {
         Some(s) => s.day != day,
         None => true,
