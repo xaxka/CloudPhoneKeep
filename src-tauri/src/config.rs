@@ -152,8 +152,8 @@ pub struct SlotConfig {
     pub interval_ms: u64,
     /// 空闲时模拟鼠标活动防掉线
     pub simulate_activity: bool,
-    /// 注入云手机触点光标（固定启用：界面不再提供开关，归一化时强制改回 true，
-    /// 还原原版 mobile_cloud 无条件注入触控圆点光标的行为）
+    /// 注入云手机触点光标（默认关闭：使用系统默认鼠标指针；
+    /// 归一化时强制改回 false，清理历史上被「固定启用」写入的 true）
     pub custom_cursor: bool,
     /// 屏蔽页面右键菜单
     pub block_context_menu: bool,
@@ -172,7 +172,7 @@ impl Default for SlotConfig {
             keep_alive: true,
             interval_ms: 5000,
             simulate_activity: true,
-            custom_cursor: true,
+            custom_cursor: false,
             block_context_menu: true,
         }
     }
@@ -199,8 +199,8 @@ impl SlotConfig {
         if c.interval_ms < 1000 {
             c.interval_ms = 5000;
         }
-        // 触点光标固定启用：老配置里存过 false 的一并改回（界面已无开关）
-        c.custom_cursor = true;
+        // 触点光标默认关闭：老配置里被「固定启用」写入的 true 一并清理（界面已无开关）
+        c.custom_cursor = false;
         c
     }
 }

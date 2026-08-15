@@ -125,8 +125,8 @@
       keepAlive: true,
       intervalMs: 5000,
       simulateActivity: true,
-      // 触点光标固定启用（界面不再提供开关，老配置里的 false 也会被归一化改回 true）
-      customCursor: true,
+      // 触点光标默认关闭（使用系统默认鼠标指针；Rust 侧归一化同样会清理为 false）
+      customCursor: false,
       blockContextMenu: true
     };
     el("btn-go").disabled = true;

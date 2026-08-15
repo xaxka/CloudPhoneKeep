@@ -2,7 +2,8 @@ use crate::config::{self, SlotConfig};
 
 /// 内嵌的触点光标 PNG（26×26，热点居中 13,13）。安卓官方风格触点指示器：
 /// Android 品牌绿(#3DDC84)主圆环 + 外层淡绿光晕 + 白色半透明触点面，
-/// 本地程序化绘制（抗锯齿），零第三方网络依赖
+/// 本地程序化绘制（抗锯齿），零第三方网络依赖。
+/// v1.7.2 起默认关闭（custom_cursor=false，使用系统默认鼠标指针），资源保留备用
 const CURSOR_PNG_B64: &str = include_str!("../assets/cursor.b64");
 
 /// 生成注入到云手机页面的保活初始化脚本。
@@ -18,8 +19,8 @@ const CURSOR_PNG_B64: &str = include_str!("../assets/cursor.b64");
 ///       退回首页检测(.title-bar)
 /// 移动：解锁区进入云机(.unlocked/.enter-intance)、重连/进入/确认按钮按文字包含匹配、
 ///       到期「知道了」(.van-dialog__confirm)、退回 H5 首页检测(#tabbar)
-/// 通用：注入触点光标、屏蔽右键、鼠标→触摸操控模拟（WebView2 里页面自带的
-///       模拟器不加载，鼠标拖不动云机——移植页面同款 TouchEmulator 补上）、
+/// 通用：触点光标（默认关闭，系统默认指针）、屏蔽右键、鼠标→触摸操控模拟
+///       （WebView2 里页面自带的模拟器不加载，鼠标拖不动云机——移植页面同款 TouchEmulator 补上）、
 ///       Cookie 一次性按平台域注入、空闲鼠标活动模拟、
 ///       状态通过 127.0.0.1 回环 HTTP 上报给 Rust 侧（绕过跨域与远程 IPC 限制）
 pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
