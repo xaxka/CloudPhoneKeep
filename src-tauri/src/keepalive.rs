@@ -467,7 +467,7 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
   }};
 
   // ===== 页面加载诊断：白屏/加载失败时给出可见的重试入口，不再让用户对着空白页 =====
-  window.addEventListener('error', function(ev){
+  window.addEventListener('error', function(ev){{
     // message 为空的是跨域资源加载失败（img/script），无排查价值且量大，跳过
     try {{ if (!ev.message) return; diag('error', '页面异常: ' + ev.message + ' @' + (ev.filename || '').slice(0, 80) + ':' + (ev.lineno || 0)); }} catch(e){{}}
   }}, true);
