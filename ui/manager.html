@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost" />
+  <title>云手机保活 CloudPhoneKeep</title>
+  <link rel="stylesheet" href="manager.css" />
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo"></div>
+      <div>
+        <h1>云手机保活 <span class="en">CloudPhoneKeep</span></h1>
+        <p class="sub">联通云手机网页版 · 多开隔离 · 自动保活 · 老板键 Ctrl+1~9</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <button id="btn-check-update" class="btn ghost">检查更新</button>
+      <button id="btn-save" class="btn primary">保存配置</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="global-bar card">
+      <div class="global-actions">
+        <button id="btn-start-all" class="btn primary">▶ 全部启动(已启用)</button>
+        <button id="btn-stop-all" class="btn danger">■ 全部停止</button>
+        <button id="btn-show-all" class="btn ghost">显示全部</button>
+        <button id="btn-hide-all" class="btn ghost">隐藏全部 (摸鱼)</button>
+      </div>
+      <details class="advanced">
+        <summary>高级设置</summary>
+        <div class="advanced-grid">
+          <label class="switch-row">
+            <input type="checkbox" id="set-auto-start" />
+            <span>启动软件时自动开启已启用的帐号</span>
+          </label>
+          <label>更新源地址
+            <input type="text" id="set-update-url" placeholder="version.txt 地址" />
+          </label>
+          <label>新版本下载页
+            <input type="text" id="set-download-page" />
+          </label>
+        </div>
+      </details>
+    </section>
+
+    <section id="slots" class="slots-grid"></section>
+
+    <section class="card log-panel">
+      <div class="log-head">
+        <span>运行日志</span>
+        <button id="btn-clear-log" class="btn ghost small">清空</button>
+      </div>
+      <div id="log" class="log-body"></div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <dialog id="dlg-update" class="dlg">
+    <h3>检查更新</h3>
+    <div id="update-body" class="update-body">正在检查...</div>
+    <div class="dlg-actions">
+      <button id="btn-open-download" class="btn primary" style="display:none">前往下载</button>
+      <button class="btn ghost" onclick="document.getElementById('dlg-update').close()">关闭</button>
+    </div>
+  </dialog>
+
+  <script src="manager.js" defer></script>
+</body>
+
+</html>

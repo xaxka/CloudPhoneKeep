@@ -1,0 +1,14 @@
+[
+  {
+    "identifier": "default",
+    "description": "主面板与浏览器窗口的基础能力",
+    "windows": ["main", "browser-*"],
+    "permissions": [
+      "core:default",
+      "core:window:default",
+      "core:webview:default",
+      "core:event:default",
+      "core:app:default"
+    ]
+  }
+]

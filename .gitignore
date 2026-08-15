@@ -1,0 +1,18 @@
+# Build
+/src-tauri/target/
+/src-tauri/gen/
+
+# Node
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
