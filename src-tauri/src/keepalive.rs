@@ -72,7 +72,7 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
   // 且两个转换器天然互斥，绝不会双重转换。
   try {{ if (!('ontouchstart' in window)) window.ontouchstart = null; }} catch(e){{}}
 
-  var state = {{ ticks: 0, clicks: 0, last: '', diagAt: {{}}, lastUrl: '', wasExited: false, stopDone: false, n: 0 }};
+  var state = {{ ticks: 0, clicks: 0, last: '', diagAt: {{}}, lastUrl: '', wasExited: false, stopDone: false, entered: false, n: 0 }};
   window.__CPK_STATE__ = state;
 
   // document_start 阶段 body/head 可能尚未解析（初始化脚本在文档创建时执行）：
@@ -290,6 +290,26 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
 
   function vis(el){{ return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length)); }}
   function q(s){{ try {{ return document.querySelector(s); }} catch(e) {{ return null; }} }}
+
+  // ===== 上下文识别（修正心跳误报「疑似改版」）=====
+  // 云机页面把手机画面嵌在跨域 iframe（yun.139.com/ai-helper-phone）里，
+  // 注入脚本在每个文档都会执行，但保活选择器（.van-dialog__confirm/#tabbar 等）
+  // 属于顶层页面 DOM，iframe 里 querySelector 永远查不到 → 心跳恒全 0，属正常；
+  // 同理 #/instance 云机内路由本身就没有 tabbar/解锁区/弹窗，全 0 也是正常态。
+  var IS_FRAME = false;
+  try {{ IS_FRAME = (window.top !== window); }} catch(e) {{ IS_FRAME = true; }}
+  function routeOf(){{ try {{ return (location.hash || '').split('?')[0]; }} catch(e) {{ return ''; }} }}
+  function inPhoneRoute(){{ return routeOf().indexOf('/instance') >= 0; }}
+  function onHomeRoute(){{ return routeOf().indexOf('/cloudAppList') >= 0; }}
+  // 每个路由首次心跳时落一份 DOM class 清单：真改版时日志里直接有证据可对照换选择器
+  var sampledRoutes = {{}};
+  function routeSampleOnce(){{
+    var key = IS_FRAME ? 'frame:' + location.pathname : routeOf();
+    if (sampledRoutes[key]) return '';
+    sampledRoutes[key] = 1;
+    return ' 首见采样: ' + domSample().slice(0, 900);
+  }}
+
   function findBtn(root, texts){{
     try {{
       var els = root.querySelectorAll('button, [class*=btn], [class*=Btn], [role=button], div, span');
@@ -306,10 +326,15 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
   function stopCheck(){{
     if (state.stopDone) return;
     if (CFG.platform === 'mobile') {{
+      // 路由登记：进入过 #/instance 才算「进过云机」，路由级退出检测以此为准，
+      // 避免窗口启动时本来就停在首页被误判成「已退出」
+      if (inPhoneRoute()) state.entered = true;
       var tb = q('#tabbar');
-      if (vis(tb)) {{
+      // 退出检测双保险：#tabbar 首页特征（原版）+ 路由从云机回到首页
+      // （站点改版已去掉 #tabbar，实测首页心跳 tabbar 恒 0，仅靠原选择器检测不到退出）
+      if (vis(tb) || (state.entered && onHomeRoute())) {{
         state.stopDone = true; state.wasExited = true;
-        diag('exit', '已退出云机（检测到 #tabbar 首页特征），DOM 采样: ' + domSample());
+        diag('exit', '已退出云机（' + (vis(tb) ? '检测到 #tabbar 首页特征' : '路由从云机回到首页') + '），DOM 采样: ' + domSample());
         send('exited');
         return;
       }}
@@ -346,7 +371,7 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     if (!CFG.keepAlive) {{ send('paused'); return; }}
     var acted = '';
     var exitedNow = state.wasExited;
-    // 选择器命中摘要：beat 日志核心数据，全 0 = 疑似改版
+    // 选择器命中摘要：beat 日志核心数据（全 0 是否异常由上下文决定，见下方心跳块）
     var hits = [];
     try {{
       if (CFG.platform === 'mobile') {{
@@ -423,10 +448,18 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
         send(acted);
       }} else {{
         send('alive');
-        // 心跳采样：每 20 次动作周期记录一次选择器命中全貌
+        // 心跳采样：每 20 次动作周期记录一次选择器命中全貌。
+        // 「全0即疑似改版」仅对顶层页面的首页/未识别路由成立；
+        // iframe（手机画面）与云机内路由全 0 是正常态，不再误报
         if (state.ticks % 20 === 1) {{
-          diag('beat', 'tick=' + state.ticks + ' url=' + location.pathname.slice(0, 60) +
-               ' platform=' + CFG.platform + ' hits=[' + hits.join(',') + '] 全0即疑似改版');
+          var all0 = true;
+          for (var hi = 0; hi < hits.length; hi++){{ if (/:[1-9][0-9]*$/.test(hits[hi])) {{ all0 = false; break; }} }}
+          var ctx = IS_FRAME ? 'iframe手机画面(选择器属外层页面,全0恒正常)'
+                  : (inPhoneRoute() ? '云机内(无弹窗无待点按钮,全0正常)'
+                  : (onHomeRoute() ? '首页' : ('路由' + (routeOf() || '/') + '(未识别)')));
+          var verdict = (all0 && !IS_FRAME && !inPhoneRoute()) ? ' 全0即疑似改版' : '';
+          diag('beat', 'tick=' + state.ticks + ' url=' + (location.pathname + location.hash).slice(0, 90) +
+               ' platform=' + CFG.platform + ' 上下文=' + ctx + ' hits=[' + hits.join(',') + ']' + verdict + routeSampleOnce());
         }}
       }}
 

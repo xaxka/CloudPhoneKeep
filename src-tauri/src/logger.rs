@@ -14,7 +14,7 @@ use std::sync::Mutex;
 /// 格式：`HH:mm:ss.SSS [pid=N] [slot=N|sys] [level] message`
 /// level 约定：
 ///   nav    页面 URL/路由变化（SPA 路由切换是改版定位的第一线索）
-///   beat   保活心跳采样（含各选择器命中摘要，全 0 即疑似改版）
+///   beat   保活心跳采样（含各选择器命中摘要；全 0 是否异常由上下文标注：iframe/云机内为正常态）
 ///   click  自动点击命中（含目标元素 tag/class/text）
 ///   miss   容器可见但按钮未找到（改版的最直接证据）
 ///   exit   云机退出事件（附 DOM class 采样）

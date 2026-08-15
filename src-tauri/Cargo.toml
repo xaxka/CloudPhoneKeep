@@ -1,6 +1,6 @@
 [package]
 name = "cloudphonekeep"
-version = "1.7.0"
+version = "1.7.1"
 description = "云手机网页版多开保活工具（移动/联通，支持多实例）"
 authors = ["xixka"]
 license = "MIT"
