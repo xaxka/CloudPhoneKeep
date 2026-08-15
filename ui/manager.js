@@ -71,6 +71,13 @@ function log(tag, msg, cls = "") {
   body.scrollTop = body.scrollHeight;
 }
 
+/* 诊断日志级别 → 样式 */
+const LEVEL_CLS = {
+  click: "ok", probe: "ok", beat: "sys",
+  miss: "act", exit: "act", nav: "sys",
+  error: "err", sys: "sys", info: "sys", warn: "act",
+};
+
 function statusInfo(s) {
   return STATUS_TEXT[s] || [s, "warn"];
 }
@@ -347,6 +354,30 @@ function bindGlobal() {
 
   $("btn-clear-log").addEventListener("click", () => { $("log").innerHTML = ""; });
 
+  // 打开日志文件目录（cpk-YYYYMMDD.log，按天滚动保留 7 天）
+  $("btn-open-logdir").addEventListener("click", async () => {
+    try {
+      const path = await invoke("open_log_dir");
+      log("SYS", `日志目录已打开：${path}`, "sys");
+    } catch (e) {
+      log("SYS", `打开日志目录失败：${e}`, "err");
+    }
+  });
+
+  // 对所有运行中的窗口触发 DOM 采样（页面全部 class 清单写入日志，用于改版分析）
+  $("btn-probe-all").addEventListener("click", async () => {
+    const running = Object.values(states).filter((s) => s.running);
+    if (!running.length) {
+      toast("没有运行中的窗口可采样");
+      return;
+    }
+    let ok = 0;
+    for (const s of running) {
+      try { await invoke("probe_slot", { slot: s.slot }); ok++; } catch (e) { /* ignore */ }
+    }
+    log("SYS", `已对 ${ok}/${running.length} 个运行中窗口触发 DOM 采样，结果见日志文件`, "sys");
+  });
+
   ["set-auto-start", "set-update-url", "set-download-page"].forEach((id) => {
     $(id).addEventListener("change", markDirty);
   });
@@ -390,7 +421,8 @@ async function checkUpdate() {
 /* ---------------- events ---------------- */
 
 function bindEvents() {
-  listen("cpk://status", (st) => {
+  listen("cpk://status", (ev) => {
+    const st = ev.payload;
     states[st.slot] = st;
     refreshCard(st.slot);
     if (st.lastStatus === "exited") {
@@ -398,8 +430,12 @@ function bindEvents() {
     }
   });
 
-  listen("cpk://log", (e) => {
-    log(`帐号${e.slot}`, e.msg, "sys");
+  listen("cpk://log", (ev) => {
+    const e = ev.payload;
+    const cls = LEVEL_CLS[e.level] || "sys";
+    const tag = e.slot ? `帐号${e.slot}` : "SYS";
+    const prefix = e.level && !["sys", "info"].includes(e.level) ? `[${e.level}] ` : "";
+    log(tag, prefix + e.msg, cls);
   });
 }
 

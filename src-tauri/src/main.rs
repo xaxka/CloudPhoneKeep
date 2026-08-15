@@ -4,6 +4,7 @@ mod browser;
 mod commands;
 mod config;
 mod keepalive;
+mod logger;
 mod report_server;
 mod state;
 mod update;
@@ -66,7 +67,9 @@ fn main() {
             commands::get_states,
             commands::check_update,
             commands::open_url,
-            commands::app_quit
+            commands::app_quit,
+            commands::open_log_dir,
+            commands::probe_slot
         ])
         .setup(|app| {
             // 载入配置

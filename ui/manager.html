@@ -54,7 +54,11 @@
     <section class="card log-panel">
       <div class="log-head">
         <span>运行日志</span>
-        <button id="btn-clear-log" class="btn ghost small">清空</button>
+        <div class="log-actions">
+          <button id="btn-probe-all" class="btn ghost small" title="对运行中的窗口采集当前页面全部 CSS 类名，写入日志文件，用于分析网站改版">DOM 采样</button>
+          <button id="btn-open-logdir" class="btn ghost small" title="打开日志文件所在目录（按天滚动，保留 7 天）">打开日志目录</button>
+          <button id="btn-clear-log" class="btn ghost small">清空</button>
+        </div>
       </div>
       <div id="log" class="log-body"></div>
     </section>

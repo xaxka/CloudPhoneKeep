@@ -270,6 +270,7 @@ input[type="checkbox"] {
 /* ---------------- log ---------------- */
 .log-panel { margin-bottom: 0; }
 .log-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 13px; font-weight: 600; }
+.log-actions { display: flex; gap: 6px; align-items: center; }
 
 .log-body {
   max-height: 220px;

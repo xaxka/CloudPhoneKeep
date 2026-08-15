@@ -56,6 +56,54 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     }}catch(e){{}}
   }}
 
+  // ===== 诊断日志：POST 到本地 /log，由 Rust 侧落盘（同内容 5 秒内去重）=====
+  function diag(level, msg){{
+    try {{
+      var now = Date.now();
+      var key = level + '|' + String(msg).slice(0, 80);
+      if (state.diagAt[key] && now - state.diagAt[key] < 5000) return;
+      state.diagAt[key] = now;
+      var body = 'slot=' + SLOT + '&level=' + encodeURIComponent(level) + '&msg=' + encodeURIComponent(String(msg).slice(0, 3800));
+      fetch('http://127.0.0.1:' + PORT + '/log', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }},
+        body: body, mode: 'no-cors', cache: 'no-store'
+      }}).catch(function(){{}});
+    }} catch(e){{}}
+  }}
+
+  // 元素描述：tag.class("text")，用于日志中还原点击目标
+  function desc(el){{
+    if (!el) return 'null';
+    try {{
+      var t = el.tagName ? el.tagName.toLowerCase() : '?';
+      var c = el.className;
+      c = (c && c.baseVal !== undefined) ? c.baseVal : String(c || '');
+      c = c.trim().split(/\s+/).slice(0, 4).join('.');
+      var txt = (el.innerText || '').trim().slice(0, 20);
+      return t + (c ? '.' + c : '') + (txt ? '("' + txt + '")' : '');
+    }} catch(e) {{ return 'desc-err'; }}
+  }}
+
+  // DOM 采样：当前页面全部 class 去重清单（改版分析的核心数据）
+  function domSample(){{
+    try {{
+      var seen = {{}}, n = 0;
+      var els = document.querySelectorAll('*');
+      for (var i = 0; i < els.length && i < 4000; i++){{
+        var c = els[i].className;
+        c = (c && c.baseVal !== undefined) ? c.baseVal : String(c || '');
+        var parts = c.trim().split(/\s+/);
+        for (var j = 0; j < parts.length; j++) if (parts[j]) {{ seen[parts[j]] = 1; n++; }}
+      }}
+      var arr = Object.keys(seen).sort();
+      return 'url=' + location.pathname + location.hash +
+             ' title=' + (document.title || '').slice(0, 30) +
+             ' els=' + Math.min(els.length, 4000) +
+             ' classes(' + arr.length + ')= ' + arr.join(' ').slice(0, 3400);
+    }} catch(e) {{ return 'sample-err ' + (e && e.message); }}
+  }}
+
   if (CFG.blockContextMenu) {{
     document.addEventListener('contextmenu', function(e){{ e.preventDefault(); }}, true);
   }}
@@ -86,7 +134,7 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     setInterval(applyCookies, 60000);
   }}
 
-  var state = {{ ticks: 0, clicks: 0, last: '' }};
+  var state = {{ ticks: 0, clicks: 0, last: '', diagAt: {{}}, lastUrl: '', wasExited: false }};
   window.__CPK_STATE__ = state;
 
   function vis(el){{ return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length)); }}
@@ -104,48 +152,67 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
 
   function tick(){{
     state.ticks++;
+    // 路由变化检测（SPA 页面改版定位的第一线索）
+    if (state.lastUrl !== location.href) {{
+      state.lastUrl = location.href;
+      diag('nav', '进入 ' + location.href.slice(0, 300) + ' title=' + (document.title || '').slice(0, 40));
+    }}
     if (!CFG.keepAlive) {{ send('paused'); return; }}
     var acted = '';
     var exited = false;
+    // 选择器命中摘要：beat 日志核心数据，全 0 = 疑似改版
+    var hits = [];
     try {{
       if (CFG.platform === 'mobile') {{
         // ===== 移动云手机（cloudphoneh5.buy.139.com）=====
         // 1. 详情页解锁区 -> 进入云机
-        if (vis(q('.unlocked')) || vis(q('.enter-intance'))) {{
-          var eb = q('.enter-intance') || q('.enter') || findBtn(document.body, ['进入云机', '进入']);
-          if (eb) {{ eb.click(); acted = 'enter'; }}
+        var ul = q('.unlocked'), ei = q('.enter-intance');
+        hits.push('unlocked:' + (vis(ul) ? 1 : 0), 'enter-intance:' + (vis(ei) ? 1 : 0));
+        if (vis(ul) || vis(ei)) {{
+          var eb = ei || q('.enter') || findBtn(document.body, ['进入云机', '进入']);
+          if (eb) {{ eb.click(); acted = 'enter'; diag('click', 'enter -> ' + desc(eb)); }}
+          else diag('miss', '.unlocked/.enter-intance 可见但未找到进入按钮，疑似改版 | ' + desc(ul || ei));
         }}
         // 2. 连接断开/重连弹窗 -> 按文字匹配重连按钮
         if (!acted) {{
           var rb = findBtn(document.body, ['重连', '重新连接', '再次尝试', '重试']);
-          if (rb) {{ rb.click(); acted = 'retry'; }}
+          if (rb) {{ rb.click(); acted = 'retry'; diag('click', 'retry -> ' + desc(rb)); }}
         }}
         // 3. 到期/提示弹窗 -> 知道了
         var cf = q('.van-dialog__confirm');
+        hits.push('van-confirm:' + (vis(cf) ? 1 : 0), 'tabbar:' + (vis(q('#tabbar')) ? 1 : 0));
         if (vis(cf)) {{ cf.click(); if (!acted) acted = 'expired-confirm'; }}
         // 4. 检测到 #tabbar = 退回 H5 首页，即云机已退出
         exited = vis(q('#tabbar'));
       }} else {{
         // ===== 联通云手机（uphone.wo-adv.cn）=====
         // 1. 试用弹窗 -> 立即启用云手机
-        if (vis(q('.try-content'))) {{
+        var tc = q('.try-content');
+        hits.push('try-content:' + (vis(tc) ? 1 : 0));
+        if (vis(tc)) {{
           var b = q('.nut-popup--center .try-btn') || q('.try-btn') || findBtn(document.body, ['立即启用云手机']);
-          if (b) {{ b.click(); acted = 'try-enable'; }}
+          if (b) {{ b.click(); acted = 'try-enable'; diag('click', 'try-enable -> ' + desc(b)); }}
+          else diag('miss', '.try-content 可见但未找到 .try-btn / [立即启用云手机] 按钮，疑似改版 | ' + desc(tc));
         }}
         // 2. 无法连接 -> 再次尝试
         var pdw = q('.phone-dialog-wrap');
+        hits.push('phone-dialog:' + (vis(pdw) ? 1 : 0));
         if (vis(pdw)) {{
           var rb2 = findBtn(pdw, ['再次尝试', '重试', '重新连接', '重新载入']);
-          if (rb2) {{ rb2.click(); if (!acted) acted = 'retry'; }}
+          if (rb2) {{ rb2.click(); if (!acted) acted = 'retry'; diag('click', 'retry -> ' + desc(rb2)); }}
+          else diag('miss', '.phone-dialog-wrap 可见但未找到重试按钮，疑似改版 | ' + desc(pdw));
         }}
         // 3. 详情页 -> 进入云机
         var dic = q('.detail-info-container');
+        hits.push('detail-info:' + (vis(dic) ? 1 : 0));
         if (vis(dic)) {{
           var eb2 = q('.enter-intance') || q('.enter') || findBtn(dic, ['进入云机', '进入', '确认', '重连']);
-          if (eb2) {{ eb2.click(); if (!acted) acted = 'enter'; }}
+          if (eb2) {{ eb2.click(); if (!acted) acted = 'enter'; diag('click', 'enter -> ' + desc(eb2)); }}
+          else diag('miss', '.detail-info-container 可见但未找到进入按钮，疑似改版 | ' + desc(dic));
         }}
         // 4. 到期/提示弹窗 -> 知道了
         var cf2 = q('.van-dialog__confirm');
+        hits.push('van-confirm:' + (vis(cf2) ? 1 : 0), 'title-bar:' + (vis(q('.title-bar')) ? 1 : 0));
         if (vis(cf2)) {{ cf2.click(); if (!acted) acted = 'expired-confirm'; }}
         // 5. 检测到 .title-bar = 退回首页，即云机已退出
         exited = vis(q('.title-bar'));
@@ -153,12 +220,24 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
 
       // 状态上报
       if (exited) {{
+        if (!state.wasExited) {{
+          state.wasExited = true;
+          diag('exit', '已退出云机（检测到退回首页特征），DOM 采样: ' + domSample());
+        }}
         send('exited');
-      }} else if (acted) {{
-        state.clicks++;
-        send(acted);
       }} else {{
-        send('alive');
+        state.wasExited = false;
+        if (acted) {{
+          state.clicks++;
+          send(acted);
+        }} else {{
+          send('alive');
+          // 心跳采样：每 20 tick 记录一次选择器命中全貌
+          if (state.ticks % 20 === 1) {{
+            diag('beat', 'tick=' + state.ticks + ' url=' + location.pathname.slice(0, 60) +
+                 ' platform=' + CFG.platform + ' hits=[' + hits.join(',') + '] 全0即疑似改版');
+          }}
+        }}
       }}
 
       // 6. 空闲时模拟轻微鼠标活动，防止会话闲置断开
@@ -174,13 +253,22 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
       if (acted) state.last = acted;
     }} catch(e) {{
       send('error');
+      diag('error', 'tick 异常: ' + (e && e.message) + ' | ' + String(e && e.stack).slice(0, 200));
     }}
   }}
+
+  // 手动诊断入口：前端「DOM 采样」按钮触发，输出当前页面结构快照
+  window.__CPK_PROBE__ = function(){{
+    diag('probe', '手动采样: ' + domSample());
+    tick();
+    return 'ok';
+  }};
 
   window.__CPK_TICK__ = tick;
   // 页面内定时器（窗口可见时生效）
   setInterval(function(){{ try {{ tick(); }} catch(e){{}} }}, CFG.intervalMs || 5000);
   send('installed');
+  diag('sys', '保活脚本已注入 platform=' + CFG.platform + ' interval=' + (CFG.intervalMs || 5000) + 'ms url=' + location.href.slice(0, 120));
 }})();"#,
         cfg_json = cfg_json,
         __CPK_CURSOR__ = cursor_b64

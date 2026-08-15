@@ -1,5 +1,6 @@
 use crate::config::{self, SlotConfig};
 use crate::keepalive;
+use crate::logger;
 use crate::state::SlotState;
 use crate::AppState;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
@@ -68,6 +69,13 @@ pub fn start_slot(app: &AppHandle, slot: u32) -> Result<(), String> {
 
     let win = builder.build().map_err(|e| format!("创建窗口失败: {e}"))?;
 
+    logger::log(
+        app,
+        slot,
+        "sys",
+        &format!("窗口已启动 platform={} url={} profile={:?}", cfg.platform, url, profile.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()),
+    );
+
     // 关闭按钮 → 隐藏（保活继续），通过托盘/老板键再次显示
     {
         let w = win.clone();
@@ -125,8 +133,11 @@ fn spawn_watchdog(app: AppHandle, slot: u32) {
                 s.visible = visible;
             });
             // 驱动页面内保活 tick（eval 直接执行，不受页面定时器节流影响）
-            let _ = win.eval("try{window.__CPK_TICK__&&window.__CPK_TICK__()}catch(e){}");
+            if let Err(e) = win.eval("try{window.__CPK_TICK__&&window.__CPK_TICK__()}catch(e){}") {
+                logger::log(&task_app, slot, "error", &format!("看门狗 eval 失败: {e}"));
+            }
         }
+        logger::log(&task_app, slot, "sys", "看门狗退出（窗口已销毁）");
     });
 
     let old = {
@@ -136,6 +147,7 @@ fn spawn_watchdog(app: AppHandle, slot: u32) {
     };
     if let Some(old) = old {
         old.abort();
+        logger::log(app, slot, "sys", "看门狗已替换（旧任务终止）");
     }
 }
 
@@ -158,10 +170,7 @@ pub fn stop_slot(app: &AppHandle, slot: u32) -> Result<(), String> {
         s.visible = false;
         s.last_status = "已停止".into();
     });
-    let _ = app.emit(
-        "cpk://log",
-        serde_json::json!({"slot": slot, "msg": "窗口已停止"}),
-    );
+    logger::log(app, slot, "sys", "窗口已停止");
     Ok(())
 }
 
@@ -172,11 +181,14 @@ pub fn toggle_slot(app: &AppHandle, slot: u32) {
             Ok(true) => {
                 let _ = win.hide();
                 sync_state(app, slot, |s| s.visible = false);
+                // 隐藏后页面定时器会被节流，保活切换为由看门狗 eval 驱动
+                logger::log(app, slot, "sys", "窗口已隐藏（保活切换为看门狗驱动模式）");
             }
             _ => {
                 let _ = win.show();
                 let _ = win.set_focus();
                 sync_state(app, slot, |s| s.visible = true);
+                logger::log(app, slot, "sys", "窗口已显示");
             }
         }
     }

@@ -134,3 +134,29 @@ pub fn open_url(app: AppHandle, url: String) -> Result<(), String> {
 pub fn app_quit(app: AppHandle) {
     app.exit(0);
 }
+
+/// 打开日志文件所在目录（并定位当日日志）
+#[tauri::command]
+pub fn open_log_dir(app: AppHandle) -> Result<String, String> {
+    use tauri_plugin_opener::OpenerExt;
+    let path = crate::logger::log_file_path(&app);
+    if let Some(dir) = path.parent() {
+        app.opener()
+            .open_path(dir.to_string_lossy().to_string(), None::<&str>)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// 对运行中的槽位触发 DOM 采样：页面脚本会把当前全部 class 清单写入日志
+#[tauri::command]
+pub fn probe_slot(app: AppHandle, slot: u32) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(&browser::slot_label(slot)) {
+        win.eval("try{window.__CPK_PROBE__?window.__CPK_PROBE__():'no-script'}catch(e){}")
+            .map_err(|e| e.to_string())?;
+        crate::logger::log(&app, slot, "sys", "已触发手动 DOM 采样");
+        Ok(())
+    } else {
+        Err("窗口未启动".into())
+    }
+}
