@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8" />
+  <title>设置</title>
+  <link rel="stylesheet" href="login.css" />
+</head>
+
+<body>
+  <div class="dlg">
+    <div class="lbl">平台</div>
+    <select id="platform" class="ctl">
+      <option value="mobile">移动云手机</option>
+      <option value="unicom">联通云手机</option>
+    </select>
+
+    <div class="lbl">缓存数据目录名(建议填手机号)</div>
+    <input id="name" class="ctl big" type="text" autocomplete="off" />
+
+    <div class="lbl">窗口分辨率</div>
+    <div class="res-row">
+      <input id="width" class="ctl" type="number" value="414" min="280" max="4096" />
+      <span class="x">X</span>
+      <input id="height" class="ctl" type="number" value="896" min="400" max="4096" />
+    </div>
+
+    <div class="lbl">老板键索引 CTRL + (1~9)</div>
+    <input id="idx" class="ctl big" type="number" value="1" min="1" max="9" />
+
+    <div class="lbl">指定Cookie值</div>
+    <textarea id="cookies" class="ctl" rows="2" placeholder="可选，每行 name=value"></textarea>
+
+    <div class="hint" id="running-hint">&nbsp;</div>
+
+    <button id="btn-go">进入</button>
+    <div class="foot">关闭窗口=隐藏保活 · Ctrl+N 显隐 · Ctrl+U 地址栏 · 托盘可退出</div>
+  </div>
+
+  <script src="login.js"></script>
+</body>
+
+</html>

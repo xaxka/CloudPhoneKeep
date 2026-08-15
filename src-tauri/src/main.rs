@@ -7,12 +7,11 @@ mod keepalive;
 mod logger;
 mod report_server;
 mod state;
-mod update;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use tauri::{Manager, WindowEvent};
+use tauri::Manager;
 
 pub struct AppState {
     /// 本地回环上报服务端口（页面内保活脚本通过它回报状态）
@@ -23,10 +22,12 @@ pub struct AppState {
     pub states: Mutex<HashMap<u32, state::SlotState>>,
     /// 每个槽位的原生看门狗任务（窗口隐藏时由 Rust 侧驱动页面 tick）
     pub watchdogs: Mutex<HashMap<u32, tauri::async_runtime::JoinHandle<()>>>,
-    /// 全局热键 id -> 槽位
+    /// 全局热键 id -> 槽位（0 = Ctrl+U 地址栏）
     pub shortcut_ids: Mutex<HashMap<u32, u32>>,
-    /// 主面板关闭提示只弹一次
-    pub main_close_notified: Mutex<bool>,
+    /// 当前聚焦的浏览器窗口槽位（Ctrl+U 地址栏作用目标）
+    pub focused: Mutex<u32>,
+    /// 托盘句柄（窗口启停后重建菜单）
+    pub tray: Mutex<Option<tauri::tray::TrayIcon>>,
 }
 
 impl AppState {
@@ -37,12 +38,42 @@ impl AppState {
             states: Mutex::new(HashMap::new()),
             watchdogs: Mutex::new(HashMap::new()),
             shortcut_ids: Mutex::new(HashMap::new()),
-            main_close_notified: Mutex::new(false),
+            focused: Mutex::new(0),
+            tray: Mutex::new(None),
         }
     }
 }
 
+/// panic 记录到 exe 目录 logs/panic.log，避免静默闪退无法排查
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!(
+            "[{}] PANIC: {info}\n",
+            chrono_like_now()
+        );
+        let dir = config::base_dir().join("logs");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("panic.log"), &msg);
+        default_hook(info);
+    }));
+}
+
+fn chrono_like_now() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+        + 8 * 3600 * 1000;
+    let rem = ms.rem_euclid(86_400_000);
+    let (h, m, s) = (rem / 3_600_000, rem % 3_600_000 / 60_000, rem % 60_000 / 1000);
+    let days = ms.div_euclid(86_400_000);
+    format!("day{days} {h:02}:{m:02}:{s:02}")
+}
+
 fn main() {
+    install_panic_hook();
+
     tauri::Builder::default()
         .manage(AppState::new())
         .plugin(tauri_plugin_notification::init())
@@ -52,29 +83,17 @@ fn main() {
                 .with_handler(browser::shortcut_handler)
                 .build(),
         )
+        .on_menu_event(|app, event| browser::handle_menu_event(app, event.id().as_ref()))
         .invoke_handler(tauri::generate_handler![
-            commands::get_app_info,
-            commands::get_config,
-            commands::save_config,
-            commands::start_slot,
+            commands::get_slot,
+            commands::launch_slot,
+            commands::get_running,
             commands::stop_slot,
-            commands::toggle_slot,
-            commands::show_slot,
-            commands::topmost_slot,
-            commands::rotate_slot,
-            commands::home_slot,
-            commands::reload_slot,
-            commands::get_states,
-            commands::check_update,
-            commands::open_url,
-            commands::app_quit,
-            commands::open_log_dir,
-            commands::probe_slot
+            commands::app_quit
         ])
         .setup(|app| {
-            // 载入配置
-            let cfg = config::load(app.handle());
-            let auto_start = cfg.settings.auto_start;
+            // 载入配置（exe 目录下的 config.json，便携化）
+            let cfg = config::load();
             {
                 let state: tauri::State<AppState> = app.state();
                 *state.config.lock().unwrap() = cfg;
@@ -83,37 +102,27 @@ fn main() {
             // 启动本地回环上报服务（页面内脚本回传保活状态）
             report_server::spawn(app.handle().clone());
 
-            // 托盘 + 全局老板键 Ctrl+1..9
+            // 托盘（注意：老板键不再在启动时全局注册，改为按窗口注册，
+            // 多实例/二次启动时不会因热键冲突而崩溃）
             browser::create_tray(app.handle())?;
-            browser::register_shortcuts(app.handle())?;
 
-            // 主面板关闭时隐藏到托盘而不是退出
-            if let Some(main) = app.get_webview_window("main") {
-                let win = main.clone();
-                main.on_window_event(move |e| {
-                    if let WindowEvent::CloseRequested { api, .. } = e {
-                        api.prevent_close();
-                        let _ = win.hide();
-                    }
-                });
-            }
-
-            // 可选：启动时自动开启已启用的帐号
-            if auto_start {
-                let handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(1200));
-                    let slots: Vec<u32> = {
-                        let state: tauri::State<AppState> = handle.state();
-                        let cfg = state.config.lock().unwrap();
-                        cfg.slots
+            // 设置窗口关闭语义：
+            //   有云手机窗口在运行 → 隐藏到托盘（保活继续）
+            //   没有任何窗口      → 直接退出
+            if let Some(login) = app.get_webview_window("login") {
+                let win = login.clone();
+                login.on_window_event(move |e| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = e {
+                        let app = win.app_handle().clone();
+                        let running = app
+                            .webview_windows()
                             .iter()
-                            .filter(|s| s.enabled)
-                            .map(|s| s.slot)
-                            .collect()
-                    };
-                    for slot in slots {
-                        let _ = browser::start_slot(&handle, slot);
+                            .any(|(label, _)| label.starts_with("browser-"));
+                        if running {
+                            api.prevent_close();
+                            let _ = win.hide();
+                        }
+                        // 无运行窗口时不阻止 → 进程退出
                     }
                 });
             }

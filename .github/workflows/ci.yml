@@ -29,19 +29,10 @@ jobs:
         if: github.event_name == 'pull_request'
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
-      - name: Setup Node
+      # 免安装：直接 cargo build 产出单个便携 exe（无 NSIS 安装包、无 Node 依赖）
+      - name: Build portable exe
         if: github.event_name != 'pull_request'
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install Tauri CLI
-        if: github.event_name != 'pull_request'
-        run: npm install -g @tauri-apps/cli@^2
-
-      - name: Build
-        if: github.event_name != 'pull_request'
-        run: npx tauri build
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
 
       - name: Upload exe to Release
         if: github.event_name != 'pull_request'
@@ -50,13 +41,14 @@ jobs:
           tag_name: dev
           name: Dev Build
           body: |
-            自动构建 (dev)
+            自动构建 (dev, 便携版)
             Commit: ${{ github.sha }}
             Build: #${{ github.run_number }}
             时间: ${{ github.run_started_at }} UTC
+
+            单文件免安装：exe 放到任意目录运行，配置/数据/日志都生成在 exe 所在目录。
           files: |
             src-tauri/target/release/CloudPhoneKeep.exe
-            src-tauri/target/release/bundle/nsis/*.exe
           prerelease: true
           draft: false
         env:

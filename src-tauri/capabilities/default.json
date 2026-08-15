@@ -1,8 +1,8 @@
 [
   {
     "identifier": "default",
-    "description": "主面板与浏览器窗口的基础能力",
-    "windows": ["main", "browser-*"],
+    "description": "设置窗口与浏览器窗口的基础能力",
+    "windows": ["login", "browser-*"],
     "permissions": [
       "core:default",
       "core:window:default",

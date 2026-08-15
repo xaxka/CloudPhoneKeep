@@ -2,10 +2,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 
 /// 诊断日志：
-/// 1. 写入 {app_log_dir}/cpk-YYYYMMDD.log，按天滚动，保留最近 7 天
+/// 1. 写入 exe目录/logs/cpk-YYYYMMDD.log，按天滚动，保留最近 7 天
 /// 2. 同步推送到管理面板（cpk://log 事件）
 ///
 /// 格式：`HH:mm:ss.SSS [slot=N|sys] [level] message`
@@ -61,11 +61,9 @@ fn day_str(z: i64) -> String {
     format!("{y:04}{m:02}{d:02}")
 }
 
-fn log_dir(app: &tauri::AppHandle) -> PathBuf {
-    let dir = app
-        .path()
-        .app_log_dir()
-        .unwrap_or_else(|_| PathBuf::from("."));
+fn log_dir(_app: &tauri::AppHandle) -> PathBuf {
+    // 便携化：日志固定保存在 exe 目录下的 logs/（与原版程序数据目录行为一致）
+    let dir = crate::config::base_dir().join("logs");
     let _ = fs::create_dir_all(&dir);
     dir
 }

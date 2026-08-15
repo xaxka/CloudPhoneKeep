@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::Manager;
 
 pub const DEFAULT_WEB_URI: &str = "https://uphone.wo-adv.cn/cloudphone/#/home";
 /// 移动云手机 H5 入口
@@ -17,18 +16,18 @@ pub struct PlatformPreset {
 
 pub const PLATFORMS: [PlatformPreset; 2] = [
     PlatformPreset {
-        id: "unicom",
-        label: "联通云手机",
-        web_uri: DEFAULT_WEB_URI,
-        width: 405.0,
-        height: 720.0,
-    },
-    PlatformPreset {
         id: "mobile",
         label: "移动云手机",
         web_uri: MOBILE_WEB_URI,
         width: 414.0,
         height: 896.0,
+    },
+    PlatformPreset {
+        id: "unicom",
+        label: "联通云手机",
+        web_uri: DEFAULT_WEB_URI,
+        width: 405.0,
+        height: 720.0,
     },
 ];
 
@@ -38,26 +37,61 @@ pub fn platform_preset(id: &str) -> &'static PlatformPreset {
         .find(|p| p.id == id)
         .unwrap_or(&PLATFORMS[0])
 }
-/// 更新检查默认指向本仓库自己的 GitHub Releases。
-/// 仅获取版本信息用于提示，绝不自动下载或执行任何文件。
-pub const DEFAULT_UPDATE_URL: &str =
-    "https://api.github.com/repos/xixka/CloudPhoneKeep/releases/latest";
-pub const DEFAULT_DOWNLOAD_PAGE: &str = "https://github.com/xixka/CloudPhoneKeep/releases";
+
+// ---------------------------------------------------------------------------
+// 便携化：全部数据保存在 exe 所在目录（与原版 aardio 程序一致）
+//   config.json        总配置
+//   data/slot-N-名字   每个帐号的浏览器数据目录（Cookie/缓存隔离）
+//   logs/cpk-*.log     诊断日志
+// ---------------------------------------------------------------------------
+
+/// exe 所在目录（便携根目录）
+pub fn base_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+pub fn config_path() -> PathBuf {
+    base_dir().join("config.json")
+}
+
+/// 每个帐号独立的 WebView 数据目录（Cookie / 缓存隔离）
+pub fn profile_dir(slot: u32, name: &str) -> PathBuf {
+    let safe = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let folder = if safe.is_empty() {
+        format!("slot-{slot}")
+    } else {
+        format!("slot-{slot}-{safe}")
+    };
+    let p = base_dir().join("data").join(folder);
+    std::fs::create_dir_all(&p).ok();
+    p
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SlotConfig {
     /// 槽位编号 1~9，同时是老板键 Ctrl+N 的 N
     pub slot: u32,
-    /// 是否启用（自动启动时使用）
-    pub enabled: bool,
     /// 帐号名称（建议填手机号），用于缓存目录隔离
     pub name: String,
-    /// 平台：unicom 联通云手机 / mobile 移动云手机
+    /// 平台：mobile 移动云手机 / unicom 联通云手机
     pub platform: String,
     /// 浏览器地址
     pub web_uri: String,
-    /// 自定义 Cookie（每行 name=value; 可选 domain=...）
+    /// 自定义 Cookie（每行 name=value）
     pub cookies: String,
     /// 窗口宽
     pub width: f64,
@@ -81,13 +115,12 @@ impl Default for SlotConfig {
     fn default() -> Self {
         Self {
             slot: 1,
-            enabled: false,
             name: String::new(),
-            platform: "unicom".to_string(),
-            web_uri: DEFAULT_WEB_URI.to_string(),
+            platform: "mobile".to_string(),
+            web_uri: MOBILE_WEB_URI.to_string(),
             cookies: String::new(),
-            width: 405.0,
-            height: 720.0,
+            width: 414.0,
+            height: 896.0,
             screen_model: "vertical".to_string(),
             keep_alive: true,
             interval_ms: 5000,
@@ -98,31 +131,34 @@ impl Default for SlotConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct Settings {
-    /// 启动时自动开启已启用的帐号
-    pub auto_start: bool,
-    /// 在线更新检查地址
-    pub update_url: String,
-    /// 新版本下载页
-    pub download_page: String,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            auto_start: false,
-            update_url: DEFAULT_UPDATE_URL.to_string(),
-            download_page: DEFAULT_DOWNLOAD_PAGE.to_string(),
+impl SlotConfig {
+    /// 归一化非法值
+    pub fn normalized(&self) -> SlotConfig {
+        let mut c = self.clone();
+        if !(1..=9).contains(&c.slot) {
+            c.slot = 1;
         }
+        if c.platform.trim().is_empty() {
+            c.platform = "mobile".into();
+        }
+        let preset = platform_preset(&c.platform);
+        if c.web_uri.trim().is_empty() {
+            c.web_uri = preset.web_uri.to_string();
+        }
+        if c.width < 280.0 || c.height < 400.0 {
+            c.width = preset.width;
+            c.height = preset.height;
+        }
+        if c.interval_ms < 1000 {
+            c.interval_ms = 5000;
+        }
+        c
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
-    pub settings: Settings,
     pub slots: Vec<SlotConfig>,
 }
 
@@ -135,77 +171,51 @@ impl AppConfig {
             s.slot = i;
             slots.push(s);
         }
-        Self {
-            settings: Settings::default(),
-            slots,
-        }
+        Self { slots }
     }
 }
 
-pub fn config_path(app: &tauri::AppHandle) -> PathBuf {
-    let dir = app
-        .path()
-        .app_config_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    std::fs::create_dir_all(&dir).ok();
-    dir.join("config.json")
-}
-
-/// 每个帐号独立的 WebView 数据目录（Cookie / 缓存隔离）
-pub fn profile_dir(app: &tauri::AppHandle, slot: u32, name: &str) -> PathBuf {
-    let dir = app
-        .path()
-        .app_local_data_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let safe = name
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    let folder = if safe.is_empty() {
-        format!("slot-{slot}")
-    } else {
-        format!("slot-{slot}-{safe}")
-    };
-    let p = dir.join("profiles").join(folder);
-    std::fs::create_dir_all(&p).ok();
-    p
-}
-
-pub fn load(app: &tauri::AppHandle) -> AppConfig {
-    let path = config_path(app);
+pub fn load() -> AppConfig {
+    let path = config_path();
     if let Ok(text) = std::fs::read_to_string(&path) {
-        if let Ok(mut cfg) = serde_json::from_str::<AppConfig>(&text) {
-            // 补齐缺失槽位，保持 1..=9
-            let mut slots: Vec<SlotConfig> = Vec::new();
-            for i in 1..=9u32 {
-                if let Some(mut found) = cfg.slots.iter().find(|s| s.slot == i).cloned() {
-                    // 兼容旧配置：platform 为空时回落到 unicom
-                    if found.platform.trim().is_empty() {
-                        found.platform = "unicom".into();
-                    }
-                    slots.push(found);
-                } else {
-                    let mut s = SlotConfig::default();
-                    s.slot = i;
-                    slots.push(s);
-                }
-            }
-            cfg.slots = slots;
-            return cfg;
+        if let Ok(cfg) = serde_json::from_str::<AppConfig>(&text) {
+            return normalize(cfg);
         }
     }
     AppConfig::with_slots()
 }
 
-pub fn save(app: &tauri::AppHandle, cfg: &AppConfig) -> Result<(), String> {
-    let path = config_path(app);
+fn normalize(mut cfg: AppConfig) -> AppConfig {
+    let mut slots: Vec<SlotConfig> = Vec::new();
+    for i in 1..=9u32 {
+        let found = cfg.slots.iter().find(|s| s.slot == i).cloned();
+        let s = match found {
+            Some(s) => s.normalized(),
+            None => {
+                let mut d = SlotConfig::default();
+                d.slot = i;
+                d
+            }
+        };
+        slots.push(s);
+    }
+    cfg.slots = slots;
+    cfg
+}
+
+pub fn save(cfg: &AppConfig) -> Result<(), String> {
+    let path = config_path();
     let text = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| e.to_string())
+    std::fs::write(&path, text).map_err(|e| format!("写入 {} 失败: {e}", path.display()))
+}
+
+/// 更新/插入一个槽位并落盘
+pub fn upsert_slot(cfg: &mut AppConfig, slot: SlotConfig) {
+    let slot = slot.normalized();
+    if let Some(pos) = cfg.slots.iter().position(|s| s.slot == slot.slot) {
+        cfg.slots[pos] = slot;
+    } else {
+        cfg.slots.push(slot);
+        cfg.slots.sort_by_key(|s| s.slot);
+    }
 }

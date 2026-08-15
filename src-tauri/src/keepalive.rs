@@ -118,6 +118,31 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     }} catch(e){{}}
   }}
 
+  // 地址栏（Ctrl+U 呼出/收起，回车跳转，Esc 关闭）—— 还原原版 address.aardio
+  var addrBar = document.createElement('div');
+  addrBar.id = 'cpk-addr-bar';
+  addrBar.style.cssText = 'display:none;position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#f5f5f5;border-bottom:1px solid #999;padding:2px 3px;box-sizing:border-box;';
+  var addrInput = document.createElement('input');
+  addrInput.type = 'text';
+  addrInput.placeholder = '输入网址后回车跳转，Esc 关闭';
+  addrInput.style.cssText = 'width:100%;height:26px;font-size:14px;border:1px solid #888;padding:0 4px;box-sizing:border-box;outline:none;background:#fff;';
+  addrInput.addEventListener('keydown', function(ev){{
+    if (ev.key === 'Enter'){{
+      var u = addrInput.value.trim();
+      if (u) {{ try {{ location.href = u; }} catch(e){{}} }}
+      addrBar.style.display = 'none';
+    }} else if (ev.key === 'Escape'){{
+      addrBar.style.display = 'none';
+    }}
+    ev.stopPropagation();
+  }});
+  addrBar.appendChild(addrInput);
+  (document.body || document.documentElement).appendChild(addrBar);
+  window.__CPK_ADDR__ = function(on){{
+    addrBar.style.display = on ? 'block' : 'none';
+    if (on) {{ addrInput.value = location.href; addrInput.focus(); addrInput.select(); }}
+  }};
+
   if (CFG.cookies && CFG.cookies.length) {{
     var applyCookies = function(){{
       for (var i = 0; i < CFG.cookies.length; i++){{

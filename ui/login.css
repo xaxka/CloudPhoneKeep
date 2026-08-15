@@ -1,0 +1,95 @@
+/* 还原原版 aardio 设置对话框观感：经典灰底、居中标签、粗体大输入框 */
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: #f0f0f0;
+  font-family: "Segoe UI", "Microsoft YaHei", "SimSun", sans-serif;
+  font-size: 13px;
+  color: #000;
+  user-select: none;
+}
+
+.dlg {
+  padding: 12px 14px 10px;
+  display: flex;
+  flex-direction: column;
+}
+
+.lbl {
+  text-align: center;
+  margin: 8px 0 4px;
+  color: #222;
+}
+
+.ctl {
+  width: 100%;
+  border: 1px solid #7a7a7a;
+  background: #fff;
+  padding: 4px 6px;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+}
+
+.ctl:focus {
+  border-color: #0078d7;
+}
+
+.big {
+  text-align: center;
+  font-size: 19px;
+  font-weight: 700;
+  padding: 6px 4px;
+}
+
+#platform {
+  text-align: center;
+  font-size: 15px;
+  padding: 5px;
+}
+
+.res-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.res-row .ctl { text-align: center; font-weight: 700; font-size: 15px; }
+
+.x { font-weight: 700; color: #444; }
+
+#cookies {
+  resize: none;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.hint {
+  margin: 8px 0 4px;
+  text-align: center;
+  font-size: 12px;
+  color: #555;
+  min-height: 16px;
+}
+
+#btn-go {
+  height: 40px;
+  font-size: 16px;
+  font-weight: 700;
+  font-family: inherit;
+  background: #e1e1e1;
+  border: 1px solid #adadad;
+  color: #000;
+  cursor: pointer;
+}
+
+#btn-go:hover { background: #e5f1fb; border-color: #0078d7; }
+#btn-go:active { background: #cce4f7; border-color: #005499; }
+
+.foot {
+  margin-top: 8px;
+  text-align: center;
+  font-size: 11px;
+  color: #777;
+}
