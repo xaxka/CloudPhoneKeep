@@ -95,6 +95,16 @@ pub fn register_slot_dir(slot: u32, dir: PathBuf) {
     slot_dirs().lock().unwrap().insert(slot, dir);
 }
 
+/// 查询某槽位当前登记的日志目录（= 该帐号窗口实际使用的数据目录，
+/// 可能是 -r2 兜底目录）。托盘「打开数据目录」用它，保证打开的目录
+/// 与日志/WebView2 数据真正所在一致（按配置名重算会算回原目录，兜底场景下打开错目录）
+pub fn slot_dir(slot: u32) -> Option<PathBuf> {
+    if slot == 0 {
+        return None;
+    }
+    slot_dirs().lock().unwrap().get(&slot).cloned()
+}
+
 fn log_dir(slot: u32) -> PathBuf {
     if slot == 0 {
         return crate::config::base_dir();

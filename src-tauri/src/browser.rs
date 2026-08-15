@@ -301,6 +301,8 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
     spawn_watchdog(app.clone(), slot);
     // 还原原版：每个窗口创建自己的托盘图标
     create_slot_tray(app, slot);
+    // 预创建「窗口设置」小窗（隐藏）：菜单点击时瞬时弹出，无 1~2 秒建窗等待
+    precreate_winset(app, slot);
     // 启动成功：隐藏设置窗口（还原原版 loginForm.show(false)）。
     // 经主线程派发执行，避免从后台线程直接调窗口 API 的兼容性问题
     hide_login(app);
@@ -427,11 +429,71 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
 /// 两个线程都会走到建窗 → 出现 2 个窗口设置。建窗期间按槽位加锁去重。
 static WINSET_OPENING: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
+/// 建窗期间用户点了菜单 → 记下「想要显示」，建好后立即显示（不再要求用户点第二下）
+static WINSET_WANTED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// 构建「窗口设置」小窗（隐藏状态；显示由调用方决定）。
+/// 尺寸 280x264：内容实际高度约 217px + 出错提示换行余量，原 218px 会贴边裁掉底部
+fn build_winset(app: &AppHandle, slot: u32) -> Result<tauri::WebviewWindow, tauri::Error> {
+    let win = WebviewWindowBuilder::new(
+        app,
+        &winset_label(slot),
+        WebviewUrl::App(std::path::PathBuf::from("winset.html")),
+    )
+    .title("窗口设置")
+    .inner_size(280.0, 264.0)
+    .resizable(false)
+    .visible(false)
+    .build()?;
+    // 关闭 = 隐藏（窗口保留，再次打开瞬时响应；退出走 quit_all 的 destroy，不受影响）
+    let w = win.clone();
+    win.on_window_event(move |e| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = e {
+            api.prevent_close();
+            let _ = w.hide();
+        }
+    });
+    Ok(win)
+}
+
+/// 预创建「窗口设置」小窗（隐藏）：帐号窗口启动后即在后台线程建好，
+/// 用户点菜单时只需 show——消除 WebView2 建窗的 1~2 秒等待。
+/// 失败仅记日志，不影响帐号窗口；下次点菜单时走 open_winset 现建兜底
+fn precreate_winset(app: &AppHandle, slot: u32) {
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let _guard = WinsetOpeningGuard(slot);
+        if app2.get_webview_window(&winset_label(slot)).is_some() {
+            return;
+        }
+        match build_winset(&app2, slot) {
+            Ok(_) => logger::log(&app2, slot, "debug", "窗口设置小窗已预创建（隐藏待用）"),
+            Err(e) => logger::log(&app2, slot, "debug", &format!("窗口设置预创建失败（点菜单时将现建）：{e}")),
+        }
+        // 预创建完成时若用户已在等菜单响应，立即显示
+        if WINSET_WANTED.lock().unwrap().contains(&slot) {
+            WINSET_WANTED.lock().unwrap().retain(|s| *s != slot);
+            if let Some(w) = app2.get_webview_window(&winset_label(slot)) {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }
+    });
+}
+
+/// RAII 防重复：线程结束时自动移除槽位标记（无论建窗成败）。
+/// 用法：`let _guard = WinsetOpeningGuard(slot);`（元组结构体直接构造）
+struct WinsetOpeningGuard(u32);
+impl Drop for WinsetOpeningGuard {
+    fn drop(&mut self) {
+        WINSET_OPENING.lock().unwrap().retain(|s| *s != self.0);
+    }
+}
+
 /// 「窗口设置」小窗（还原原版 settingWin：仅分辨率输入 + 保存，会话内生效不落盘，
-/// 同一窗口单实例，关闭后可再次打开）
+/// 同一窗口单实例，关闭=隐藏可反复瞬时打开）
 pub fn open_winset(app: &AppHandle, slot: u32) {
-    let label = winset_label(slot);
-    if let Some(win) = app.get_webview_window(&label) {
+    if let Some(win) = app.get_webview_window(&winset_label(slot)) {
         // 单实例：已打开则聚焦（还原原版 isWinHwnd 拦截重复打开）
         let _ = win.show();
         let _ = win.set_focus();
@@ -440,28 +502,25 @@ pub fn open_winset(app: &AppHandle, slot: u32) {
     {
         let mut opening = WINSET_OPENING.lock().unwrap();
         if opening.contains(&slot) {
-            return; // 已有一个正在创建中，忽略连击
+            // 预创建还在进行中：记下「想要显示」，建好立即弹出
+            let mut wanted = WINSET_WANTED.lock().unwrap();
+            if !wanted.contains(&slot) {
+                wanted.push(slot);
+            }
+            return;
         }
-        opening.push(slot);
     }
     // 已知 Windows 陷阱（wry#583）：在菜单事件回调里同步创建 WebView2 窗口可能死锁，
     // 丢到独立线程创建，回调立即返回
     let app2 = app.clone();
     std::thread::spawn(move || {
-        let label = winset_label(slot);
-        let built = WebviewWindowBuilder::new(
-            &app2,
-            &label,
-            WebviewUrl::App(std::path::PathBuf::from("winset.html")),
-        )
-        .title("窗口设置")
-        .inner_size(275.0, 218.0)
-        .resizable(false)
-        .build();
-        // 建窗结束（无论成败）解除防重复：成功后窗口已可查到，失败则允许重试
-        WINSET_OPENING.lock().unwrap().retain(|s| *s != slot);
-        match built {
-            Ok(_) => logger::log(&app2, slot, "sys", "打开窗口设置（分辨率，仅本会话生效）"),
+        let _guard = WinsetOpeningGuard(slot);
+        match build_winset(&app2, slot) {
+            Ok(w) => {
+                let _ = w.show();
+                let _ = w.set_focus();
+                logger::log(&app2, slot, "sys", "打开窗口设置（分辨率，仅本会话生效）")
+            }
             Err(e) => logger::log(&app2, slot, "error", &format!("窗口设置打开失败：{e}")),
         }
     });
@@ -735,8 +794,9 @@ pub fn toggle_address_bar(app: &AppHandle) {
     }
 }
 
-/// 打开某帐号的数据目录（AppData\LocalLow\CloudPhoneKeep\<目录名>，含日志；
-/// 查不到配置时打开数据根目录）
+/// 打开某帐号的数据目录（含 WebView2 数据与本帐号日志）。
+/// 优先用「实际运行目录」登记表：数据目录被锁换用 -r2 兜底目录时，
+/// 日志与 WebView2 数据都在兜底目录里——按配置名重算会打开旧目录（里面没有日志）
 fn open_slot_data_dir(app: &AppHandle, slot: u32) {
     use tauri_plugin_opener::OpenerExt;
     let name = {
@@ -748,11 +808,21 @@ fn open_slot_data_dir(app: &AppHandle, slot: u32) {
             .map(|s| s.name.clone())
             .unwrap_or_default()
     };
-    let dir = if name.trim().is_empty() {
-        config::base_dir()
-    } else {
-        config::profile_dir(slot, &name)
-    };
+    let dir = logger::slot_dir(slot)
+        .or_else(|| {
+            if name.trim().is_empty() {
+                None
+            } else {
+                Some(config::profile_dir(slot, &name))
+            }
+        })
+        .unwrap_or_else(config::base_dir);
+    logger::log(
+        app,
+        slot,
+        "sys",
+        &format!("打开数据目录：{}（本帐号日志 cpk-*.log 也在此目录）", dir.display()),
+    );
     let _ = app
         .opener()
         .open_path(dir.to_string_lossy().to_string(), None::<&str>);
@@ -766,7 +836,7 @@ fn sync_state(app: &AppHandle, slot: u32, f: impl FnOnce(&mut SlotState)) {
 
 // ---------------------------------------------------------------------------
 // 托盘（还原原版：每个云手机窗口创建自己的 win.util.tray）
-// 菜单：显示(●)/隐藏(●)/分隔/打开设置（新开帐号）/打开数据目录/分隔/退出
+// 菜单：显示(●)/隐藏(●)/分隔/新开账号/打开数据目录/分隔/退出
 // （● = 当前状态；左键单击=打开窗口，右键=弹出菜单）
 // ---------------------------------------------------------------------------
 
@@ -855,7 +925,7 @@ fn slot_tray_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tauri:
     let show = MenuItemBuilder::with_id(format!("show-{slot}"), if visible { "● 显示" } else { "○ 显示" }).build(app)?;
     let hide = MenuItemBuilder::with_id(format!("hide-{slot}"), if !visible { "● 隐藏" } else { "○ 隐藏" }).build(app)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
-    let open_settings = MenuItemBuilder::with_id("open-settings", "打开设置（新开帐号）").build(app)?;
+    let open_settings = MenuItemBuilder::with_id("open-settings", "新开账号").build(app)?;
     let datadir = MenuItemBuilder::with_id(format!("data-{slot}"), "打开数据目录").build(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
