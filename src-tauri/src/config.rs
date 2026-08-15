@@ -152,11 +152,8 @@ pub struct SlotConfig {
     pub interval_ms: u64,
     /// 空闲时模拟鼠标活动防掉线
     pub simulate_activity: bool,
-    /// 注入云手机触点光标（默认关：部分用户觉得指针怪，需要可在设置里勾选）
+    /// 注入云手机触点光标（默认开，还原原版 mobile_cloud 无条件注入触控圆点光标的行为）
     pub custom_cursor: bool,
-    /// 滚轮滑动优化：云手机 H5 是触摸页面，鼠标滚轮常滚不动；
-    /// 开启后把滚轮转成触摸/滚动事件（默认开）
-    pub wheel_scroll: bool,
     /// 屏蔽页面右键菜单
     pub block_context_menu: bool,
 }
@@ -174,8 +171,7 @@ impl Default for SlotConfig {
             keep_alive: true,
             interval_ms: 5000,
             simulate_activity: true,
-            custom_cursor: false,
-            wheel_scroll: true,
+            custom_cursor: true,
             block_context_menu: true,
         }
     }

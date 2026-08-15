@@ -1,4 +1,6 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// 无条件 Windows GUI 子系统：debug 构建也不弹控制台（日志始终写 logs/ 目录；
+// 需要终端实时看日志时加 --console 或设 CPK_CONSOLE=1 显式附加）
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod browser;
 mod commands;
@@ -52,17 +54,19 @@ impl AppState {
     }
 }
 
-/// panic 记录到 exe 目录 logs/panic.log，避免静默闪退无法排查
+/// panic 记录到 exe 目录 logs/panic-p{pid}.log（带进程号，多开互不覆盖），
+/// 避免静默闪退无法排查
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let msg = format!(
-            "[{}] PANIC: {info}\n",
+            "[pid={}] [{}] PANIC: {info}\n",
+            std::process::id(),
             chrono_like_now()
         );
         let dir = config::base_dir().join("logs");
         let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join("panic.log"), &msg);
+        let _ = std::fs::write(dir.join(format!("panic-p{}.log", std::process::id())), &msg);
         default_hook(info);
     }));
 }
@@ -71,11 +75,26 @@ fn install_panic_hook() {
 /// msedgewebview2.exe（上次程序异常退出留下的残留进程会锁住用户数据目录，
 /// 导致新窗口创建失败报 0x800700AA / 0x8007139F）。按命令行精确匹配，
 /// 绝不误杀其他应用（微信/IDE 等）的 WebView2 进程。
+///
+/// 【多开保护】若检测到本程序还有其它实例在运行（同名 exe 进程数 > 1），
+/// 锁定的数据目录很可能属于那个活实例——此时【跳过清扫】返回 false，
+/// 调用方直接换新数据目录兜底，绝不把另一个实例的窗口杀掉。
+/// 返回 true = 已执行清扫（可以原地重试）。
 #[cfg(windows)]
-pub fn kill_zombie_webview2(app: &tauri::AppHandle) {
+pub fn kill_zombie_webview2(app: &tauri::AppHandle) -> bool {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    if other_instances_alive() {
+        logger::log(
+            app,
+            0,
+            "sys",
+            "检测到本程序还有其它实例在运行：数据目录被占用时不清扫进程（避免误杀另一实例的窗口），将改用新数据目录",
+        );
+        return false;
+    }
 
     let marker = config::base_dir().join("data").to_string_lossy().to_string();
     // PowerShell 单引号字符串内的单引号需翻倍转义（路径含引号时仍安全）
@@ -106,15 +125,55 @@ pub fn kill_zombie_webview2(app: &tauri::AppHandle) {
                     &format!("残留进程清扫：已强制结束 {} 个 WebView2 进程（PID: {}）", pids.len(), pids.join(",")),
                 );
             }
+            true
         }
         Err(e) => {
             logger::log(app, 0, "error", &format!("残留进程清扫失败（PowerShell 调用出错，将继续尝试创建窗口）：{e}"));
+            true // 清扫本身失败不是多实例占用，仍允许原地重试一次
         }
     }
 }
 
 #[cfg(not(windows))]
-pub fn kill_zombie_webview2(_app: &tauri::AppHandle) {}
+pub fn kill_zombie_webview2(_app: &tauri::AppHandle) -> bool {
+    true
+}
+
+/// 是否还有其它同名进程实例在运行（多开检测，用于清扫保护）。
+/// 非平台失败时按「无其它实例」处理，不影响主流程。
+#[cfg(windows)]
+fn other_instances_alive() -> bool {
+    let name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+        .unwrap_or_default();
+    if name.is_empty() {
+        return false;
+    }
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = format!(
+        "@(Get-Process -Name '{name}' -ErrorAction SilentlyContinue).Count"
+    );
+    Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<u32>()
+                .map(|n| n > 1)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn other_instances_alive() -> bool {
+    false
+}
 
 fn chrono_like_now() -> String {
     let ms = std::time::SystemTime::now()
@@ -156,12 +215,16 @@ fn main() {
     install_panic_hook();
     attach_parent_console();
 
-    // WebView2/Chromium 级调试日志：让 msedgewebview2 把内部错误写进各数据目录，
-    // 用于定位「窗口开了但页面空白/加载失败」这类 Rust 层完全看不到的问题。
-    // 再设环境变量 CPK_NETLOG=1 可额外开启网络事件全量记录（netlog.json，体积大，按需用）
+    // WebView2/Chromium 级调试日志【默认关闭，仅诊断时开启】：
+    // 设 CPK_WEBLOG=1 后 msedgewebview2 才写内部错误日志（各 data/ 目录内），
+    // 再叠加 CPK_NETLOG=1 可额外记录网络事件全量（netlog.json，体积大，按需用）。
+    // 注意：--enable-logging 不能默认开——WebView2 官方缺陷（WebView2Feedback#2195）
+    // 会在 Windows 上弹出控制台黑窗，这正是「日志明明写 logs/ 目录却还冒控制台」的原因。
     #[cfg(windows)]
     {
-        if std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none() {
+        if std::env::var_os("CPK_WEBLOG").is_some()
+            && std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none()
+        {
             let mut args = "--enable-logging --v=1".to_string();
             if std::env::var_os("CPK_NETLOG").is_some() {
                 args.push_str(" --log-net-log");
@@ -172,14 +235,10 @@ fn main() {
 
     tauri::Builder::default()
         .manage(AppState::new())
-        // 单实例必须最先注册：二次启动直接聚焦已有实例的设置窗口并退出，
-        // 防止双实例争抢同一 data 目录（WebView2 用户数据目录锁死 → 窗口创建失败）
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = app.get_webview_window("login") {
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
-        }))
+        // 【多开支持】不再注册单实例插件：用户会同时启动多个程序（不同目录/不同帐号），
+        // 单实例锁会把第二次启动直接聚焦旧实例并退出，多开根本起不来。
+        // 数据目录冲突改由两道兜底保护：其它实例存活时跳过进程清扫（main.rs
+        // other_instances_alive），目录被锁时自动换 -r2 新目录（browser.rs）
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(
@@ -197,14 +256,16 @@ fn main() {
             commands::set_slot_size
         ])
         .setup(|app| {
-            // 启动即写日志：版本 / exe 目录 / 门户，保证 logs/ 目录与文件一定生成（可诊断性）
+            // 启动即写日志：版本 / pid / exe 目录，保证 logs/ 目录与文件一定生成（可诊断性）。
+            // 每个进程实例一份独立日志文件（cpk-日期-p进程号.log），多开时互不混淆
             logger::log(
                 app.handle(),
                 0,
                 "sys",
                 &format!(
-                    "程序启动 v{} exe目录={}",
+                    "程序启动 v{} pid={} exe目录={}",
                     app.package_info().version,
+                    std::process::id(),
                     config::base_dir().display()
                 ),
             );
@@ -230,12 +291,12 @@ fn main() {
 
             // 设置窗口已创建 = WebView2 运行时可用（它本身就是一个 WebView2 窗口）
             logger::log(app.handle(), 0, "sys", "设置窗口已创建，WebView2 运行时正常");
-            #[cfg(windows)]
+            // 诊断开关提示（默认全关，绝不弹控制台；详见 main 函数开头注释）
             logger::log(
                 app.handle(),
                 0,
                 "debug",
-                "WebView2 调试日志已开启（--enable-logging --v=1）：Chromium 级错误日志写在各 data/ 目录内；CPK_NETLOG=1 可再记录网络事件 netlog.json；加 --console 启动可把日志实时打到终端",
+                "诊断开关：--console/CPK_CONSOLE=1 终端镜像日志；CPK_WEBLOG=1 WebView2 内部日志；CPK_NETLOG=1 网络事件全量",
             );
 
             // 设置窗口关闭语义（还原原版 login.aardio onClose → win.quitMessage）：

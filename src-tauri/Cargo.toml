@@ -1,7 +1,7 @@
 [package]
 name = "cloudphonekeep"
-version = "1.5.2"
-description = "联通云手机网页版多开保活工具"
+version = "1.6.0"
+description = "云手机网页版多开保活工具（移动/联通，支持多实例）"
 authors = ["xixka"]
 license = "MIT"
 edition = "2021"
@@ -15,7 +15,6 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
-tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "macros", "rt"] }

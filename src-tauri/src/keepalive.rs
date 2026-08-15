@@ -1,6 +1,8 @@
 use crate::config::{self, SlotConfig};
 
-/// 内嵌的触点光标 PNG（28×28，青圈白点，热点居中），避免引用任何第三方资源
+/// 内嵌的触点光标 PNG（26×26 圆点触控光标：中心实心点+白色圆面+深色描边，热点居中）。
+/// 复刻原版 mobile_cloud 注入的 Dotter.cur 风格（原外链已失效 403，本地重绘，
+/// 消除第三方网络依赖）
 const CURSOR_PNG_B64: &str = include_str!("../assets/cursor.b64");
 
 /// 生成注入到云手机页面的保活初始化脚本。
@@ -16,7 +18,9 @@ const CURSOR_PNG_B64: &str = include_str!("../assets/cursor.b64");
 ///       退回首页检测(.title-bar)
 /// 移动：解锁区进入云机(.unlocked/.enter-intance)、重连/进入/确认按钮按文字包含匹配、
 ///       到期「知道了」(.van-dialog__confirm)、退回 H5 首页检测(#tabbar)
-/// 通用：注入触点光标、屏蔽右键、Cookie 一次性按平台域注入、空闲鼠标活动模拟、
+/// 通用：注入触点光标、屏蔽右键、鼠标→触摸操控模拟（WebView2 里页面自带的
+///       模拟器不加载，鼠标拖不动云机——移植页面同款 TouchEmulator 补上）、
+///       Cookie 一次性按平台域注入、空闲鼠标活动模拟、
 ///       状态通过 127.0.0.1 回环 HTTP 上报给 Rust 侧（绕过跨域与远程 IPC 限制）
 pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     // 还原原版 string.lines(cookieStr, ";\s*")：同时兼容「a=b; c=d」单行与「a=b」多行
@@ -42,7 +46,6 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
         "intervalMs": cfg.interval_ms,
         "simulateActivity": cfg.simulate_activity,
         "customCursor": cfg.custom_cursor,
-        "wheelScroll": cfg.wheel_scroll,
         "blockContextMenu": cfg.block_context_menu,
         "cookies": cookies,
         // 还原原版 CDP Network.setCookies 的 domain 参数（.139.com / .wo-adv.cn）
@@ -136,71 +139,94 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
       // 本地内嵌触点光标（无任何第三方网络依赖）
       var st = document.createElement('style');
       st.type = 'text/css';
-      st.innerHTML = '*{{cursor:url("data:image/png;base64,{__CPK_CURSOR__}") 14 14, default;}}';
+      st.innerHTML = '*{{cursor:url("data:image/png;base64,{__CPK_CURSOR__}") 13 13, default;}}';
       whenDom(function(){{ (document.head || document.documentElement).appendChild(st); }});
     }} catch(e){{}}
   }}
 
-  // ===== 滚轮滑动优化（默认开）：云手机 H5 是触摸页面，鼠标滚轮常常滚不动。
-  // 策略：先找光标下的原生可滚容器代滚；没有则合成 touchstart/touchmove
-  // 交给页面自身的触摸滚动逻辑；两者都无则滚根元素。停滚 250ms 补 touchend 收尾 =====
-  if (CFG.wheelScroll) {{
-    var wsT = null, wsLast = 0;
-    function wsFire(type, t, el){{
+  // ===== 操控模拟（还原 mobile_cloud 可用鼠标操控云手机的体验）=====
+  // 云手机 H5 只监听 touch 事件。页面自带的「鼠标→触摸」模拟器（TouchEmulator）
+  // 仅在 "ontouchstart" in window 为 false 时才加载（其 app.js 源码：
+  // "ontouchstart"in window||加载polyfill chunk）。WebView2 环境里 ontouchstart
+  // 常年存在（尤其触摸屏机器）→ 页面模拟器不加载 → 鼠标点不动云机、拖动全是
+  // 选择文本。这里移植页面同款模拟器逻辑：仅当 ontouchstart 存在时安装，
+  // 与页面自带版天然互斥，任何环境都绝不会双重转换。
+  var tsOn = false;
+  if ('ontouchstart' in window) {{
+    tsOn = true;
+    var tsEl = null, tsDown = false;
+    // 豁免区保持原生鼠标行为：页面约定的 [data-no-touch-simulate] +
+    // 表单/可编辑元素（输入框需要原生焦点与选字）
+    function tsSkip(el){{
       try {{
-        var list = type === 'touchend' ? [] : [t];
-        el.dispatchEvent(new TouchEvent(type, {{touches: list, targetTouches: list, changedTouches: [t], bubbles: true, cancelable: true}}));
-        return true;
+        return !!(el && el.closest && el.closest('[data-no-touch-simulate], input, textarea, select, [contenteditable]'));
       }} catch(e) {{ return false; }}
     }}
-    function wsScrollable(el){{
+    function tsTouch(me){{
       try {{
-        for (var n = el; n && n.nodeType === 1 && n !== document.body; n = n.parentElement) {{
-          if (n.scrollHeight > n.clientHeight + 4) {{
-            var st = getComputedStyle(n);
-            if (st.overflowY === 'auto' || st.overflowY === 'scroll') return n;
-          }}
-        }}
-      }} catch(e){{}}
-      return null;
+        return new Touch({{ identifier: 1, target: tsEl, clientX: me.clientX, clientY: me.clientY,
+          screenX: me.screenX || me.clientX, screenY: me.screenY || me.clientY,
+          pageX: me.pageX, pageY: me.pageY, radiusX: 1, radiusY: 1, rotationAngle: 0, force: 1 }});
+      }} catch(e) {{ return null; }}
     }}
-    document.addEventListener('wheel', function(ev){{
+    // 页面 polyfill 同款 touch list（带 item() 方法）
+    function tsList(me, ended){{
+      var l = [];
+      if (!ended) {{ var t = tsTouch(me); if (t) l.push(t); }}
+      l.item = function(i){{ return this[i] || null; }};
+      return l;
+    }}
+    function tsFire(type, me){{
+      if (!tsEl || !tsEl.dispatchEvent) return;
+      var ended = (type === 'touchend' || type === 'touchcancel');
+      // 标准语义：changedTouches 始终含该触点（end 时 = 被移除的那个，
+      // 页面靠 e.changedTouches[0] 判定点击/滑动落点）；touches/targetTouches
+      // 在 end 后才为空列表
+      var changed = tsList(me, false);
+      var live = ended ? tsList(me, true) : changed;
+      var ev;
+      try {{ ev = new TouchEvent(type, {{ bubbles: true, cancelable: true }}); }}
+      catch(e) {{
+        try {{ ev = document.createEvent('Event'); ev.initEvent(type, true, true); }} catch(e2) {{ return; }}
+      }}
       try {{
-        wsLast = Date.now();
-        if (ev.defaultPrevented) return;
-        var dy = ev.deltaY;
-        if (!dy) return;
-        var el = (ev.target && ev.target.nodeType === 1) ? ev.target : document.body;
-        if (!el) return;
-        // 1) 光标下有原生可滚容器：直接代滚（接管默认行为，不会双滚）
-        var sc = wsScrollable(el);
-        if (sc) {{ sc.scrollTop += dy; ev.preventDefault(); return; }}
-        // 2) 合成触摸事件：页面用 touch 实现的滚动（移动端 H5 常见）由此生效
-        if (typeof Touch !== 'undefined' && typeof TouchEvent !== 'undefined') {{
-          if (wsT && wsT.el !== el) {{ wsFire('touchend', wsT.t, wsT.el); wsT = null; }}
-          if (!wsT) {{
-            var t0 = new Touch({{identifier: 9527, target: el, clientX: ev.clientX, clientY: ev.clientY, radiusX: 12, radiusY: 12, rotationAngle: 0, force: 1}});
-            if (!wsFire('touchstart', t0, el)) return;
-            wsT = {{el: el, t: t0, y: ev.clientY}};
+        Object.defineProperty(ev, 'touches', {{ value: live }});
+        Object.defineProperty(ev, 'targetTouches', {{ value: live }});
+        Object.defineProperty(ev, 'changedTouches', {{ value: changed }});
+      }} catch(e) {{}}
+      tsEl.dispatchEvent(ev);
+    }}
+    function tsHandler(type){{
+      return function(me){{
+        try {{
+          if (me.button !== undefined && me.button !== 0) return; // 只处理左键
+          if (me.type === 'mousedown') tsDown = true;
+          if (me.type === 'mouseup') tsDown = false;
+          if (me.type === 'mousemove' && !tsDown) return;
+          // 与页面 polyfill 一致：以按下时的目标元素为派发目标，全程不换
+          if (me.type === 'mousedown' || !tsEl || !tsEl.dispatchEvent) tsEl = me.target;
+          if (!tsSkip(tsEl)) {{
+            tsFire(type, me);
+            // 模拟触摸按下时禁掉原生拖选文本/图片（否则「拖动全是复制文本」）
+            if (me.type === 'mousedown') me.preventDefault();
           }}
-          var ny = wsT.y - dy * 0.9;
-          var t1 = new Touch({{identifier: 9527, target: wsT.el, clientX: ev.clientX, clientY: ny, radiusX: 12, radiusY: 12, rotationAngle: 0, force: 1}});
-          if (wsFire('touchmove', t1, wsT.el)) {{ wsT.t = t1; wsT.y = ny; ev.preventDefault(); }}
-          return;
-        }}
-        // 3) 兜底：滚根元素
-        var d = document.scrollingElement || document.documentElement;
-        if (d && d.scrollHeight > d.clientHeight + 4) {{ d.scrollTop += dy; ev.preventDefault(); }}
-      }} catch(e){{}}
-    }}, {{passive: false}});
-    setInterval(function(){{
-      if (wsT && Date.now() - wsLast > 250) {{ try {{ wsFire('touchend', wsT.t, wsT.el); }} catch(e){{}} wsT = null; }}
-    }}, 150);
+          if (me.type === 'mouseup') tsEl = null;
+        }} catch(e) {{}}
+      }};
+    }}
+    window.addEventListener('mousedown', tsHandler('touchstart'), true);
+    window.addEventListener('mousemove', tsHandler('touchmove'), true);
+    window.addEventListener('mouseup', tsHandler('touchend'), true);
+    // 拖动中彻底禁止选字/拖拽（触摸语义）
+    document.addEventListener('selectstart', function(e){{ if (tsDown) e.preventDefault(); }}, true);
+    document.addEventListener('dragstart', function(e){{ if (tsDown) e.preventDefault(); }}, true);
   }}
 
   // 地址栏（Ctrl+U 呼出/收起，回车跳转，Esc 关闭）—— 还原原版 address.aardio
+  // data-no-touch-simulate：页面触摸模拟器的约定豁免属性，地址栏保持原生鼠标行为
   var addrBar = document.createElement('div');
   addrBar.id = 'cpk-addr-bar';
+  addrBar.setAttribute('data-no-touch-simulate', '1');
   addrBar.style.cssText = 'display:none;position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#f5f5f5;border-bottom:1px solid #999;padding:2px 3px;box-sizing:border-box;';
   var addrInput = document.createElement('input');
   addrInput.type = 'text';
@@ -469,7 +495,10 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
   // 页面内定时器（窗口可见时生效，1 秒驱动；隐藏时由 Rust 看门狗驱动）
   setInterval(function(){{ try {{ tick(); }} catch(e){{}} }}, 1000);
   send('installed');
-  diag('sys', '保活脚本已注入 platform=' + CFG.platform + ' 动作周期=' + (CFG.intervalMs || 5000) + 'ms 检测周期=1000ms url=' + location.href.slice(0, 120));
+  diag('sys', '保活脚本已注入 platform=' + CFG.platform + ' 动作周期=' + (CFG.intervalMs || 5000) + 'ms 检测周期=1000ms' +
+       ' 触点光标=' + (CFG.customCursor ? '开' : '关') +
+       ' 鼠标操控模拟=' + (tsOn ? '已安装(ontouchstart存在,页面自带模拟器未加载)' : '未安装(页面自带模拟器生效)') +
+       ' url=' + location.href.slice(0, 120));
 }})();"#,
         cfg_json = cfg_json,
         __CPK_CURSOR__ = cursor_b64

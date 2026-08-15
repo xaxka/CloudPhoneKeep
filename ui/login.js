@@ -61,9 +61,8 @@
         el("width").value = cfg.width;
         el("height").value = cfg.height;
         el("cookies").value = cfg.cookies || "";
-        // 滚轮滑动默认开；触点光标默认关（老配置里存过 true 的会回显勾选，可手动取消）
-        el("wheel").checked = cfg.wheelScroll !== false;
-        el("cursor").checked = !!cfg.customCursor;
+        // 触点光标默认开（还原原版 mobile_cloud 无条件注入）；老配置存过 false 的回显为取消，可手动改
+        el("cursor").checked = cfg.customCursor !== false;
       })
       .catch(function () {});
   }
@@ -85,6 +84,21 @@
   document.addEventListener("keydown", function (e) {
     if (e.key === "Enter") launch();
   });
+
+  // 设置窗口自身显隐（还原原版 loginForm.show(false)/show(true)）。
+  // 用窗口 API 直接隐藏自己，不再依赖后端回调成功——「点击进入设置窗口不消失」
+  // 的根因是此前要等 WebView2 窗口创建成功后由后端隐藏，链路长且慢（数秒），
+  // 任何一环失败就永远不消失。现在点击即隐（原版行为），失败再把窗口叫回来。
+  var thisWin = null;
+  try {
+    thisWin = window.__TAURI__.window.getCurrentWebviewWindow();
+  } catch (e) {}
+  function hideSelf() {
+    try { if (thisWin) thisWin.hide().catch(function () {}); } catch (e) {}
+  }
+  function showSelf() {
+    try { if (thisWin) thisWin.show().catch(function () {}); } catch (e) {}
+  }
 
   function launch() {
     hideBanners();
@@ -114,22 +128,38 @@
       intervalMs: 5000,
       simulateActivity: true,
       customCursor: el("cursor").checked,
-      wheelScroll: el("wheel").checked,
       blockContextMenu: true
     };
     el("btn-go").disabled = true;
     dlog("点击「进入」：slot=" + cfg.slot + " 目录名=" + cfg.name + " 平台=" + platform +
       " " + cfg.width + "x" + cfg.height + " cookie行数=" + (cfg.cookies ? cfg.cookies.split(/[\n;]/).filter(function (l) { return l.trim(); }).length : 0));
+
+    // 还原原版 showWebForm：先立即隐藏设置窗口（loginForm.show(false)），再开云手机窗口
+    hideSelf();
+
+    // 看门狗：云手机窗口创建偶发耗时较长（WebView2 初始化），30 秒仍无结果时
+    // 把设置窗口唤回来提示，避免「窗口藏了、云机没开、也没报错」的黑洞
+    var settled = false;
+    var watchdog = setTimeout(function () {
+      if (settled) return;
+      showSelf();
+      showBanner("warn", "启动仍在进行中（已等 30 秒）。可稍候重试；若持续失败请查看 logs/ 日志。");
+      el("btn-go").disabled = false;
+    }, 30000);
+
     invoke("launch_slot", { cfg: cfg })
       .then(function (warnings) {
+        settled = true;
+        clearTimeout(watchdog);
         dlog("launch_slot 成功返回" + (warnings && warnings.length ? "（警告：" + warnings.join("；") + "）" : "（无警告）"));
-        // 启动成功：设置窗口由后端隐藏；如有非致命警告（老板键被占用）下次打开时展示
-        if (warnings && warnings.length) {
-          showBanner("warn", warnings.join("\n"));
-        }
+        // 启动成功：设置窗口保持隐藏；如有非致命警告（老板键被占用）下次打开设置时可见
       })
       .catch(function (err) {
+        settled = true;
+        clearTimeout(watchdog);
         dlog("launch_slot 失败：" + String(err));
+        // 失败：设置窗口必须回来（还原原版 msgbox 弹错误后窗口仍可见）
+        showSelf();
         showBanner("err", "启动失败：" + String(err));
       })
       .finally(function () {

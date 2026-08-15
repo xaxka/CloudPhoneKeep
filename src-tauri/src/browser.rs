@@ -186,26 +186,35 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
                         || es.contains("0x8007139f")
                         || es.contains("in use")
                         || es.contains("lock");
-                    if locked && attempt == 1 {
+                    if locked && attempt <= 2 {
+                        // 第一步：清扫残留 WebView2 进程后原地重试。
+                        // 多实例保护在 kill_zombie_webview2 内部：还有其它本程序实例
+                        // 存活时不清扫（那把锁属于活实例，杀了会连人窗口一起杀），
+                        // 直接返回 false → 走换目录分支
+                        if attempt == 1 {
+                            logger::log(
+                                app,
+                                slot,
+                                "error",
+                                &format!("数据目录被占用（{e}）：尝试清扫残留 WebView2 进程后重试"),
+                            );
+                            if crate::kill_zombie_webview2(app) {
+                                // 被杀进程的文件句柄释放需要一点时间，稍等再重试
+                                std::thread::sleep(std::time::Duration::from_millis(800));
+                                continue;
+                            }
+                        }
+                        // 第二步：换用新数据目录重试（原登录态留在旧目录，可能需重新登录）
+                        let suffix = if attempt == 1 { "-r2" } else { "-r3" };
+                        let fresh = config::profile_dir_with_suffix(slot, &name, suffix);
                         logger::log(
                             app,
                             slot,
                             "error",
-                            &format!("数据目录被占用（{e}）：清扫残留 WebView2 进程后重试"),
-                        );
-                        crate::kill_zombie_webview2(app);
-                        // 被杀进程的文件句柄释放需要一点时间，稍等再重试
-                        std::thread::sleep(std::time::Duration::from_millis(800));
-                        continue;
-                    }
-                    if locked && attempt == 2 {
-                        let fresh = config::profile_dir_with_suffix(slot, &name, "-r2");
-                        logger::log(
-                            app,
-                            slot,
-                            "error",
-                            &format!("数据目录仍被占用：换用新目录 {} 重试（原登录态留在旧目录，可能需重新登录）",
-                                fresh.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()),
+                            &format!(
+                                "数据目录仍被占用：换用新目录 {} 重试（原登录态留在旧目录，可能需重新登录；多开时请各实例使用不同目录名）",
+                                fresh.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+                            ),
                         );
                         profile = fresh;
                         continue;

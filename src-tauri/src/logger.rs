@@ -5,10 +5,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 /// 诊断日志：
-/// 1. 写入 exe目录/logs/cpk-YYYYMMDD.log，按天滚动，保留最近 7 天
-/// 2. 控制台模式（--console / CPK_CONSOLE=1）下同步镜像到终端
+/// 1. 写入 exe目录/logs/cpk-YYYYMMDD-p{pid}.log，按天滚动，保留最近 7 天；
+///    文件名带进程号——同时启动多个程序时各写各的文件，互不混淆
+/// 2. 每行日志带 [pid=N] 前缀，即使合并查看也能按实例过滤
+/// 3. 控制台模式（--console / CPK_CONSOLE=1）下同步镜像到终端
 ///
-/// 格式：`HH:mm:ss.SSS [slot=N|sys] [level] message`
+/// 格式：`HH:mm:ss.SSS [pid=N] [slot=N|sys] [level] message`
 /// level 约定：
 ///   nav    页面 URL/路由变化（SPA 路由切换是改版定位的第一线索）
 ///   beat   保活心跳采样（含各选择器命中摘要，全 0 即疑似改版）
@@ -76,7 +78,8 @@ fn log_dir(_app: &tauri::AppHandle) -> PathBuf {
     dir
 }
 
-/// 清理过期日志（仅在天切换时触发一次）
+/// 清理过期日志（仅在天切换时触发一次）。
+/// 文件名两种格式都认：cpk-YYYYMMDD.log（旧版）与 cpk-YYYYMMDD-pPID.log（现行）
 fn cleanup(dir: &PathBuf, today_days: i64) {
     let cutoff = today_days - KEEP_DAYS as i64;
     if let Ok(entries) = fs::read_dir(dir) {
@@ -86,7 +89,9 @@ fn cleanup(dir: &PathBuf, today_days: i64) {
                 .strip_prefix("cpk-")
                 .and_then(|s| s.strip_suffix(".log"))
             {
-                if let Ok(d) = stem.parse::<i64>() {
+                // 取前 8 位日期（YYYYMMDD）解析为天序号
+                let day_part: String = stem.chars().take(8).collect();
+                if let Ok(d) = date_to_days(&day_part) {
                     if d < cutoff {
                         let _ = fs::remove_file(e.path());
                     }
@@ -96,11 +101,32 @@ fn cleanup(dir: &PathBuf, today_days: i64) {
     }
 }
 
+/// YYYYMMDD → 天序号（Howard Hinnant days_from_civil，与 day_str 互逆）
+fn date_to_days(s: &str) -> Result<i64, ()> {
+    let b = s.as_bytes();
+    if b.len() != 8 || !b.iter().all(u8::is_ascii_digit) {
+        return Err(());
+    }
+    let y: i64 = s[0..4].parse().map_err(|_| ())?;
+    let m: i64 = s[4..6].parse().map_err(|_| ())?;
+    let d: i64 = s[6..8].parse().map_err(|_| ())?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return Err(());
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Ok(era * 146_097 + doe - 719_468)
+}
+
 /// 追加一行日志（线程安全，文件句柄缓存复用）
 fn append(app: &tauri::AppHandle, line: &str) {
     let dir = log_dir(app);
     let (day, _, days) = now_parts();
-    let path = dir.join(format!("cpk-{day}.log"));
+    let path = dir.join(format!("cpk-{day}-p{}.log", std::process::id()));
 
     let mut guard = SINK.lock().unwrap();
     let need_reopen = match guard.as_ref() {
@@ -122,8 +148,9 @@ fn append(app: &tauri::AppHandle, line: &str) {
 pub fn log(app: &tauri::AppHandle, slot: u32, level: &str, msg: &str) {
     let msg: String = msg.chars().take(4000).collect();
     let (_, ts, _) = now_parts();
+    let pid = std::process::id();
     let tag = if slot == 0 { "sys".into() } else { format!("slot={slot}") };
-    let line = format!("{ts} [{tag}] [{level}] {msg}");
+    let line = format!("{ts} [pid={pid}] [{tag}] [{level}] {msg}");
     if CONSOLE_MIRROR.load(Ordering::Relaxed) {
         eprintln!("{line}");
     }
@@ -136,5 +163,13 @@ mod tests {
     fn day_str_known_dates() {
         assert_eq!(super::day_str(0), "19700101");
         assert_eq!(super::day_str(20680), "20260815");
+    }
+
+    #[test]
+    fn date_to_days_inverse() {
+        for d in [0i64, 20680, 15000, -100] {
+            let s = super::day_str(d);
+            assert_eq!(super::date_to_days(&s), Ok(d), "roundtrip {d}");
+        }
     }
 }
