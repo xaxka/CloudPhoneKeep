@@ -164,25 +164,44 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     var hits = [];
     try {{
       if (CFG.platform === 'mobile') {{
-        // ===== 移动云手机（cloudphoneh5.buy.139.com）=====
-        // 1. 详情页解锁区 -> 进入云机
-        var ul = q('.unlocked'), ei = q('.enter-intance');
-        hits.push('unlocked:' + (vis(ul) ? 1 : 0), 'enter-intance:' + (vis(ei) ? 1 : 0));
-        if (vis(ul) || vis(ei)) {{
-          var eb = ei || q('.enter') || findBtn(document.body, ['进入云机', '进入']);
-          if (eb) {{ eb.click(); acted = 'enter'; diag('click', 'enter -> ' + desc(eb)); }}
-          else diag('miss', '.unlocked/.enter-intance 可见但未找到进入按钮，疑似改版 | ' + desc(ul || ei));
-        }}
-        // 2. 连接断开/重连弹窗 -> 按文字匹配重连按钮
-        if (!acted) {{
-          var rb = findBtn(document.body, ['重连', '重新连接', '再次尝试', '重试']);
-          if (rb) {{ rb.click(); acted = 'retry'; diag('click', 'retry -> ' + desc(rb)); }}
-        }}
-        // 3. 到期/提示弹窗 -> 知道了
+        // ===== 移动云手机（cloudphoneh5.buy.139.com，逻辑忠实还原原作者 aardio 源码）=====
+        // .van-dialog__confirm 是万能确认按钮，按按钮文字区分语义：
+        //   重连/重新连接→断线重连  进入→超时重连  确认/知道了→到期与提示
         var cf = q('.van-dialog__confirm');
-        hits.push('van-confirm:' + (vis(cf) ? 1 : 0), 'tabbar:' + (vis(q('#tabbar')) ? 1 : 0));
-        if (vis(cf)) {{ cf.click(); if (!acted) acted = 'expired-confirm'; }}
-        // 4. 检测到 #tabbar = 退回 H5 首页，即云机已退出
+        var cfTxt = vis(cf) ? ((cf.innerText || '').trim()) : '';
+        var ul = q('.unlocked');
+        var ei = q('.enter-intance');
+        hits.push(
+          'confirm(' + (cfTxt ? cfTxt.slice(0, 6) : '-') + '):' + (cfTxt ? 1 : 0),
+          'unlocked:' + (vis(ul) ? 1 : 0),
+          'enter-intance:' + (vis(ei) ? 1 : 0),
+          'tabbar:' + (vis(q('#tabbar')) ? 1 : 0)
+        );
+
+        if (cfTxt) {{
+          if (cfTxt.indexOf('重连') >= 0 || cfTxt.indexOf('重新连接') >= 0) {{
+            cf.click(); acted = 'retry'; diag('click', 'retry(confirm) -> ' + desc(cf));
+          }} else if (cfTxt.indexOf('进入') >= 0) {{
+            cf.click(); acted = 'retry'; diag('click', 're-enter(confirm) -> ' + desc(cf));
+          }} else if (cfTxt === '确认' || cfTxt === '知道了') {{
+            cf.click(); acted = 'expired-confirm'; diag('click', 'confirm(' + cfTxt + ') -> ' + desc(cf));
+          }} else {{
+            // 未知文字的确认弹窗：记录下来供改版分析，不盲点
+            diag('miss', 'confirm 按钮出现未知文字 "' + cfTxt + '"，未点击');
+          }}
+        }}
+
+        // 解锁区：原作者直接点击 .unlocked 容器本身（整个区域可点）
+        if (!acted && vis(ul) && ((ul.innerText || '').indexOf('进入') >= 0)) {{
+          ul.click(); acted = 'enter'; diag('click', 'enter(unlocked) -> ' + desc(ul));
+        }}
+
+        // 进入云机按钮
+        if (!acted && vis(ei) && ((ei.innerText || '').indexOf('进入云机') >= 0)) {{
+          ei.click(); acted = 'enter'; diag('click', 'enter(enter-intance) -> ' + desc(ei));
+        }}
+
+        // 检测到 #tabbar = 退回 H5 首页，即云机已退出
         exited = vis(q('#tabbar'));
       }} else {{
         // ===== 联通云手机（uphone.wo-adv.cn）=====
