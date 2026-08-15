@@ -10,6 +10,19 @@
     invoke = function () { return Promise.reject("TAURI API 不可用"); };
   }
 
+  // 前端调试日志：把关键交互与调用结果回传 Rust 落盘（logs/cpk-*.log 的 [debug] 行）。
+  // 有了它，「点了没反应 / 卡在哪一步」在日志里一眼可见
+  function dlog(msg) {
+    try { invoke("debug_log", { msg: "[login] " + msg }).catch(function () {}); } catch (e) {}
+  }
+  dlog("login.js 已加载");
+  window.addEventListener("error", function (e) {
+    dlog("JS错误：" + (e.message || String(e.error)) + " @" + (e.filename || "") + ":" + (e.lineno || 0));
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    dlog("未处理的 Promise 拒绝：" + String(e.reason));
+  });
+
   var el = function (id) { return document.getElementById(id); };
   var PRESETS = {
     mobile: { width: 414, height: 896, url: "https://cloudphoneh5.buy.139.com" },
@@ -102,14 +115,18 @@
       blockContextMenu: true
     };
     el("btn-go").disabled = true;
+    dlog("点击「进入」：slot=" + cfg.slot + " 目录名=" + cfg.name + " 平台=" + platform +
+      " " + cfg.width + "x" + cfg.height + " cookie行数=" + (cfg.cookies ? cfg.cookies.split(/[\n;]/).filter(function (l) { return l.trim(); }).length : 0));
     invoke("launch_slot", { cfg: cfg })
       .then(function (warnings) {
+        dlog("launch_slot 成功返回" + (warnings && warnings.length ? "（警告：" + warnings.join("；") + "）" : "（无警告）"));
         // 启动成功：设置窗口由后端隐藏；如有非致命警告（老板键被占用）下次打开时展示
         if (warnings && warnings.length) {
           showBanner("warn", warnings.join("\n"));
         }
       })
       .catch(function (err) {
+        dlog("launch_slot 失败：" + String(err));
         showBanner("err", "启动失败：" + String(err));
       })
       .finally(function () {

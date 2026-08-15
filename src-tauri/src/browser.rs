@@ -120,55 +120,129 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
             .and_then(|s| s.size_override)
             .unwrap_or((cfg.width, cfg.height))
     };
+    logger::log(
+        app,
+        slot,
+        "debug",
+        &format!("窗口参数就绪：{w}x{h} 数据目录={profile_name}（下一步 WebView2 创建；若此后长时间无日志=创建卡死，多为数据目录被残留进程锁定）"),
+    );
 
-    let mut builder = WebviewWindowBuilder::new(app, slot_label(slot), WebviewUrl::External(web_url))
-        .title(&title)
-        .inner_size(w, h)
-        .min_inner_size(280.0, 400.0)
-        .resizable(true)
-        .initialization_script(&init_script)
-        // 每个帐号独立数据目录（Cookie/缓存隔离），保存在 exe 目录 data/ 下
-        .data_directory(profile);
-    if let Some(m) = menu {
-        builder = builder.menu(m);
-    }
-
-    let win = match builder.build() {
-        Ok(w) => w,
-        Err(e) => {
-            unregister_slot_shortcut(app, slot);
-            let es = e.to_string().to_lowercase();
-            let looks_like_webview2 = es.contains("webview")
-                || es.contains("runtime")
-                || es.contains("corewebview");
-            logger::log(
+    // 数据目录被锁（0x800700AA / 0x8007139F，残留的 WebView2 进程占用）时：
+    // 先清扫残留进程重试一次，再不行换新目录重试一次——保证窗口一定能开出来
+    let mut profile = profile;
+    let win = {
+        let mut attempt = 0u8;
+        loop {
+            attempt += 1;
+            let t0 = std::time::Instant::now();
+            let nav_app = app.clone();
+            let title_app = app.clone();
+            let mut builder = WebviewWindowBuilder::new(
                 app,
-                slot,
-                "error",
-                &format!("窗口创建失败：{e}（疑似缺 WebView2 运行时：{looks_like_webview2}）"),
-            );
-            if looks_like_webview2 {
-                // 直接把官方下载页打开到用户面前，不再让用户对着报错发呆
-                use tauri_plugin_opener::OpenerExt;
-                let _ = app.opener().open_url(WEBVIEW2_URL, None::<&str>);
-                return Err(format!(
-                    "窗口创建失败：系统缺少 WebView2 运行时。\n已自动打开官方下载页，安装「Evergreen 独立安装包」后重开程序即可。"
-                ));
+                slot_label(slot),
+                WebviewUrl::External(web_url.clone()),
+            )
+            .title(&title)
+            .inner_size(w, h)
+            .min_inner_size(280.0, 400.0)
+            .resizable(true)
+            .initialization_script(&init_script)
+            // 每个帐号独立数据目录（Cookie/缓存隔离），保存在 exe 目录 data/ 下
+            .data_directory(profile.clone())
+            // 页面加载事件落盘（debug 级）：「窗口开了但白屏/加载不出来」时，
+            // 据此分辨是导航根本没开始（网络/站点问题）还是加载完了但渲染异常
+            .on_page_load(move |_w, payload| {
+                let ev = match payload.event() {
+                    tauri::webview::PageLoadEvent::Started => "Started(开始加载)",
+                    tauri::webview::PageLoadEvent::Finished => "Finished(加载完成)",
+                };
+                logger::log(&nav_app, slot, "debug", &format!("页面加载事件 {ev}：{}", payload.url()));
+            })
+            // SPA 路由切换会改标题：标题出现变化 = 页面确实渲染出来了
+            .on_document_title_changed(move |_w, t| {
+                logger::log(&title_app, slot, "debug", &format!("页面标题：{t}"));
+            });
+            if let Some(m) = &menu {
+                builder = builder.menu(m.clone());
             }
-            let hint = if es.contains("denied") || es.contains("lock") {
-                format!("创建窗口失败: {e}（该帐号数据目录可能正被另一个实例占用，请勿同时运行两份程序）")
-            } else {
-                format!("创建窗口失败: {e}")
-            };
-            return Err(hint);
+            match builder.build() {
+                Ok(w) => {
+                    logger::log(
+                        app,
+                        slot,
+                        "debug",
+                        &format!("WebView2 创建成功，耗时 {} ms（第 {attempt} 次尝试）", t0.elapsed().as_millis()),
+                    );
+                    break w;
+                }
+                Err(e) => {
+                    let es = e.to_string().to_lowercase();
+                    let locked = es.contains("0x800700aa")
+                        || es.contains("0x8007139f")
+                        || es.contains("in use")
+                        || es.contains("lock");
+                    if locked && attempt == 1 {
+                        logger::log(
+                            app,
+                            slot,
+                            "error",
+                            &format!("数据目录被占用（{e}）：清扫残留 WebView2 进程后重试"),
+                        );
+                        crate::kill_zombie_webview2(app);
+                        // 被杀进程的文件句柄释放需要一点时间，稍等再重试
+                        std::thread::sleep(std::time::Duration::from_millis(800));
+                        continue;
+                    }
+                    if locked && attempt == 2 {
+                        let fresh = config::profile_dir_with_suffix(slot, &name, "-r2");
+                        logger::log(
+                            app,
+                            slot,
+                            "error",
+                            &format!("数据目录仍被占用：换用新目录 {} 重试（原登录态留在旧目录，可能需重新登录）",
+                                fresh.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()),
+                        );
+                        profile = fresh;
+                        continue;
+                    }
+                    unregister_slot_shortcut(app, slot);
+                    let looks_like_webview2 = es.contains("webview")
+                        || es.contains("runtime")
+                        || es.contains("corewebview");
+                    logger::log(
+                        app,
+                        slot,
+                        "error",
+                        &format!("窗口创建失败（第 {attempt} 次，耗时 {} ms）：{e}", t0.elapsed().as_millis()),
+                    );
+                    if looks_like_webview2 {
+                        // 直接把官方下载页打开到用户面前，不再让用户对着报错发呆
+                        use tauri_plugin_opener::OpenerExt;
+                        let _ = app.opener().open_url(WEBVIEW2_URL, None::<&str>);
+                        return Err(format!(
+                            "窗口创建失败：系统缺少 WebView2 运行时。\n已自动打开官方下载页，安装「Evergreen 独立安装包」后重开程序即可。"
+                        ));
+                    }
+                    let hint = if locked {
+                        format!("创建窗口失败: {e}（数据目录被残留进程锁定且自动恢复失败，请重启电脑后重试）")
+                    } else {
+                        format!("创建窗口失败: {e}")
+                    };
+                    return Err(hint);
+                }
+            }
         }
     };
 
+    let final_profile_name = profile
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
     logger::log(
         app,
         slot,
         "sys",
-        &format!("窗口已启动 platform={} url={} profile={profile_name}", cfg.platform, url),
+        &format!("窗口已启动 platform={} url={} profile={final_profile_name}", cfg.platform, url),
     );
 
     {
@@ -292,16 +366,25 @@ pub fn open_winset(app: &AppHandle, slot: u32) {
         let _ = win.set_focus();
         return;
     }
-    let _ = WebviewWindowBuilder::new(
-        app,
-        label,
-        WebviewUrl::App(std::path::PathBuf::from("winset.html")),
-    )
-    .title("窗口设置")
-    .inner_size(275.0, 218.0)
-    .resizable(false)
-    .build();
-    logger::log(app, slot, "sys", "打开窗口设置（分辨率，仅本会话生效）");
+    // 已知 Windows 陷阱（wry#583）：在菜单事件回调里同步创建 WebView2 窗口可能死锁，
+    // 丢到独立线程创建，回调立即返回
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let label = winset_label(slot);
+        let built = WebviewWindowBuilder::new(
+            &app2,
+            &label,
+            WebviewUrl::App(std::path::PathBuf::from("winset.html")),
+        )
+        .title("窗口设置")
+        .inner_size(275.0, 218.0)
+        .resizable(false)
+        .build();
+        match built {
+            Ok(_) => logger::log(&app2, slot, "sys", "打开窗口设置（分辨率，仅本会话生效）"),
+            Err(e) => logger::log(&app2, slot, "error", &format!("窗口设置打开失败：{e}")),
+        }
+    });
 }
 
 /// 当前生效分辨率（会话内覆盖优先，其次配置值）

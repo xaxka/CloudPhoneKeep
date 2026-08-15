@@ -69,6 +69,11 @@ pub fn config_path() -> PathBuf {
 
 /// 每个帐号独立的 WebView 数据目录（Cookie / 缓存隔离）
 pub fn profile_dir(slot: u32, name: &str) -> PathBuf {
+    profile_dir_with_suffix(slot, name, "")
+}
+
+/// 带后缀的数据目录（数据目录被残留进程锁定时的兜底新目录）
+pub fn profile_dir_with_suffix(slot: u32, name: &str, suffix: &str) -> PathBuf {
     let safe = name
         .trim()
         .chars()
@@ -81,9 +86,9 @@ pub fn profile_dir(slot: u32, name: &str) -> PathBuf {
         })
         .collect::<String>();
     let folder = if safe.is_empty() {
-        format!("slot-{slot}")
+        format!("slot-{slot}{suffix}")
     } else {
-        format!("slot-{slot}-{safe}")
+        format!("slot-{slot}-{safe}{suffix}")
     };
     let p = base_dir().join("data").join(folder);
     std::fs::create_dir_all(&p).ok();

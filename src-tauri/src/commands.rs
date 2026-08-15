@@ -4,6 +4,12 @@ use crate::logger;
 use crate::AppState;
 use tauri::{AppHandle, Manager};
 
+/// 前端调试日志入口（login.js 把点击/调用结果回传到这里落盘，定位「点了没反应」）
+#[tauri::command]
+pub fn debug_log(app: AppHandle, msg: String) {
+    logger::log(&app, 0, "debug", &msg);
+}
+
 /// 读取某个槽位配置（设置窗口预填）
 #[tauri::command]
 pub fn get_slot(app: AppHandle, slot: u32) -> Result<SlotConfig, String> {
@@ -23,11 +29,23 @@ pub fn get_slot(app: AppHandle, slot: u32) -> Result<SlotConfig, String> {
 }
 
 /// 设置窗口「进入」：保存配置并启动窗口（还原原版 login.aardio showWebForm 流程）。
-/// 还原原版校验：缓存数据目录名为空 → 阻止启动（原版弹 msgbox，这里返回错误由前端横幅展示）。
-/// 返回非致命警告（老板键被占用等）由前端醒目展示；Err 仅在窗口无法创建时返回。
+///
+/// 【异步命令】必须 async：Tauri 同步命令在主线程执行，而 WebView2 窗口创建耗时数秒，
+/// 会冻结整个 UI（= 用户反馈的「点击进入设置不消失」）。真正的创建工作再经
+/// spawn_blocking 丢到独立线程，主线程完全不被阻塞。
 #[tauri::command]
-pub fn launch_slot(app: AppHandle, cfg: SlotConfig) -> Result<Vec<String>, String> {
+pub async fn launch_slot(app: AppHandle, cfg: SlotConfig) -> Result<Vec<String>, String> {
+    logger::log(
+        &app,
+        0,
+        "debug",
+        &format!(
+            "前端调用 launch_slot：slot={} 目录名=\"{}\" 平台={} 分辨率={}x{}",
+            cfg.slot, cfg.name, cfg.platform, cfg.width, cfg.height
+        ),
+    );
     if cfg.name.trim().is_empty() {
+        logger::log(&app, cfg.slot, "error", "进入被拒：缓存数据目录名为空");
         return Err("缓存数据目录名不能为空".into());
     }
 
@@ -46,9 +64,16 @@ pub fn launch_slot(app: AppHandle, cfg: SlotConfig) -> Result<Vec<String>, Strin
         }
     }
 
-    let warnings = match browser::start_slot_ex(&app, cfg.slot) {
-        Ok(w) => w,
-        Err(e) => {
+    logger::log(&app, cfg.slot, "debug", "开始创建窗口（异步线程，不阻塞界面）");
+    let slot = cfg.slot;
+    let task_app = app.clone();
+    let warnings = match tauri::async_runtime::spawn_blocking(move || {
+        browser::start_slot_ex(&task_app, slot)
+    })
+    .await
+    {
+        Ok(Ok(w)) => w,
+        Ok(Err(e)) => {
             // 启动失败：落盘 + 系统通知双保险，用户绝不可能毫无感知
             logger::log(&app, cfg.slot, "error", &format!("窗口启动失败：{e}"));
             use tauri_plugin_notification::NotificationExt;
@@ -60,9 +85,15 @@ pub fn launch_slot(app: AppHandle, cfg: SlotConfig) -> Result<Vec<String>, Strin
                 .show();
             return Err(e);
         }
+        Err(e) => {
+            let msg = format!("启动任务异常（窗口创建线程崩溃）：{e}");
+            logger::log(&app, cfg.slot, "error", &msg);
+            return Err(msg);
+        }
     };
 
     // 启动成功后隐藏设置窗口（与原版一致：loginForm.show(false)）
+    logger::log(&app, cfg.slot, "debug", "窗口启动完成，隐藏设置窗口");
     if let Some(win) = app.get_webview_window("login") {
         let _ = win.hide();
     }
