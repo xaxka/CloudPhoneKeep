@@ -92,10 +92,8 @@ pub fn get_slot_size(app: AppHandle, slot: u32) -> Result<(f64, f64), String> {
 /// 「窗口设置」小窗保存按钮（还原原版 settingWin：只改窗口与内存，不落盘）
 #[tauri::command]
 pub fn set_slot_size(app: AppHandle, slot: u32, w: f64, h: f64) -> Result<(), String> {
-    let (w, h) = if w < 280.0 || h < 400.0 {
-        return Err("分辨率过小（最小 280 x 400）".into());
-    } else {
-        (w, h)
-    };
+    if !(280.0..=4096.0).contains(&w) || !(400.0..=4096.0).contains(&h) {
+        return Err("分辨率超出范围（宽 280~4096，高 400~4096）".into());
+    }
     browser::apply_slot_size(&app, slot, w, h)
 }

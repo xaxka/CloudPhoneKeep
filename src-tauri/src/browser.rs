@@ -49,14 +49,25 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
             s.running = true;
             s.visible = true;
         });
+        // 托盘菜单的 ● 显隐标记需要同步刷新（此前漏掉，重开后标记停留在旧状态）
+        refresh_slot_tray(app, slot);
         return Ok(Vec::new());
     }
 
     // 老板键注册失败【不再阻塞启动】：保活不依赖老板键，降级为警告继续开窗
     let mut warnings: Vec<String> = Vec::new();
     if let Err(e) = register_slot_shortcut(app, slot) {
-        warnings.push(format!("老板键 Ctrl+{slot} 不可用：{e}"));
+        let msg = format!("老板键 Ctrl+{slot} 不可用（可能被其他程序占用），窗口将以无老板键模式启动");
+        warnings.push(format!("{msg}：{e}"));
         logger::log(app, slot, "error", &format!("老板键注册失败（窗口仍将启动，无老板键模式）：{e}"));
+        // 设置窗口启动成功后会被隐藏，横幅用户看不到 → 系统通知兜底
+        use tauri_plugin_notification::NotificationExt;
+        let _ = app
+            .notification()
+            .builder()
+            .title("老板键不可用")
+            .body(format!("{msg}，请换一个索引"))
+            .show();
     }
     ensure_addr_shortcut(app);
 
@@ -287,7 +298,7 @@ pub fn open_winset(app: &AppHandle, slot: u32) {
         WebviewUrl::App(std::path::PathBuf::from("winset.html")),
     )
     .title("窗口设置")
-    .inner_size(275.0, 150.0)
+    .inner_size(275.0, 218.0)
     .resizable(false)
     .build();
     logger::log(app, slot, "sys", "打开窗口设置（分辨率，仅本会话生效）");
@@ -383,8 +394,10 @@ fn cleanup_slot(app: &AppHandle, slot: u32) {
     logger::log(app, slot, "sys", "窗口已关闭");
 }
 
-/// 原生看门狗：窗口隐藏时页面定时器可能被浏览器节流，
-/// 由 Rust 侧周期性 eval 调用页面内 tick，保证后台保活不掉线。
+/// 原生看门狗：窗口隐藏时 WebView2 会把页面 JS 定时器节流到分钟级，
+/// 由 Rust 侧周期性 eval 调用页面内 tick 接管驱动，保证后台保活不掉线。
+/// 注意：窗口可见时【必须跳过】——页面自身 setInterval(1000) 在跑，
+/// 双驱动会让 actionTick 的 5 秒周期实际变成 2.5 秒（点击频率翻倍）。
 /// 周期 1 秒 = 原版 stopTimer；页面内 tick 自行分流：
 ///   - 每 1 秒：退出/到期检测（stopTimer 语义）
 ///   - 每 intervalMs：保活动作（runTimer 5 秒语义）
@@ -403,8 +416,11 @@ fn spawn_watchdog(app: AppHandle, slot: u32) {
                 s.running = true;
                 s.visible = visible;
             });
-            if let Err(e) = win.eval("try{window.__CPK_TICK__&&window.__CPK_TICK__()}catch(e){}") {
-                logger::log(&task_app, slot, "error", &format!("看门狗 eval 失败: {e}"));
+            // 仅隐藏时驱动：可见时页面定时器自己在跑，eval 会造成双倍 tick
+            if !visible {
+                if let Err(e) = win.eval("try{window.__CPK_TICK__&&window.__CPK_TICK__()}catch(e){}") {
+                    logger::log(&task_app, slot, "error", &format!("看门狗 eval 失败: {e}"));
+                }
             }
         }
     });
@@ -469,7 +485,8 @@ pub fn set_topmost(app: &AppHandle, slot: u32, top: bool) -> Result<(), String> 
 /// 旋转：交换宽高并刷新页面（还原原版：仅改内存不落盘，重启后回到配置分辨率）
 pub fn rotate_slot(app: &AppHandle, slot: u32) -> Result<(f64, f64), String> {
     let (w, h) = slot_size(app, slot);
-    let swapped = (h, w);
+    // 交换后钳制到窗口最小尺寸（min_inner_size 280x400），避免 set_size 被 clamp 后与记录不一致
+    let swapped = (h.max(280.0), w.max(400.0));
     sync_state(app, slot, |s| s.size_override = Some(swapped));
 
     if let Some(win) = app.get_webview_window(&slot_label(slot)) {
