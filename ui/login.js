@@ -110,7 +110,6 @@
       cookies: el("cookies").value,
       width: parseFloat(el("width").value) || p.width,
       height: parseFloat(el("height").value) || p.height,
-      screenModel: "vertical",
       keepAlive: true,
       intervalMs: 5000,
       simulateActivity: true,

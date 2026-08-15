@@ -146,8 +146,6 @@ pub struct SlotConfig {
     pub width: f64,
     /// 窗口高
     pub height: f64,
-    /// 横屏 / 竖屏
-    pub screen_model: String,
     /// 保活引擎开关
     pub keep_alive: bool,
     /// 保活检测间隔（毫秒）
@@ -173,7 +171,6 @@ impl Default for SlotConfig {
             cookies: String::new(),
             width: 414.0,
             height: 896.0,
-            screen_model: "vertical".to_string(),
             keep_alive: true,
             interval_ms: 5000,
             simulate_activity: true,

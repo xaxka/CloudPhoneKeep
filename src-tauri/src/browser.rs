@@ -6,7 +6,7 @@ use crate::AppState;
 use std::sync::atomic::Ordering;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::{TrayIconBuilder};
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 pub const RELEASES_URL: &str = "https://github.com/xixka/CloudPhoneKeep/releases";
 /// WebView2 运行时官方下载页（窗口创建失败且疑似缺运行时时打开）
@@ -656,14 +656,9 @@ fn open_log_dir(app: &AppHandle) {
 }
 
 fn sync_state(app: &AppHandle, slot: u32, f: impl FnOnce(&mut SlotState)) {
-    let snapshot = {
-        let state: tauri::State<AppState> = app.state();
-        let mut states = state.states.lock().unwrap();
-        let s = states.entry(slot).or_insert_with(|| SlotState::new(slot));
-        f(s);
-        s.clone()
-    };
-    let _ = app.emit("cpk://status", &snapshot);
+    let state: tauri::State<AppState> = app.state();
+    let mut states = state.states.lock().unwrap();
+    f(states.entry(slot).or_insert_with(|| SlotState::new(slot)));
 }
 
 // ---------------------------------------------------------------------------

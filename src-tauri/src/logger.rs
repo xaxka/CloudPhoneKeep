@@ -3,11 +3,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use tauri::Emitter;
 
 /// 诊断日志：
 /// 1. 写入 exe目录/logs/cpk-YYYYMMDD.log，按天滚动，保留最近 7 天
-/// 2. 同步推送到管理面板（cpk://log 事件）
+/// 2. 控制台模式（--console / CPK_CONSOLE=1）下同步镜像到终端
 ///
 /// 格式：`HH:mm:ss.SSS [slot=N|sys] [level] message`
 /// level 约定：
@@ -119,7 +118,7 @@ fn append(app: &tauri::AppHandle, line: &str) {
     }
 }
 
-/// 统一入口：写文件 + 推送前端（+ 控制台模式时镜像到终端）
+/// 统一入口：写文件（+ 控制台模式时镜像到终端）
 pub fn log(app: &tauri::AppHandle, slot: u32, level: &str, msg: &str) {
     let msg: String = msg.chars().take(4000).collect();
     let (_, ts, _) = now_parts();
@@ -129,15 +128,6 @@ pub fn log(app: &tauri::AppHandle, slot: u32, level: &str, msg: &str) {
         eprintln!("{line}");
     }
     append(app, &format!("{line}\n"));
-    let _ = app.emit(
-        "cpk://log",
-        serde_json::json!({ "slot": slot, "level": level, "msg": msg, "at": crate::state::now_ms() }),
-    );
-}
-
-pub fn log_file_path(app: &tauri::AppHandle) -> PathBuf {
-    let (day, _, _) = now_parts();
-    log_dir(app).join(format!("cpk-{day}.log"))
 }
 
 #[cfg(test)]

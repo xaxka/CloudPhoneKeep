@@ -1,6 +1,5 @@
-use crate::state::{now_ms, SlotState, ACTION_STATUSES};
+use crate::state::SlotState;
 use crate::AppState;
-use tauri::Emitter;
 use tauri::Manager;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -165,23 +164,17 @@ fn urldecode(s: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-/// 状态到达：更新槽位状态、统计点击、必要时发系统通知并推送给前端
+/// 状态到达：更新槽位状态，退出/到期时发系统通知
 fn on_report(app: &tauri::AppHandle, slot: u32, status: &str) {
     let mut notify: Option<(String, String)> = None;
-    let snapshot = {
+    {
         let state: tauri::State<AppState> = app.state();
         let mut states = state.states.lock().unwrap();
         let s = states.entry(slot).or_insert_with(|| SlotState::new(slot));
 
-        // 点击动作计数
-        if ACTION_STATUSES.contains(&status) {
-            s.clicks += 1;
-        }
-
         // 状态迁移时通知：退出云机 / 到期
-        let key = status.to_string();
         let prev = s.last_status.clone();
-        if key != prev {
+        if status != prev {
             match status {
                 "exited" => {
                     if prev != "exited" {
@@ -200,11 +193,8 @@ fn on_report(app: &tauri::AppHandle, slot: u32, status: &str) {
                 _ => {}
             }
         }
-
-        s.last_status = key;
-        s.last_at = now_ms();
-        s.clone()
-    };
+        s.last_status = status.to_string();
+    }
 
     if let Some((title, body)) = notify {
         use tauri_plugin_notification::NotificationExt;
@@ -215,8 +205,6 @@ fn on_report(app: &tauri::AppHandle, slot: u32, status: &str) {
             .body(body)
             .show();
     }
-
-    let _ = app.emit("cpk://status", &snapshot);
 }
 
 #[cfg(test)]

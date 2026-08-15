@@ -1,20 +1,14 @@
-use serde::Serialize;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-/// 上报状态中视为"自动点击动作"的集合（用于统计点击次数）
-/// 视为「主动点击」的上报状态（计入 clicks 统计）
-pub const ACTION_STATUSES: [&str; 5] = ["try-enable", "retry", "enter", "confirm", "expired"];
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// 每个帐号槽位的运行状态（进程内使用；看板/点击统计等纯展示字段
+/// 已随初版管理面板一并移除，只留有真实消费者的字段）
+#[derive(Debug, Default)]
 pub struct SlotState {
     pub slot: u32,
     pub running: bool,
     pub visible: bool,
     pub topmost: bool,
+    /// 最近一次上报状态（"未启动"/"installed"/"alive"/"exited"/"expired"...），
+    /// exited/expired 状态迁移时触发系统通知（见 report_server.rs）
     pub last_status: String,
-    pub last_at: i64,
-    pub clicks: u64,
     /// 会话内分辨率覆盖（旋转/窗口设置只改内存，不落盘——还原原版语义）
     pub size_override: Option<(f64, f64)>,
 }
@@ -23,20 +17,8 @@ impl SlotState {
     pub fn new(slot: u32) -> Self {
         Self {
             slot,
-            running: false,
-            visible: false,
-            topmost: false,
-            last_status: "未启动".to_string(),
-            last_at: 0,
-            clicks: 0,
-            size_override: None,
+            last_status: "未启动".into(),
+            ..Default::default()
         }
     }
-}
-
-pub fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
