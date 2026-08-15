@@ -214,27 +214,59 @@ fn attach_parent_console() {
 #[cfg(not(windows))]
 fn attach_parent_console() {}
 
+/// WebView2 特性开关调优清单（--disable-features= 后面的部分）：
+/// 官方文档：普通开关重复出现只认最后一个，但 --enable-features/--disable-features
+/// 例外——多处出现按【并集】合并（此清单与 wry 默认传的 disable-features 自动合并，
+/// 互不覆盖）。清单里仍重复带上 wry 默认的三项，纯防御：个别运行时版本若退化成
+/// last-wins 也不丢 wry 原有关闭项：
+/// - msWebOOUI,msPdfOOUI,msSmartScreenProtection：wry 默认就传的三项
+/// - CalculateNativeWinOcclusion：关闭 Chromium 原生窗口遮挡检测。默认开启时窗口被
+///   其他窗口盖住会被当作后台而限流渲染器（有 Tauri 应用实测被误判后近乎停转）；
+///   本程序云手机画面每秒都在传输，遮挡限流直接伤保活，关闭后盖住照常跑
+/// - Translate / AutofillServerCommunication / OptimizationHints /
+///   InterestFeedContentSuggestions：Edge 的翻译提示、表单自动填充云端上报、
+///   优化指南预取、资讯流推荐——页面脚本与视频流不经过这些服务，纯省待命开销
+/// - HardwareMediaKeyHandling / MediaSessionService：系统媒体键钩子与「正在播放」
+///   系统集成。视频流走 WebRTC/WebSocket 传输，与此无关
+/// - msEdgeBackgroundProcessing：Edge 后台维护任务
+#[cfg(windows)]
+const WEBVIEW2_TUNED_FEATURES: &str = "msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion,Translate,AutofillServerCommunication,OptimizationHints,InterestFeedContentSuggestions,HardwareMediaKeyHandling,MediaSessionService,msEdgeBackgroundProcessing";
+
+/// 启动早期（tauri::Builder 构造前）设置 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS。
+/// WebView2 加载器把它与内置参数合并（不整体替换），本程序全部窗口生效。
+///
+/// 用户/外部工具已设置该变量时【原样尊重不覆盖】——高级用户可能有自己的调优。
+/// 诊断日志开关（CPK_WEBLOG / CPK_NETLOG）也在此一并拼入，语义与旧版一致：
+/// WebView2/Chromium 内部日志默认不开——--enable-logging 有官方缺陷
+/// （WebView2Feedback#2195）会在 Windows 弹控制台黑窗。
+/// 返回 Some(实际写入的参数) 供启动日志留痕；None = 检测到外部已设置，未动。
+#[cfg(windows)]
+fn apply_webview2_tuning() -> Option<String> {
+    const ENV: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+    if std::env::var_os(ENV).is_some() {
+        return None;
+    }
+    let mut args = format!("--disable-features={WEBVIEW2_TUNED_FEATURES}");
+    if std::env::var_os("CPK_WEBLOG").is_some() {
+        args.push_str(" --enable-logging --v=1");
+        if std::env::var_os("CPK_NETLOG").is_some() {
+            args.push_str(" --log-net-log");
+        }
+    }
+    std::env::set_var(ENV, &args);
+    Some(args)
+}
+
+#[cfg(not(windows))]
+fn apply_webview2_tuning() -> Option<String> {
+    None
+}
+
 fn main() {
     install_panic_hook();
     attach_parent_console();
-
-    // WebView2/Chromium 级调试日志【默认关闭，仅诊断时开启】：
-    // 设 CPK_WEBLOG=1 后 msedgewebview2 才写内部错误日志（各 data/ 目录内），
-    // 再叠加 CPK_NETLOG=1 可额外记录网络事件全量（netlog.json，体积大，按需用）。
-    // 注意：--enable-logging 不能默认开——WebView2 官方缺陷（WebView2Feedback#2195）
-    // 会在 Windows 上弹出控制台黑窗，这正是「日志明明写 logs/ 目录却还冒控制台」的原因。
-    #[cfg(windows)]
-    {
-        if std::env::var_os("CPK_WEBLOG").is_some()
-            && std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none()
-        {
-            let mut args = "--enable-logging --v=1".to_string();
-            if std::env::var_os("CPK_NETLOG").is_some() {
-                args.push_str(" --log-net-log");
-            }
-            std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &args);
-        }
-    }
+    // 必须在 tauri::Builder（首个 WebView2 环境创建）之前生效
+    let webview2_args = apply_webview2_tuning();
 
     tauri::Builder::default()
         .manage(AppState::new())
@@ -298,7 +330,28 @@ fn main() {
 
             // 设置窗口已创建 = WebView2 运行时可用（它本身就是一个 WebView2 窗口）
             logger::log(app.handle(), 0, "sys", "设置窗口已创建，WebView2 运行时正常");
-            // 诊断开关提示（默认全关，绝不弹控制台；详见 main 函数开头注释）
+            // WebView2 启动参数留痕（apply_webview2_tuning 在 main 早期已生效；仅 Windows）
+            #[cfg(windows)]
+            match webview2_args.as_deref() {
+                Some(a) => logger::log(
+                    app.handle(),
+                    0,
+                    "sys",
+                    &format!(
+                        "WebView2 调优参数已应用（关闭遮挡限流 CalculateNativeWinOcclusion + Edge 后台服务）：{a}"
+                    ),
+                ),
+                None => logger::log(
+                    app.handle(),
+                    0,
+                    "sys",
+                    "检测到外部已设置 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS，程序内置调优参数未应用（如需启用请清除该环境变量后重启）",
+                ),
+            }
+            #[cfg(not(windows))]
+            let _ = webview2_args;
+
+            // 诊断开关提示（默认全关，绝不弹控制台；详见 apply_webview2_tuning 注释）
             logger::log(
                 app.handle(),
                 0,

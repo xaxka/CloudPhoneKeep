@@ -48,6 +48,16 @@
 
 隐藏窗口继续保活：点云手机窗口 X、老板键 `Ctrl+N` 或托盘「隐藏」均可。
 
+## WebView2 性能调优（v1.8.1 起）
+
+程序启动早期自动设置 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`（WebView2 加载器与内置参数**合并**生效，全部窗口共享）：
+
+- **关闭 `CalculateNativeWinOcclusion`（遮挡限流）**：Chromium 默认检测窗口遮挡，云手机窗口被其他窗口盖住时可能被当作后台而限流渲染器——对每秒传输画面的保活场景是直接威胁。关闭后盖住照常跑（代价：被盖住时照常渲染，略多 CPU）
+- **关闭 Edge 后台服务**：`Translate`（翻译）、`AutofillServerCommunication`（表单自动填充云端上报）、`OptimizationHints`（优化指南预取）、`InterestFeedContentSuggestions`（资讯流）、`HardwareMediaKeyHandling`/`MediaSessionService`（系统媒体键/正在播放集成）、`msEdgeBackgroundProcessing`（后台维护）。均与页面脚本、视频流无关，只省待命开销
+- `--disable-features` 多处出现时 WebView2 按**并集合并**（官方文档明确的例外，普通开关才只认最后一个），与 wry 内置的关闭项自动合并互不覆盖；清单仍重复带上 wry 默认三项（`msWebOOUI,msPdfOOUI,msSmartScreenProtection`）作防御
+
+注意：若外部已设置该环境变量，程序**不覆盖**（启动日志有记录），需要内置调优时请清除该变量后重启。启动参数完整内容见程序级日志（数据根目录 `cpk-*.log`）首条的「WebView2 调优参数已应用」。
+
 ## 源码级复刻对照（aardio → Tauri）
 
 | 原版行为（aardio 源码） | 本项目实现 |
