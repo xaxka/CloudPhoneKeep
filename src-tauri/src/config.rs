@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use tauri::Manager;
 
 pub const DEFAULT_WEB_URI: &str = "https://uphone.wo-adv.cn/cloudphone/#/home";
+/// 更新检查默认指向本仓库自己的 GitHub Releases。
+/// 仅获取版本信息用于提示，绝不自动下载或执行任何文件。
 pub const DEFAULT_UPDATE_URL: &str =
-    "http://download.617kan.cn/moyu-webview-update-files/version.txt";
+    "https://api.github.com/repos/xixka/CloudPhoneKeep/releases/latest";
 pub const DEFAULT_DOWNLOAD_PAGE: &str = "https://github.com/xixka/CloudPhoneKeep/releases";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,7 +113,7 @@ pub fn config_path(app: &tauri::AppHandle) -> PathBuf {
     dir.join("config.json")
 }
 
-/// 每个帐号独立的 WebView 数据目录（Cookie / 缓存隔离，与原版 userDataDir 语义一致）
+/// 每个帐号独立的 WebView 数据目录（Cookie / 缓存隔离）
 pub fn profile_dir(app: &tauri::AppHandle, slot: u32, name: &str) -> PathBuf {
     let dir = app
         .path()

@@ -61,7 +61,7 @@ pub fn start_slot(app: &AppHandle, slot: u32) -> Result<(), String> {
         .resizable(true)
         .initialization_script(&init_script);
 
-    // Windows / macOS: 每个帐号独立数据目录，实现 Cookie/缓存隔离（等价原版 userDataDir）
+    // Windows / macOS: 每个帐号独立数据目录，实现 Cookie/缓存隔离
     let profile = config::profile_dir(app, slot, &name);
     builder = builder.data_directory(profile);
 
@@ -260,7 +260,7 @@ fn sync_state(app: &AppHandle, slot: u32, f: impl FnOnce(&mut SlotState)) {
 pub fn create_tray(app: &AppHandle) -> Result<(), tauri::Error> {
     let open_main = MenuItemBuilder::with_id("open-main", "打开主面板").build(app)?;
     let show_all = MenuItemBuilder::with_id("show-all", "显示全部窗口").build(app)?;
-    let hide_all = MenuItemBuilder::with_id("hide-all", "隐藏全部窗口(摸鱼)").build(app)?;
+    let hide_all = MenuItemBuilder::with_id("hide-all", "隐藏全部窗口").build(app)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;

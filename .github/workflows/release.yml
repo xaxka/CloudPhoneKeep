@@ -2,8 +2,7 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -24,13 +23,31 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Build and release with tauri-action
-        uses: tauri-apps/tauri-action@v0
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Tauri CLI
+        run: npm install -g @tauri-apps/cli@^2
+
+      - name: Build
+        run: npx tauri build
+
+      - name: Upload exe to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev
+          name: Dev Build
+          body: |
+            自动构建 (dev)
+            Commit: ${{ github.sha }}
+            Build: #${{ github.run_number }}
+            时间: ${{ github.run_started_at }} UTC
+          files: |
+            src-tauri/target/release/CloudPhoneKeep.exe
+            src-tauri/target/release/bundle/nsis/*.exe
+          prerelease: true
+          draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "CloudPhoneKeep __VERSION__"
-          releaseBody: "联通云手机网页版多开保活工具。详见 README。"
-          releaseDraft: false
-          prerelease: false

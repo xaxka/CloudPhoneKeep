@@ -1,8 +1,11 @@
 use crate::config::SlotConfig;
 
+/// 内嵌的触点光标 PNG（28×28，青圈白点，热点居中），避免引用任何第三方资源
+const CURSOR_PNG_B64: &str = include_str!("../assets/cursor.b64");
+
 /// 生成注入到云手机页面的保活初始化脚本。
 ///
-/// 与原版 aardio 程序等价的能力：
+/// 该脚本实现的能力：
 /// 1. 等待并自动点击「试用 / 立即启用云手机」弹窗（.try-content / .try-btn）
 /// 2. 「无法连接」弹窗自动点「再次尝试」（.phone-dialog-wrap）
 /// 3. 详情页自动点「进入云机」（.detail-info-container / .enter / .enter-intance）
@@ -30,6 +33,7 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     });
 
     let cfg_json = serde_json::to_string(&inject).unwrap_or_else(|_| "{}".into());
+    let cursor_b64 = CURSOR_PNG_B64.trim();
 
     format!(
         r#"(function(){{
@@ -51,9 +55,10 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
 
   if (CFG.customCursor) {{
     try {{
+      // 本地内嵌触点光标（无任何第三方网络依赖）
       var st = document.createElement('style');
       st.type = 'text/css';
-      st.innerHTML = '*{{cursor:url("https://fs-im-kefu.7moor-fs1.com/ly/4d2c3f00-7d4c-11e5-af15-41bf63ae4ea0/1715189790852/Dotter.cur"),default;}}';
+      st.innerHTML = '*{{cursor:url("data:image/png;base64,__CPK_CURSOR__") 14 14, default;}}';
       (document.head || document.documentElement).appendChild(st);
     }} catch(e){{}}
   }}
@@ -146,6 +151,8 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
   // 页面内定时器（窗口可见时生效）
   setInterval(function(){{ try {{ tick(); }} catch(e){{}} }}, CFG.intervalMs || 5000);
   send('installed');
-}})();"#
+}})();"#,
+        cfg_json = cfg_json,
+        __CPK_CURSOR__ = cursor_b64
     )
 }

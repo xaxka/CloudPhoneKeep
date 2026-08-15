@@ -40,10 +40,11 @@ pub fn version_gt(a: &str, b: &str) -> bool {
     false
 }
 
-/// 拉取在线版本信息。
-/// 兼容两种格式：
-/// 1. JSON：{ "version": "1.2.0", "description": "...", "url": "https://..." }
-/// 2. 纯文本：首行版本号，其余行作为更新说明（原 aardio 更新源格式）
+/// 拉取在线版本信息（仅用于提示，绝不自动下载或执行任何文件）。
+/// 兼容三种格式：
+/// 1. GitHub Releases API：{ "tag_name": "v1.2.0", "name": "...", "body": "...", "html_url": "..." }
+/// 2. 通用 JSON：{ "version": "1.2.0", "description": "...", "url": "https://..." }
+/// 3. 纯文本：首行版本号，其余行作为更新说明
 pub async fn fetch_update(settings: &Settings, current: &str) -> UpdateInfo {
     let mut info = UpdateInfo {
         current_version: current.to_string(),
@@ -56,6 +57,7 @@ pub async fn fetch_update(settings: &Settings, current: &str) -> UpdateInfo {
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .user_agent("CloudPhoneKeep-UpdateCheck")
         .build()
     {
         Ok(c) => c,
@@ -81,20 +83,26 @@ pub async fn fetch_update(settings: &Settings, current: &str) -> UpdateInfo {
         }
     };
 
-    // 尝试 JSON
+    // 尝试 JSON（GitHub Releases / 通用格式）
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
         info.remote_version = v
             .get("version")
+            .or_else(|| v.get("tag_name"))
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string();
         info.description = v
             .get("description")
-            .or_else(|| v.get("content"))
+            .or_else(|| v.get("body"))
+            .or_else(|| v.get("name"))
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string();
-        if let Some(u) = v.get("url").and_then(|x| x.as_str()) {
+        if let Some(u) = v
+            .get("url")
+            .or_else(|| v.get("html_url"))
+            .and_then(|x| x.as_str())
+        {
             if !u.is_empty() {
                 info.download_url = u.to_string();
             }
