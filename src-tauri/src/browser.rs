@@ -274,7 +274,8 @@ fn cleanup_slot(app: &AppHandle, slot: u32) {
     unregister_slot_shortcut(app, slot);
     let old_watchdog = {
         let state: tauri::State<AppState> = app.state();
-        state.watchdogs.lock().unwrap().remove(&slot)
+        let old = state.watchdogs.lock().unwrap().remove(&slot);
+        old
     };
     if let Some(h) = old_watchdog {
         h.abort();
@@ -324,7 +325,8 @@ fn spawn_watchdog(app: AppHandle, slot: u32) {
 
     let old = {
         let state: tauri::State<AppState> = app.state();
-        state.watchdogs.lock().unwrap().insert(slot, handle)
+        let old = state.watchdogs.lock().unwrap().insert(slot, handle);
+        old
     };
     if let Some(old) = old {
         old.abort();
@@ -504,7 +506,8 @@ pub fn rebuild_tray(app: &AppHandle) {
         Err(_) => return,
     };
     let state: tauri::State<AppState> = app.state();
-    if let Some(tray) = state.tray.lock().unwrap().as_ref() {
+    let guard = state.tray.lock().unwrap();
+    if let Some(tray) = guard.as_ref() {
         let _ = tray.set_menu(Some(menu));
     }
 }
