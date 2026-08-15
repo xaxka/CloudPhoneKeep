@@ -290,7 +290,8 @@ fn main() {
             commands::get_slot_size,
             commands::set_slot_size
         ])
-        .setup(|app| {
+        // setup 闭包要求 'static：move 捕获 webview2_args（启动日志留痕用）
+        .setup(move |app| {
             // 启动即写日志：版本 / pid / 数据根目录与 exe 目录（保证数据目录与日志文件一定生成）
             logger::log(
                 app.handle(),
