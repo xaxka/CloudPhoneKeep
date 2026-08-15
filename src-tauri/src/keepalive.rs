@@ -31,6 +31,7 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
         "slot": cfg.slot,
         "port": port,
         "platform": platform,
+        "homeUri": cfg.web_uri,
         "keepAlive": cfg.keep_alive,
         "intervalMs": cfg.interval_ms,
         "simulateActivity": cfg.simulate_activity,
@@ -307,6 +308,45 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     tick();
     return 'ok';
   }};
+
+  // ===== 页面加载诊断：白屏/加载失败时给出可见的重试入口，不再让用户对着空白页 =====
+  // 页面运行异常统一上报（改版/脚本错误排查的第一手证据）
+  window.addEventListener('error', function(ev){{
+    try {{ diag('error', '页面异常: ' + (ev.message || '') + ' @' + (ev.filename || '').slice(0, 80) + ':' + (ev.lineno || 0)); }} catch(e){{}}
+  }}, true);
+
+  function showLoadBar(msg){{
+    var bar = document.getElementById('cpk-load-bar');
+    if (!bar) {{
+      bar = document.createElement('div');
+      bar.id = 'cpk-load-bar';
+      bar.style.cssText = 'display:none;position:fixed;left:0;right:0;bottom:0;z-index:2147483647;background:#fff3cd;border-top:1px solid #d39e00;color:#664d03;font:13px/1.6 sans-serif;padding:8px 10px;text-align:center;';
+      bar.innerHTML = '<div id="cpk-load-msg" style="margin-bottom:6px;"></div>' +
+        '<button id="cpk-load-retry" style="margin:0 6px;padding:4px 14px;cursor:pointer;">重新加载</button>' +
+        '<button id="cpk-load-home" style="margin:0 6px;padding:4px 14px;cursor:pointer;">回云手机首页</button>' +
+        '<button id="cpk-load-close" style="margin:0 6px;padding:4px 14px;cursor:pointer;">忽略</button>';
+      (document.body || document.documentElement).appendChild(bar);
+      document.getElementById('cpk-load-retry').onclick = function(){{ diag('sys', '用户点击「重新加载」'); try{{ location.reload(); }}catch(e){{}} }};
+      document.getElementById('cpk-load-home').onclick = function(){{ diag('sys', '用户点击「回云手机首页」'); try{{ location.href = CFG.homeUri; }}catch(e){{}} }};
+      document.getElementById('cpk-load-close').onclick = function(){{ bar.style.display = 'none'; }};
+    }}
+    var m = document.getElementById('cpk-load-msg');
+    if (m) m.textContent = msg;
+    bar.style.display = 'block';
+  }}
+
+  setTimeout(function(){{
+    try {{
+      var rs = document.readyState;
+      var kids = document.body ? document.body.children.length : -1;
+      if ((rs !== 'complete' && rs !== 'interactive') || kids <= 0) {{
+        diag('error', '页面未正常加载 readyState=' + rs + ' body子元素=' + kids + ' url=' + location.href.slice(0, 160));
+        showLoadBar('页面似乎没有加载出来（空白）。请检查网络后重试：');
+      }} else {{
+        diag('sys', '页面加载正常 readyState=' + rs + ' body子元素=' + kids + ' url=' + location.href.slice(0, 120));
+      }}
+    }} catch(e) {{}}
+  }}, 15000);
 
   window.__CPK_TICK__ = tick;
   // 页面内定时器（窗口可见时生效）

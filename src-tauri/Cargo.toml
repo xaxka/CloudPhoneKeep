@@ -1,6 +1,6 @@
 [package]
 name = "cloudphonekeep"
-version = "1.0.0"
+version = "1.2.0"
 description = "联通云手机网页版多开保活工具"
 authors = ["xixka"]
 license = "MIT"
@@ -12,6 +12,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"

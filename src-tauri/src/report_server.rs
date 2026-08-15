@@ -21,6 +21,12 @@ pub fn spawn(app: tauri::AppHandle) {
             let state: tauri::State<AppState> = app.state();
             *state.port.lock().unwrap() = port;
         }
+        crate::logger::log(
+            &app,
+            0,
+            "sys",
+            &format!("状态回环服务已监听 http://127.0.0.1:{port}/report"),
+        );
 
         loop {
             if let Ok((stream, _)) = listener.accept().await {

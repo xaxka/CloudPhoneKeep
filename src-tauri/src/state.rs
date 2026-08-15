@@ -14,6 +14,8 @@ pub struct SlotState {
     pub last_status: String,
     pub last_at: i64,
     pub clicks: u64,
+    /// 本次会话是否已提示过「隐藏到托盘」通知（避免每次隐藏都打扰）
+    pub hide_notified: bool,
 }
 
 impl SlotState {
@@ -26,6 +28,7 @@ impl SlotState {
             last_status: "未启动".to_string(),
             last_at: 0,
             clicks: 0,
+            hide_notified: false,
         }
     }
 }

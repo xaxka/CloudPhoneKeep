@@ -73,7 +73,8 @@ body {
   min-height: 16px;
 }
 
-#btn-go {
+#btn-go,
+#btn-quit {
   height: 40px;
   font-size: 16px;
   font-weight: 700;
@@ -86,6 +87,42 @@ body {
 
 #btn-go:hover { background: #e5f1fb; border-color: #0078d7; }
 #btn-go:active { background: #cce4f7; border-color: #005499; }
+
+#btn-quit:hover { background: #fdecea; border-color: #d93025; }
+#btn-quit:active { background: #f9d3d0; border-color: #a61c17; }
+
+.btn-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.btn-row button {
+  flex: 1;
+}
+
+/* 醒目横幅：启动失败(红) / 非致命警告(黄)，替代原先 12px 小灰字 */
+.banner {
+  margin-top: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.banner.err {
+  background: #fdecea;
+  border: 1px solid #f5c6cb;
+  color: #b3261e;
+}
+
+.banner.warn {
+  background: #fff3cd;
+  border: 1px solid #ffe08a;
+  color: #664d03;
+}
 
 .foot {
   margin-top: 8px;

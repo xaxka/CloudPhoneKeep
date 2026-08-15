@@ -16,6 +16,17 @@
     unicom: { width: 405, height: 720, url: "https://uphone.wo-adv.cn/cloudphone/#/home" }
   };
 
+  // 醒目横幅：错误(红) / 警告(黄)。此前错误只显示在底部小灰字里，用户根本看不见
+  function showBanner(id, msg) {
+    var b = el(id);
+    b.textContent = msg;
+    b.hidden = false;
+  }
+  function hideBanners() {
+    el("err").hidden = true;
+    el("warn").hidden = true;
+  }
+
   function refreshHint() {
     invoke("get_running")
       .then(function (slots) {
@@ -55,14 +66,21 @@
   });
 
   el("btn-go").addEventListener("click", launch);
+  el("btn-quit").addEventListener("click", function () {
+    el("btn-quit").disabled = true;
+    invoke("app_quit").catch(function () {
+      el("btn-quit").disabled = false;
+    });
+  });
   document.addEventListener("keydown", function (e) {
     if (e.key === "Enter") launch();
   });
 
   function launch() {
+    hideBanners();
     var n = parseInt(el("idx").value, 10);
     if (!(n >= 1 && n <= 9)) {
-      el("running-hint").textContent = "老板键索引必须是 1~9";
+      showBanner("err", "老板键索引必须是 1~9 的数字");
       el("idx").focus();
       return;
     }
@@ -85,11 +103,14 @@
     };
     el("btn-go").disabled = true;
     invoke("launch_slot", { cfg: cfg })
-      .then(function () {
-        // 启动成功：设置窗口由后端隐藏
+      .then(function (warnings) {
+        // 启动成功：设置窗口由后端隐藏；如有非致命警告（老板键被占用）下次打开时展示
+        if (warnings && warnings.length) {
+          showBanner("warn", warnings.join("\n"));
+        }
       })
       .catch(function (err) {
-        el("running-hint").textContent = String(err);
+        showBanner("err", "启动失败：" + String(err));
       })
       .finally(function () {
         el("btn-go").disabled = false;

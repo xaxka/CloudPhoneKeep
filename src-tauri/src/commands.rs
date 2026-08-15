@@ -1,5 +1,6 @@
 use crate::browser;
 use crate::config::SlotConfig;
+use crate::logger;
 use crate::AppState;
 use tauri::{AppHandle, Manager};
 
@@ -21,22 +22,46 @@ pub fn get_slot(app: AppHandle, slot: u32) -> Result<SlotConfig, String> {
     Ok(s.normalized())
 }
 
-/// 设置窗口「进入」：保存配置并启动窗口（还原原版流程）
+/// 设置窗口「进入」：保存配置并启动窗口（还原原版流程）。
+/// 返回非致命警告（老板键被占用等）由前端醒目展示；Err 仅在窗口无法创建时返回。
 #[tauri::command]
-pub fn launch_slot(app: AppHandle, cfg: SlotConfig) -> Result<(), String> {
+pub fn launch_slot(app: AppHandle, cfg: SlotConfig) -> Result<Vec<String>, String> {
     {
         let state: tauri::State<AppState> = app.state();
         let mut app_cfg = state.config.lock().unwrap();
         crate::config::upsert_slot(&mut app_cfg, cfg.clone());
-        crate::config::save(&app_cfg)?;
+        // 配置落盘失败不阻塞启动（例如 exe 放在只读目录），记日志继续
+        if let Err(e) = crate::config::save(&app_cfg) {
+            logger::log(
+                &app,
+                cfg.slot,
+                "error",
+                &format!("配置持久化失败（不影响本次启动，但重启后配置会丢失）：{e}"),
+            );
+        }
     }
-    browser::start_slot(&app, cfg.slot)?;
+
+    let warnings = match browser::start_slot_ex(&app, cfg.slot) {
+        Ok(w) => w,
+        Err(e) => {
+            // 启动失败：落盘 + 系统通知双保险，用户绝不可能毫无感知
+            logger::log(&app, cfg.slot, "error", &format!("窗口启动失败：{e}"));
+            use tauri_plugin_notification::NotificationExt;
+            let _ = app
+                .notification()
+                .builder()
+                .title("启动失败")
+                .body(e.clone())
+                .show();
+            return Err(e);
+        }
+    };
 
     // 启动成功后隐藏设置窗口（与原版一致：loginForm.show(false)）
     if let Some(win) = app.get_webview_window("login") {
         let _ = win.hide();
     }
-    Ok(())
+    Ok(warnings)
 }
 
 /// 正在运行的槽位列表（设置窗口提示用）
@@ -59,7 +84,8 @@ pub fn stop_slot(app: AppHandle, slot: u32) -> Result<(), String> {
     browser::stop_slot(&app, slot)
 }
 
+/// 彻底退出程序（设置窗口「退出程序」按钮）
 #[tauri::command]
 pub fn app_quit(app: AppHandle) {
-    app.exit(0);
+    browser::quit_all(&app);
 }
