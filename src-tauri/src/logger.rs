@@ -178,7 +178,7 @@ fn append(slot: u32, line: &str) {
     };
     if need_reopen {
         if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path) {
-            sinks.insert(slot, Sink { file: f, day: day.clone(), dir });
+            sinks.insert(slot, Sink { file: f, day: day.clone(), dir: dir.clone() });
             cleanup(&dir, days);
         }
     }
