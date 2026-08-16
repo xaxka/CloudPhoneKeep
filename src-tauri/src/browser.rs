@@ -274,10 +274,22 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
                 let app = w.app_handle().clone();
                 let slot = slot_of_label(&w.label());
                 api.prevent_close();
-                let _ = w.hide();
-                logger::log(&app, slot, "sys", "用户点击关闭 → 隐藏到托盘（保活继续，退出请用托盘菜单）");
-                sync_state(&app, slot, |s| s.visible = false);
-                refresh_slot_tray(&app, slot);
+                let hidden = match w.hide() {
+                    Ok(()) => {
+                        logger::log(&app, slot, "sys", "用户点击关闭 → 隐藏到托盘（保活继续，退出请用托盘菜单）");
+                        true
+                    }
+                    // 隐藏失败必须留痕：曾出现「已记录隐藏、随后还能点中窗口菜单」的疑似静默失败
+                    Err(e) => {
+                        logger::log(&app, slot, "error", &format!("点 X 隐藏窗口失败（窗口保持可见）：{e}"));
+                        false
+                    }
+                };
+                // 仅隐藏成功才更新状态，避免托盘 ● 标记与实际显隐相反
+                if hidden {
+                    sync_state(&app, slot, |s| s.visible = false);
+                    refresh_slot_tray(&app, slot);
+                }
             }
             WindowEvent::Focused(true) => {
                 let app = w.app_handle().clone();
@@ -690,12 +702,21 @@ pub fn toggle_slot(app: &AppHandle, slot: u32) {
 
 pub fn show_slot(app: &AppHandle, slot: u32, visible: bool) {
     if let Some(win) = app.get_webview_window(&slot_label(slot)) {
-        if visible {
-            let _ = win.show();
+        let r = if visible {
+            let a = win.show();
             let _ = win.set_focus();
             reapply_topmost(app, slot);
+            a
         } else {
-            let _ = win.hide();
+            win.hide()
+        };
+        if let Err(e) = r {
+            logger::log(
+                app,
+                slot,
+                "error",
+                &format!("窗口{}失败：{e}", if visible { "显示" } else { "隐藏" }),
+            );
         }
         sync_state(app, slot, |s| s.visible = visible);
         refresh_slot_tray(app, slot);

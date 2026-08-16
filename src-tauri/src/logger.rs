@@ -35,6 +35,7 @@ pub fn set_console_mirror(on: bool) {
 struct Sink {
     file: File,
     day: String,
+    dir: PathBuf,
 }
 
 /// 每个目录一个缓存句柄（slot=0 → 数据根目录；slot=N → 帐号 N 的数据目录）。
@@ -168,13 +169,16 @@ fn append(slot: u32, line: &str) {
     let path = dir.join(format!("cpk-{day}.log"));
 
     let mut sinks = sinks().lock().unwrap();
+    // 重开条件：跨天，或目录变了（新帐号首次登记 / 数据目录被锁换 -r2 兜底目录）。
+    // 旧版只认跨天：新帐号首条日志先于目录登记落盘时，缓存句柄会把当天全部
+    // 帐号日志钉死在数据根目录——这正是「日志没在帐号子目录里」的根因
     let need_reopen = match sinks.get(&slot) {
-        Some(s) => s.day != day,
+        Some(s) => s.day != day || s.dir != dir,
         None => true,
     };
     if need_reopen {
         if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path) {
-            sinks.insert(slot, Sink { file: f, day: day.clone() });
+            sinks.insert(slot, Sink { file: f, day: day.clone(), dir });
             cleanup(&dir, days);
         }
     }

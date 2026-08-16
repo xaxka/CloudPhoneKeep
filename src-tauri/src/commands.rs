@@ -63,6 +63,12 @@ pub async fn launch_slot(app: AppHandle, cfg: SlotConfig) -> Result<Vec<String>,
             );
         }
     }
+    // 尽早登记日志目录：新帐号首次进入时，启动期的登记表里还没有此槽位，
+    // 若等窗口创建时才登记，首条帐号日志会先落进数据根目录
+    crate::logger::register_slot_dir(
+        cfg.slot,
+        crate::config::profile_dir(cfg.slot, &cfg.name),
+    );
 
     logger::log(&app, cfg.slot, "debug", "开始创建窗口（异步线程，不阻塞界面）");
     let slot = cfg.slot;
