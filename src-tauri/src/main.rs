@@ -286,9 +286,7 @@ fn main() {
             commands::debug_log,
             commands::get_slot,
             commands::launch_slot,
-            commands::get_running,
-            commands::get_slot_size,
-            commands::set_slot_size
+            commands::get_running
         ])
         // setup 闭包要求 'static：move 捕获 webview2_args（启动日志留痕用）
         .setup(move |app| {

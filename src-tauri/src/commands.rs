@@ -116,18 +116,3 @@ pub fn get_running(app: AppHandle) -> Vec<u32> {
     v.sort();
     v
 }
-
-/// 当前生效分辨率（会话内覆盖优先，其次配置）——「窗口设置」小窗预填用
-#[tauri::command]
-pub fn get_slot_size(app: AppHandle, slot: u32) -> Result<(f64, f64), String> {
-    Ok(browser::slot_size(&app, slot))
-}
-
-/// 「窗口设置」小窗保存按钮（还原原版 settingWin：只改窗口与内存，不落盘）
-#[tauri::command]
-pub fn set_slot_size(app: AppHandle, slot: u32, w: f64, h: f64) -> Result<(), String> {
-    if !(280.0..=4096.0).contains(&w) || !(400.0..=4096.0).contains(&h) {
-        return Err("分辨率超出范围（宽 280~4096，高 400~4096）".into());
-    }
-    browser::apply_slot_size(&app, slot, w, h)
-}

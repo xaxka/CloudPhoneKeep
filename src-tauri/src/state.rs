@@ -9,8 +9,6 @@ pub struct SlotState {
     /// 最近一次上报状态（"未启动"/"installed"/"alive"/"exited"/"expired"...），
     /// exited/expired 状态迁移时触发系统通知（见 report_server.rs）
     pub last_status: String,
-    /// 会话内分辨率覆盖（旋转/窗口设置只改内存，不落盘——还原原版语义）
-    pub size_override: Option<(f64, f64)>,
 }
 
 impl SlotState {

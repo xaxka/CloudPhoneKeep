@@ -17,10 +17,6 @@ pub fn slot_label(slot: u32) -> String {
     format!("browser-{slot}")
 }
 
-fn winset_label(slot: u32) -> String {
-    format!("winset-{slot}")
-}
-
 // ---------------------------------------------------------------------------
 // 窗口生命周期
 // ---------------------------------------------------------------------------
@@ -120,15 +116,8 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    // 生效分辨率：会话内覆盖（旋转/窗口设置）优先，其次配置值（还原原版 userInfo 语义）
-    let (w, h) = {
-        let state: tauri::State<AppState> = app.state();
-        let states = state.states.lock().unwrap();
-        states
-            .get(&slot)
-            .and_then(|s| s.size_override)
-            .unwrap_or((cfg.width, cfg.height))
-    };
+    // 初始分辨率使用配置值；用户可自由拖动窗口调整大小
+    let (w, h) = (cfg.width, cfg.height);
     logger::log(
         app,
         slot,
@@ -313,8 +302,6 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
     spawn_watchdog(app.clone(), slot);
     // 还原原版：每个窗口创建自己的托盘图标
     create_slot_tray(app, slot);
-    // 预创建「窗口设置」小窗（隐藏）：菜单点击时瞬时弹出，无 1~2 秒建窗等待
-    precreate_winset(app, slot);
     // 启动成功：隐藏设置窗口（还原原版 loginForm.show(false)）。
     // 经主线程派发执行，避免从后台线程直接调窗口 API 的兼容性问题
     hide_login(app);
@@ -350,7 +337,6 @@ fn build_window_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tau
         .item(&MenuItemBuilder::with_id(format!("home-{slot}"), "首页").build(app)?)
         .item(&MenuItemBuilder::with_id(format!("rotate-{slot}"), "旋转").build(app)?)
         .item(&MenuItemBuilder::with_id(format!("top-{slot}"), "窗口置顶").build(app)?)
-        .item(&MenuItemBuilder::with_id(format!("settings-{slot}"), "窗口设置").build(app)?)
         .item(&MenuItemBuilder::with_id("update-check", "检查更新").build(app)?)
         .build()
 }
@@ -425,8 +411,6 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                         .unwrap_or(false);
                     let _ = set_topmost(app, slot, top);
                 }
-                // 还原原版：菜单「设置」打开只调分辨率的「窗口设置」小窗
-                "settings" => open_winset(app, slot),
                 "show" => show_slot(app, slot, true),
                 "hide" => show_slot(app, slot, false),
                 // 打开该帐号的数据目录（含 WebView2 数据与本帐号日志）
@@ -437,135 +421,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
     }
 }
 
-/// 防重复标记：菜单快速连点时，「查窗口不存在 → 建窗」两步之间没有原子性，
-/// 两个线程都会走到建窗 → 出现 2 个窗口设置。建窗期间按槽位加锁去重。
-static WINSET_OPENING: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
-/// 建窗期间用户点了菜单 → 记下「想要显示」，建好后立即显示（不再要求用户点第二下）
-static WINSET_WANTED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-
-/// 构建「窗口设置」小窗（隐藏状态；显示由调用方决定）。
-/// 尺寸 280x264：内容实际高度约 217px + 出错提示换行余量，原 218px 会贴边裁掉底部
-fn build_winset(app: &AppHandle, slot: u32) -> Result<tauri::WebviewWindow, tauri::Error> {
-    let win = WebviewWindowBuilder::new(
-        app,
-        &winset_label(slot),
-        WebviewUrl::App(std::path::PathBuf::from("winset.html")),
-    )
-    .title("窗口设置")
-    .inner_size(280.0, 264.0)
-    .resizable(false)
-    .visible(false)
-    .build()?;
-    // 关闭 = 隐藏（窗口保留，再次打开瞬时响应；退出走 quit_all 的 destroy，不受影响）
-    let w = win.clone();
-    win.on_window_event(move |e| {
-        if let tauri::WindowEvent::CloseRequested { api, .. } = e {
-            api.prevent_close();
-            let _ = w.hide();
-        }
-    });
-    Ok(win)
-}
-
-/// 预创建「窗口设置」小窗（隐藏）：帐号窗口启动后即在后台线程建好，
-/// 用户点菜单时只需 show——消除 WebView2 建窗的 1~2 秒等待。
-/// 失败仅记日志，不影响帐号窗口；下次点菜单时走 open_winset 现建兜底
-fn precreate_winset(app: &AppHandle, slot: u32) {
-    let app2 = app.clone();
-    std::thread::spawn(move || {
-        let _guard = WinsetOpeningGuard(slot);
-        if app2.get_webview_window(&winset_label(slot)).is_some() {
-            return;
-        }
-        match build_winset(&app2, slot) {
-            Ok(_) => logger::log(&app2, slot, "debug", "窗口设置小窗已预创建（隐藏待用）"),
-            Err(e) => logger::log(&app2, slot, "debug", &format!("窗口设置预创建失败（点菜单时将现建）：{e}")),
-        }
-        // 预创建完成时若用户已在等菜单响应，立即显示
-        if WINSET_WANTED.lock().unwrap().contains(&slot) {
-            WINSET_WANTED.lock().unwrap().retain(|s| *s != slot);
-            if let Some(w) = app2.get_webview_window(&winset_label(slot)) {
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
-        }
-    });
-}
-
-/// RAII 防重复：线程结束时自动移除槽位标记（无论建窗成败）。
-/// 用法：`let _guard = WinsetOpeningGuard(slot);`（元组结构体直接构造）
-struct WinsetOpeningGuard(u32);
-impl Drop for WinsetOpeningGuard {
-    fn drop(&mut self) {
-        WINSET_OPENING.lock().unwrap().retain(|s| *s != self.0);
-    }
-}
-
-/// 「窗口设置」小窗（还原原版 settingWin：仅分辨率输入 + 保存，会话内生效不落盘，
-/// 同一窗口单实例，关闭=隐藏可反复瞬时打开）
-pub fn open_winset(app: &AppHandle, slot: u32) {
-    if let Some(win) = app.get_webview_window(&winset_label(slot)) {
-        // 单实例：已打开则聚焦（还原原版 isWinHwnd 拦截重复打开）
-        let _ = win.show();
-        let _ = win.set_focus();
-        return;
-    }
-    {
-        let mut opening = WINSET_OPENING.lock().unwrap();
-        if opening.contains(&slot) {
-            // 预创建还在进行中：记下「想要显示」，建好立即弹出
-            let mut wanted = WINSET_WANTED.lock().unwrap();
-            if !wanted.contains(&slot) {
-                wanted.push(slot);
-            }
-            return;
-        }
-    }
-    // 已知 Windows 陷阱（wry#583）：在菜单事件回调里同步创建 WebView2 窗口可能死锁，
-    // 丢到独立线程创建，回调立即返回
-    let app2 = app.clone();
-    std::thread::spawn(move || {
-        let _guard = WinsetOpeningGuard(slot);
-        match build_winset(&app2, slot) {
-            Ok(w) => {
-                let _ = w.show();
-                let _ = w.set_focus();
-                logger::log(&app2, slot, "sys", "打开窗口设置（分辨率，仅本会话生效）")
-            }
-            Err(e) => logger::log(&app2, slot, "error", &format!("窗口设置打开失败：{e}")),
-        }
-    });
-}
-
-/// 当前生效分辨率（会话内覆盖优先，其次配置值）
-pub fn slot_size(app: &AppHandle, slot: u32) -> (f64, f64) {
-    let state: tauri::State<AppState> = app.state();
-    let cfg = state.config.lock().unwrap();
-    let base = cfg
-        .slots
-        .iter()
-        .find(|s| s.slot == slot)
-        .map(|s| (s.width, s.height))
-        .unwrap_or((414.0, 896.0));
-    drop(cfg);
-    let states = state.states.lock().unwrap();
-    states
-        .get(&slot)
-        .and_then(|s| s.size_override)
-        .unwrap_or(base)
-}
-
-/// 「窗口设置」保存 / 立即改尺寸：只改窗口与内存，不写配置（还原原版 settingWin 语义）
-pub fn apply_slot_size(app: &AppHandle, slot: u32, w: f64, h: f64) -> Result<(), String> {
-    sync_state(app, slot, |s| s.size_override = Some((w, h)));
-    if let Some(win) = app.get_webview_window(&slot_label(slot)) {
-        win.set_size(tauri::LogicalSize::new(w, h))
-            .map_err(|e| e.to_string())?;
-    }
-    logger::log(app, slot, "sys", &format!("分辨率已调整（仅本会话）：{w} x {h}"));
-    Ok(())
-}
 
 /// 彻底退出程序（还原原版 win.quitMessage 语义）：
 /// 1. 常规路径：移除托盘 → 销毁全部窗口 → app.exit(0)
@@ -589,7 +445,7 @@ pub fn quit_all(app: &AppHandle) {
     // 移除全部托盘图标（还原原版退出前 tray.delete()）
     app.state::<AppState>().trays.lock().unwrap().clear();
     for (label, win) in app.webview_windows() {
-        if label.starts_with("browser-") || label.starts_with("winset-") {
+        if label.starts_with("browser-") {
             let _ = win.destroy();
         }
     }
@@ -762,10 +618,17 @@ fn reapply_topmost(app: &AppHandle, slot: u32) {
 
 /// 旋转：交换宽高并刷新页面（还原原版：仅改内存不落盘，重启后回到配置分辨率）
 pub fn rotate_slot(app: &AppHandle, slot: u32) -> Result<(f64, f64), String> {
-    let (w, h) = slot_size(app, slot);
+    let (w, h) = {
+        let state: tauri::State<AppState> = app.state();
+        let cfg = state.config.lock().unwrap();
+        cfg.slots
+            .iter()
+            .find(|s| s.slot == slot)
+            .map(|s| (s.width, s.height))
+            .unwrap_or((414.0, 896.0))
+    };
     // 交换后钳制到窗口最小尺寸（min_inner_size 280x400），避免 set_size 被 clamp 后与记录不一致
     let swapped = (h.max(280.0), w.max(400.0));
-    sync_state(app, slot, |s| s.size_override = Some(swapped));
 
     if let Some(win) = app.get_webview_window(&slot_label(slot)) {
         let _ = win.set_size(tauri::LogicalSize::new(swapped.0, swapped.1));
