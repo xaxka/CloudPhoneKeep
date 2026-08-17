@@ -306,7 +306,8 @@ fn main() {
 
             // 载入配置（AppData\LocalLow\CloudPhoneKeep\config.json；旧版 exe 目录配置自动迁移）
             let cfg = config::load();
-            // 登记各帐号日志目录（= 数据目录），此后帐号级日志各自落盘
+            // 登记各帐号数据目录（托盘「打开数据目录」定位实际运行目录用；
+            // 日志已统一写数据根目录单文件，与登记表无关）
             for s in cfg.slots.iter() {
                 logger::register_slot_dir(s.slot, config::profile_dir(s.slot, &s.name));
             }

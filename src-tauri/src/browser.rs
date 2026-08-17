@@ -413,7 +413,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 }
                 "show" => show_slot(app, slot, true),
                 "hide" => show_slot(app, slot, false),
-                // 打开该帐号的数据目录（含 WebView2 数据与本帐号日志）
+                // 打开该帐号的数据目录（含 WebView2 数据；日志统一在数据根目录）
                 "data" => open_slot_data_dir(app, slot),
                 _ => {}
             }
@@ -678,9 +678,9 @@ pub fn toggle_address_bar(app: &AppHandle) {
     }
 }
 
-/// 打开某帐号的数据目录（含 WebView2 数据与本帐号日志）。
+/// 打开某帐号的数据目录（WebView2 数据所在；日志统一在数据根目录单文件）。
 /// 优先用「实际运行目录」登记表：数据目录被锁换用 -r2 兜底目录时，
-/// 日志与 WebView2 数据都在兜底目录里——按配置名重算会打开旧目录（里面没有日志）
+/// WebView2 数据在兜底目录里——按配置名重算会打开旧目录（里面没有数据）
 fn open_slot_data_dir(app: &AppHandle, slot: u32) {
     use tauri_plugin_opener::OpenerExt;
     let name = {
@@ -705,7 +705,7 @@ fn open_slot_data_dir(app: &AppHandle, slot: u32) {
         app,
         slot,
         "sys",
-        &format!("打开数据目录：{}（本帐号日志 cpk-*.log 也在此目录）", dir.display()),
+        &format!("打开数据目录：{}（全局日志在数据根目录 cpk-*.log）", dir.display()),
     );
     let _ = app
         .opener()
