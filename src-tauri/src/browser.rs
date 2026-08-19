@@ -9,7 +9,6 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::{TrayIconBuilder};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
-pub const RELEASES_URL: &str = "https://github.com/xixka/CloudPhoneKeep/releases";
 /// WebView2 运行时官方下载页（窗口创建失败且疑似缺运行时时打开）
 pub const WEBVIEW2_URL: &str = "https://developer.microsoft.com/microsoft-edge/webview2/";
 
@@ -94,15 +93,8 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
     // 标题格式还原原版：移动云手机 - {name} - 老板键：Ctrl + {idx}
     let title = format!("{platform_label} - {name} - 老板键：Ctrl + {slot}");
 
-    // 原生菜单栏（还原原版 aardio 主菜单五项）：创建失败降级为无菜单模式，不阻塞
-    let menu = match build_window_menu(app, slot) {
-        Ok(m) => Some(m),
-        Err(e) => {
-            warnings.push(format!("菜单创建失败：{e}"));
-            logger::log(app, slot, "error", &format!("菜单创建失败（窗口将以无菜单模式启动）：{e}"));
-            None
-        }
-    };
+    // 窗口不再挂原生菜单栏（原「首页/旋转/窗口置顶/检查更新」五项已移除，
+    // 「首页/窗口置顶」改到托盘菜单，见 slot_tray_menu）
 
     let profile = config::profile_dir(slot, &name);
     // 日志目录登记更新（改名重进 / 新帐号时以本次目录为准）
@@ -160,9 +152,6 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
             .on_document_title_changed(move |_w, t| {
                 logger::log(&title_app, slot, "debug", &format!("页面标题：{t}"));
             });
-            if let Some(m) = &menu {
-                builder = builder.menu(m.clone());
-            }
             match builder.build() {
                 Ok(w) => {
                     logger::log(
@@ -330,21 +319,9 @@ fn slot_of_label(label: &str) -> u32 {
     label.strip_prefix("browser-").and_then(|s| s.parse().ok()).unwrap_or(0)
 }
 
-/// 原生菜单栏（每个窗口独立，id 带槽位后缀）。
-/// 还原原版 aardio 主菜单五项：首页/旋转/窗口置顶/设置/检查更新（无退出项）。
-fn build_window_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
-    MenuBuilder::new(app)
-        .item(&MenuItemBuilder::with_id(format!("home-{slot}"), "首页").build(app)?)
-        .item(&MenuItemBuilder::with_id(format!("rotate-{slot}"), "旋转").build(app)?)
-        .item(&MenuItemBuilder::with_id(format!("top-{slot}"), "窗口置顶").build(app)?)
-        .item(&MenuItemBuilder::with_id("update-check", "检查更新").build(app)?)
-        .build()
-}
-
 /// 菜单事件去重：Windows 下每次菜单点击会触发【两次】menu event（muda 已知行为，
-/// 实测两次间隔约 5~6ms）。不去重的后果（用户日志实锤）：
-///   「旋转」连转两次 = 没转；「窗口置顶」开了立即被取消；
-///   「窗口设置」一次点出两个小窗。
+/// 实测两次间隔约 5~6ms）。不去重的后果：「窗口置顶」开了立即被取消、
+/// 「首页」连刷两次、显示/隐藏状态反复横跳。
 /// 同一 id 在 300ms 内的重复事件直接丢弃。
 fn menu_event_dup(id: &str) -> bool {
     static LAST: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
@@ -371,15 +348,10 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
             quit_all(app);
             return;
         }
-        "update-check" => {
-            use tauri_plugin_opener::OpenerExt;
-            let _ = app.opener().open_url(RELEASES_URL, None::<&str>);
-            return;
-        }
         _ => {}
     }
 
-    // 带槽位后缀的项：home-3 / rotate-3 / top-3 / settings-3 / show-3 / hide-3 / data-3
+    // 带槽位后缀的项：home-3 / top-3 / show-3 / hide-3 / data-3
     if let Some((action, n)) = id.rsplit_once('-') {
         if let Ok(slot) = n.parse::<u32>() {
             match action {
@@ -396,9 +368,6 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                     if !preset.is_empty() {
                         let _ = nav_slot(app, slot, &preset);
                     }
-                }
-                "rotate" => {
-                    let _ = rotate_slot(app, slot);
                 }
                 "top" => {
                     let top = !app
@@ -584,6 +553,8 @@ pub fn set_topmost(app: &AppHandle, slot: u32, top: bool) -> Result<(), String> 
         win.set_always_on_top(top)
             .map_err(|e| format!("置顶设置失败: {e}"))?;
         sync_state(app, slot, |s| s.topmost = top);
+        // 托盘菜单「窗口置顶」的 ● 标记随状态刷新
+        refresh_slot_tray(app, slot);
         logger::log(
             app,
             slot,
@@ -614,37 +585,6 @@ fn reapply_topmost(app: &AppHandle, slot: u32) {
             let _ = win.set_always_on_top(true);
         }
     }
-}
-
-/// 旋转：交换宽高并刷新页面（还原原版：仅改内存不落盘，重启后回到配置分辨率）
-pub fn rotate_slot(app: &AppHandle, slot: u32) -> Result<(f64, f64), String> {
-    let (w, h) = {
-        let state: tauri::State<AppState> = app.state();
-        let cfg = state.config.lock().unwrap();
-        cfg.slots
-            .iter()
-            .find(|s| s.slot == slot)
-            .map(|s| (s.width, s.height))
-            .unwrap_or((414.0, 896.0))
-    };
-    // 交换后钳制到窗口最小尺寸（min_inner_size 280x400），避免 set_size 被 clamp 后与记录不一致
-    let swapped = (h.max(280.0), w.max(400.0));
-
-    if let Some(win) = app.get_webview_window(&slot_label(slot)) {
-        let _ = win.set_size(tauri::LogicalSize::new(swapped.0, swapped.1));
-        // 还原原版 myWebView.go(location)：刷新当前页。但必须等新的窗口尺寸
-        // 真正应用到 WebView2 之后再刷——立即 reload 时页面读到的是旧视口
-        // 尺寸，云手机画面仍按旧方向渲染（=「旋转不生效」）
-        let app2 = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            if let Some(w) = app2.get_webview_window(&slot_label(slot)) {
-                let _ = w.eval("try{location.reload()}catch(e){}");
-            }
-        });
-    }
-    logger::log(app, slot, "sys", &format!("旋转：{} x {}（仅本会话生效）", swapped.0, swapped.1));
-    Ok(swapped)
 }
 
 /// 导航（云手机首页 / 地址栏跳转）
@@ -720,7 +660,7 @@ fn sync_state(app: &AppHandle, slot: u32, f: impl FnOnce(&mut SlotState)) {
 
 // ---------------------------------------------------------------------------
 // 托盘（还原原版：每个云手机窗口创建自己的 win.util.tray）
-// 菜单：显示(●)/隐藏(●)/分隔/新开账号/打开数据目录/分隔/退出
+// 菜单：显示(●)/隐藏(●)/首页/窗口置顶(●)/分隔/新开账号/打开数据目录/分隔/退出
 // （● = 当前状态；左键单击=打开窗口，右键=弹出菜单）
 // ---------------------------------------------------------------------------
 
@@ -799,15 +739,22 @@ fn refresh_slot_tray(app: &AppHandle, slot: u32) {
 }
 
 fn slot_tray_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
-    let visible = {
-        let state: tauri::State<AppState> = app.state();
-        let states = state.states.lock().unwrap();
-        states.get(&slot).map(|s| s.visible).unwrap_or(true)
-    };
     // 当前状态用 ● 标记（○ = 未处于该状态）。原版用「&● 显示 / 空格 显示」对齐，
     // 全角空格在部分系统渲染成多余空格，改用 ○ 天然等宽对齐
+    let (visible, topmost) = {
+        let state: tauri::State<AppState> = app.state();
+        let states = state.states.lock().unwrap();
+        let s = states.get(&slot);
+        (
+            s.map(|s| s.visible).unwrap_or(true),
+            s.map(|s| s.topmost).unwrap_or(false),
+        )
+    };
     let show = MenuItemBuilder::with_id(format!("show-{slot}"), if visible { "● 显示" } else { "○ 显示" }).build(app)?;
     let hide = MenuItemBuilder::with_id(format!("hide-{slot}"), if !visible { "● 隐藏" } else { "○ 隐藏" }).build(app)?;
+    // 「首页 / 窗口置顶」原为窗口菜单栏项，菜单栏移除后统一挪到托盘（置顶状态同样用 ● 标记）
+    let home = MenuItemBuilder::with_id(format!("home-{slot}"), "首页").build(app)?;
+    let top = MenuItemBuilder::with_id(format!("top-{slot}"), if topmost { "● 窗口置顶" } else { "○ 窗口置顶" }).build(app)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let open_settings = MenuItemBuilder::with_id("open-settings", "新开账号").build(app)?;
     let datadir = MenuItemBuilder::with_id(format!("data-{slot}"), "打开数据目录").build(app)?;
@@ -817,6 +764,8 @@ fn slot_tray_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tauri:
     let menu = MenuBuilder::new(app)
         .item(&show)
         .item(&hide)
+        .item(&home)
+        .item(&top)
         .item(&sep1)
         .item(&open_settings)
         .item(&datadir)
