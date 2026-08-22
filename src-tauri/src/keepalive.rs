@@ -14,7 +14,8 @@ const CURSOR_PNG_B64: &str = include_str!("../assets/cursor.b64");
 /// （窗口隐藏时由 Rust 看门狗每 1 秒 eval __CPK_TICK__ 驱动，tick 内自行按周期分流）
 ///
 /// 按槽位配置的 platform 分流（unicom 联通 / mobile 移动）：
-/// 联通：试用弹窗(.try-content/.try-btn)、无法连接(.phone-dialog-wrap)、
+/// 联通：试用弹窗(.try-content/.try-btn)、无法连接(.phone-dialog-wrap，
+///       v1.9.0 起按钮宽松匹配 + miss 时记录弹窗全文/按钮清单 + 持续失败分级兜底)，
 ///       详情页进入云机(.detail-info-container/.enter-intance)、到期(.van-dialog__confirm)、
 ///       退回首页检测(.title-bar)
 /// 移动：解锁区进入云机(.unlocked/.enter-intance)、重连/进入/确认按钮按文字包含匹配、
@@ -62,7 +63,7 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
   // 且两个转换器天然互斥，绝不会双重转换。
   try {{ if (!('ontouchstart' in window)) window.ontouchstart = null; }} catch(e){{}}
 
-  var state = {{ ticks: 0, clicks: 0, last: '', diagAt: {{}}, lastUrl: '', wasExited: false, stopDone: false, entered: false, n: 0 }};
+  var state = {{ ticks: 0, clicks: 0, last: '', diagAt: {{}}, lastUrl: '', wasExited: false, stopDone: false, entered: false, n: 0, pdwMiss: 0 }};
   window.__CPK_STATE__ = state;
 
   // document_start 阶段 body/head 可能尚未解析（初始化脚本在文档创建时执行）：
@@ -263,7 +264,7 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
   var IS_FRAME = false;
   try {{ IS_FRAME = (window.top !== window); }} catch(e) {{ IS_FRAME = true; }}
   function routeOf(){{ try {{ return (location.hash || '').split('?')[0]; }} catch(e) {{ return ''; }} }}
-  function inPhoneRoute(){{ return routeOf().indexOf('/instance') >= 0; }}
+  function inPhoneRoute(){{ var r = routeOf(); return r.indexOf('/instance') >= 0 || (CFG.platform !== 'mobile' && r.indexOf('/phone') >= 0); }}
   function onHomeRoute(){{ return routeOf().indexOf('/cloudAppList') >= 0; }}
   // 每个路由首次心跳时落一份 DOM class 清单：真改版时日志里直接有证据可对照换选择器
   var sampledRoutes = {{}};
@@ -280,6 +281,49 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
       for (var i = 0; i < els.length; i++){{
         var t = (els[i].innerText || '').trim();
         for (var j = 0; j < texts.length; j++){{ if (t === texts[j] && vis(els[i])) return els[i]; }}
+      }}
+    }} catch(e){{}}
+    return null;
+  }}
+
+  // ===== v1.9.0 断连弹窗匹配强化（背景：2026-08-22 联通断连弹窗按钮文案与已知词
+  // 不再全等，findBtn 精确匹配连续 miss 15 分钟保活失效，见 cpk-20260822.log）=====
+
+  // 宽松包含匹配：只认按钮类元素（button/[role=button]/class 含 btn）且文本很短，
+  // 避免命中含「连接」「重试」字样的整段提示文字（消息 div 文本长度必然超限）
+  function findBtnLoose(root, texts){{
+    try {{
+      var els = root.querySelectorAll('button, [role=button], [class*=btn], [class*=Btn]');
+      for (var i = 0; i < els.length; i++){{
+        var t = (els[i].innerText || '').trim();
+        if (!t || t.length > 12) continue;
+        for (var j = 0; j < texts.length; j++){{ if (t.indexOf(texts[j]) >= 0 && vis(els[i])) return els[i]; }}
+      }}
+    }} catch(e){{}}
+    return null;
+  }}
+
+  // 弹窗内按钮清单：miss 诊断核心数据（旧 miss 日志只截 20 字符，看不到弹窗里有什么按钮）
+  function btnTexts(root){{
+    try {{
+      var els = root.querySelectorAll('button, [role=button], [class*=btn], [class*=Btn]');
+      var out = [];
+      for (var i = 0; i < els.length && out.length < 8; i++){{ if (vis(els[i])) out.push(desc(els[i])); }}
+      return out.length ? out.join(' | ') : '(无按钮类元素)';
+    }} catch(e){{ return 'btnTexts-err'; }}
+  }}
+
+  // 兜底点击目标：弹窗内任意可见、文本很短、且不含退出/取消类字样的按钮
+  var NEG_WORDS = ['退出', '取消', '关闭', '返回', '注销', '删除'];
+  function safeBtnIn(root){{
+    try {{
+      var els = root.querySelectorAll('button, [role=button], [class*=btn], [class*=Btn]');
+      for (var i = 0; i < els.length; i++){{
+        var el = els[i], t = (el.innerText || '').trim();
+        if (!t || t.length > 12 || !vis(el)) continue;
+        var neg = false;
+        for (var k = 0; k < NEG_WORDS.length; k++){{ if (t.indexOf(NEG_WORDS[k]) >= 0) {{ neg = true; break; }} }}
+        if (!neg) return el;
       }}
     }} catch(e){{}}
     return null;
@@ -385,13 +429,35 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
           if (b) {{ b.click(); acted = 'try-enable'; diag('click', 'try-enable -> ' + desc(b)); }}
           else diag('miss', '.try-content 可见但未找到 .try-btn / [立即启用云手机] 按钮，疑似改版 | ' + desc(tc));
         }}
-        // 2. 无法连接 -> 再次尝试
+        // 2. 无法连接 -> 再次尝试（v1.9.0：精确→宽松→确认词匹配 + 按钮清单诊断 + 分级兜底）
         var pdw = q('.phone-dialog-wrap');
         hits.push('phone-dialog:' + (vis(pdw) ? 1 : 0));
         if (vis(pdw)) {{
-          var rb2 = findBtn(pdw, ['再次尝试', '重试', '重新连接', '重新载入']);
-          if (rb2) {{ rb2.click(); if (!acted) acted = 'retry'; diag('click', 'retry -> ' + desc(rb2)); }}
-          else diag('miss', '.phone-dialog-wrap 可见但未找到重试按钮，疑似改版 | ' + desc(pdw));
+          var RETRY_WORDS = ['再次尝试', '重试', '重新连接', '重新载入', '重新加载', '重新进入'];
+          var OK_WORDS = ['确定', '确认', '知道了', '好的'];
+          var rb2 = findBtn(pdw, RETRY_WORDS) || findBtnLoose(pdw, RETRY_WORDS)
+                 || findBtn(pdw, OK_WORDS) || findBtnLoose(pdw, OK_WORDS);
+          if (rb2) {{
+            rb2.click(); if (!acted) acted = 'retry'; state.pdwMiss = 0;
+            diag('click', 'retry -> ' + desc(rb2));
+          }} else {{
+            state.pdwMiss++;
+            diag('miss', '.phone-dialog-wrap 可见但未找到重试按钮(第' + state.pdwMiss + '次) | 弹窗全文="' +
+                 ((pdw.innerText || '').trim().slice(0, 160)).replace(/\s+/g, ' ') +
+                 '" 按钮清单=' + btnTexts(pdw));
+            if (state.pdwMiss === 12) {{
+              // 兜底一：60 秒仍无已知按钮 -> 点弹窗内任意非退出类按钮（超时弹窗按钮几乎都是正向动作）
+              var fb = safeBtnIn(pdw);
+              if (fb) {{ fb.click(); if (!acted) acted = 'retry'; diag('click', 'retry(兜底任意按钮) -> ' + desc(fb)); }}
+            }} else if (state.pdwMiss >= 36) {{
+              // 兜底二：3 分钟未恢复 -> 整页重载（登录态在本地数据目录，重载自动回云机页）
+              state.pdwMiss = 0;
+              diag('sys', '断连弹窗持续 3 分钟未恢复，自动重载页面 ' + location.href.slice(0, 120));
+              try {{ location.reload(); }} catch(e) {{}}
+            }}
+          }}
+        }} else {{
+          state.pdwMiss = 0;
         }}
         // 3. 详情页 -> 进入云机
         var dic = q('.detail-info-container');
