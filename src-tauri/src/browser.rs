@@ -127,7 +127,7 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
             let t0 = std::time::Instant::now();
             let nav_app = app.clone();
             let title_app = app.clone();
-            let mut builder = WebviewWindowBuilder::new(
+            let builder = WebviewWindowBuilder::new(
                 app,
                 slot_label(slot),
                 WebviewUrl::External(web_url.clone()),
@@ -428,8 +428,11 @@ pub fn quit_all(app: &AppHandle) {
     // 仅靠 clear() 的 drop 依赖「最后一个引用释放时移除」，但下方 1.5 秒硬杀兜底
     // （std::process::exit）会跳过 Tauri 清理流程，可能留下残留图标。显式
     // set_visible(false) 立即从托盘区消失，即便硬杀打断也不会有视觉残留。
+    // 先绑定 state 延长生命周期：app.state() 返回临时值，直接链式 .trays.lock()
+    // 的话临时 State 在语句末 drop，而 MutexGuard 跨 for 循环借用它 → E0716。
     {
-        let trays = app.state::<AppState>().trays.lock().unwrap();
+        let state = app.state::<AppState>();
+        let trays = state.trays.lock().unwrap();
         for tray in trays.values() {
             let _ = tray.set_visible(false);
         }
