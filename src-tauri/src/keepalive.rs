@@ -510,13 +510,26 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
     }}
   }}
 
+  // 窗口 resize 期间暂停 DOM 密集操作：vis() 用 offsetWidth/offsetHeight/getClientRects
+  // 会强制同步布局，resize 时 WebView2 持续 reflow，叠加保活脚本每秒多次强制布局造成
+  // layout thrashing，把 Chromium resize 固有卡顿放大成明显掉帧。resize 结束 300ms 后
+  // 恢复——保活最多暂停零点几秒，不影响效果。窗口拖动移动不触发 resize、不产生 reflow，
+  // 强制布局开销极小，故只处理 resize。
+  var resizing = false, resizeTimer = null;
+  window.addEventListener('resize', function(){{
+    resizing = true;
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function(){{ resizing = false; }}, 300);
+  }});
+
   // ===== 双定时器调度（还原原版 runTimer/stopTimer 周期）=====
   function tick(){{
-    // 路由变化检测（SPA 页面改版定位的第一线索）
+    // 路由变化检测（SPA 页面改版定位的第一线索）——纯 location 读取，不触发布局，resize 期间也保留
     if (state.lastUrl !== location.href) {{
       state.lastUrl = location.href;
       diag('nav', '进入 ' + location.href.slice(0, 300) + ' title=' + (document.title || '').slice(0, 40));
     }}
+    if (resizing) return;  // resize 期间跳过 DOM 强制布局操作（stopCheck/actionTick 的 vis()）
     stopCheck();                                    // 原版 stopTimer：每 1 秒
     var every = Math.max(1, Math.round((CFG.intervalMs || 5000) / 1000));
     if (++state.n >= every) {{ state.n = 0; actionTick(); }}  // 原版 runTimer：每 5 秒

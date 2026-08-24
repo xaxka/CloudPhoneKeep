@@ -424,6 +424,16 @@ pub fn quit_all(app: &AppHandle) {
         std::thread::sleep(std::time::Duration::from_millis(1500));
         std::process::exit(guard_code);
     });
+    // 先逐个隐藏托盘图标（Windows 上立即 NIM_DELETE，从托盘区移除），再 drop。
+    // 仅靠 clear() 的 drop 依赖「最后一个引用释放时移除」，但下方 1.5 秒硬杀兜底
+    // （std::process::exit）会跳过 Tauri 清理流程，可能留下残留图标。显式
+    // set_visible(false) 立即从托盘区消失，即便硬杀打断也不会有视觉残留。
+    {
+        let trays = app.state::<AppState>().trays.lock().unwrap();
+        for tray in trays.values() {
+            let _ = tray.set_visible(false);
+        }
+    }
     // 移除全部托盘图标（还原原版退出前 tray.delete()）
     app.state::<AppState>().trays.lock().unwrap().clear();
     for (label, win) in app.webview_windows() {
@@ -675,65 +685,10 @@ fn sync_state(app: &AppHandle, slot: u32, f: impl FnOnce(&mut SlotState)) {
 // （各项均无 ●/○ 前缀，文字左对齐；左键单击=打开窗口，右键=弹出菜单）
 // ---------------------------------------------------------------------------
 
-/// 创建应用级（非槽位）托盘图标：左键单击显示设置窗口，右键菜单：新开账号 / 退出。
-/// 与每个云手机窗口的独立托盘并存：
-/// - 全局托盘【始终存在】（setup 阶段创建，程序生命周期内有效），用户隐藏设置窗口后
-///   也能通过它再次唤回——配合「不在任务栏显示」保证窗口总有途径再打开
-/// - 槽位托盘仅在该云手机窗口存活期内存在（窗口销毁即移除）
-pub fn create_global_tray(app: &AppHandle) {
-    let open_settings = MenuItemBuilder::with_id("open-settings", "新开账号").build(app);
-    let sep = PredefinedMenuItem::separator(app);
-    let quit = MenuItemBuilder::with_id("quit", "退出").build(app);
-
-    let menu = match (open_settings, sep, quit) {
-        (Ok(o), Ok(s), Ok(q)) => MenuBuilder::new(app)
-            .item(&o)
-            .item(&s)
-            .item(&q)
-            .build(),
-        (Ok(o), _, Ok(q)) => MenuBuilder::new(app).item(&o).item(&q).build(),
-        _ => {
-            logger::log(app, 0, "error", "全局托盘菜单项构建失败");
-            return;
-        }
-    };
-    let menu = match menu {
-        Ok(m) => m,
-        Err(e) => {
-            logger::log(app, 0, "error", &format!("全局托盘菜单组装失败：{e}"));
-            return;
-        }
-    };
-
-    let mut builder = TrayIconBuilder::with_id("tray-global")
-        .tooltip("CloudPhoneKeep - 新开账号")
-        .menu(&menu)
-        // 左键不再弹菜单（默认 true）：左键=显示设置窗口，右键=弹出菜单
-        .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))
-        .on_tray_icon_event(|tray, event| {
-            // 左键单击（抬起）= 显示设置窗口（还原原版 loginForm.show(true)）
-            if let tauri::tray::TrayIconEvent::Click {
-                button: tauri::tray::MouseButton::Left,
-                button_state: tauri::tray::MouseButtonState::Up,
-                ..
-            } = event
-            {
-                let app = tray.app_handle().clone();
-                logger::log(&app, 0, "sys", "全局托盘左键 → 显示设置窗口");
-                show_login(&app, None);
-            }
-        });
-
-    if let Some(icon) = app.default_window_icon() {
-        builder = builder.icon(icon.clone());
-    }
-
-    match builder.build(app) {
-        Ok(_) => logger::log(app, 0, "sys", "全局托盘已创建（始终存在；左键显示设置窗口，右键菜单：新开账号 / 退出）"),
-        Err(e) => logger::log(app, 0, "error", &format!("全局托盘创建失败（不影响保活）：{e}")),
-    }
-}
+// 全局托盘已移除：「新开账号」设置窗口只是一个界面，启动阶段托盘区应保持干净，
+// 不应一启动就常驻全局托盘（此前启动即出现且退出后残留不消失）。设置窗口隐藏后
+// 仍可唤回——进入任一云手机窗口时一定伴随其独立托盘，该托盘菜单的「新开账号」
+// 项即可显示设置窗口。启动阶段设置窗口要么可见要么程序已退出，不存在唤不回的情况。
 
 /// 为某个槽位窗口创建独立托盘图标
 pub fn create_slot_tray(app: &AppHandle, slot: u32) {
