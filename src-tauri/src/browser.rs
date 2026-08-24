@@ -46,8 +46,6 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
             s.running = true;
             s.visible = true;
         });
-        // 托盘菜单「显示窗口/隐藏窗口」文案需要同步刷新（此前漏掉，重开后停留在旧文案）
-        refresh_slot_tray(app, slot);
         hide_login(app);
         return Ok(Vec::new());
     }
@@ -266,10 +264,9 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
                         false
                     }
                 };
-                // 仅隐藏成功才更新状态，避免托盘菜单文案与实际显隐相反
+                // 仅隐藏成功才更新状态
                 if hidden {
                     sync_state(&app, slot, |s| s.visible = false);
-                    refresh_slot_tray(&app, slot);
                 }
             }
             WindowEvent::Focused(true) => {
@@ -354,7 +351,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
         _ => {}
     }
 
-    // 带槽位后缀的项：home-3 / top-3 / toggle-3 / data-3
+    // 带槽位后缀的项：home-3 / top-3 / data-3
     if let Some((action, n)) = id.rsplit_once('-') {
         if let Ok(slot) = n.parse::<u32>() {
             match action {
@@ -382,18 +379,6 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                         .map(|s| s.topmost)
                         .unwrap_or(false);
                     let _ = set_topmost(app, slot, top);
-                }
-                // 显示/隐藏合并为一项：按当前状态取反（可见 → 隐藏；已隐藏 → 显示）
-                "toggle" => {
-                    let visible = app
-                        .state::<AppState>()
-                        .states
-                        .lock()
-                        .unwrap()
-                        .get(&slot)
-                        .map(|s| s.visible)
-                        .unwrap_or(true);
-                    show_slot(app, slot, !visible);
                 }
                 // 打开该帐号的数据目录（含 WebView2 数据；日志统一在数据根目录）
                 "data" => open_slot_data_dir(app, slot),
@@ -537,15 +522,14 @@ pub fn toggle_slot(app: &AppHandle, slot: u32) {
                 let _ = win.hide();
                 sync_state(app, slot, |s| s.visible = false);
                 logger::log(app, slot, "sys", "窗口已隐藏（保活切换为看门狗驱动模式）");
-                refresh_slot_tray(app, slot);
             }
             _ => {
+                let _ = win.unminimize();
                 let _ = win.show();
                 let _ = win.set_focus();
                 reapply_topmost(app, slot);
                 sync_state(app, slot, |s| s.visible = true);
                 logger::log(app, slot, "sys", "窗口已显示");
-                refresh_slot_tray(app, slot);
             }
         }
     }
@@ -554,6 +538,9 @@ pub fn toggle_slot(app: &AppHandle, slot: u32) {
 pub fn show_slot(app: &AppHandle, slot: u32, visible: bool) {
     if let Some(win) = app.get_webview_window(&slot_label(slot)) {
         let r = if visible {
+            // unminimize 必须先于 show：skip_taskbar 窗口最小化后直接 show 仍处于最小化态，
+            // 导致「点托盘看似无反应」（实际窗口已显示但还在任务栏外最小化栏）
+            let _ = win.unminimize();
             let a = win.show();
             let _ = win.set_focus();
             reapply_topmost(app, slot);
@@ -570,7 +557,6 @@ pub fn show_slot(app: &AppHandle, slot: u32, visible: bool) {
             );
         }
         sync_state(app, slot, |s| s.visible = visible);
-        refresh_slot_tray(app, slot);
     }
 }
 
@@ -684,8 +670,8 @@ fn sync_state(app: &AppHandle, slot: u32, f: impl FnOnce(&mut SlotState)) {
 
 // ---------------------------------------------------------------------------
 // 托盘（还原原版：每个云手机窗口创建自己的 win.util.tray）
-// 菜单：显示窗口/隐藏窗口（合并一项，文案随状态切换）/首页/窗口置顶/分隔/新开账号/打开数据目录/分隔/退出
-// （各项均无 ●/○ 前缀，文字左对齐；左键单击=打开窗口，右键=弹出菜单）
+// 菜单：首页/窗口置顶/分隔/新开账号/打开数据目录/分隔/退出
+// （各项均无 ●/○ 前缀，文字左对齐；左键单击或双击=打开窗口，右键=弹出菜单）
 // ---------------------------------------------------------------------------
 
 // 全局托盘已移除：「新开账号」设置窗口只是一个界面，启动阶段托盘区应保持干净，
@@ -718,13 +704,21 @@ pub fn create_slot_tray(app: &AppHandle, slot: u32) {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))
         .on_tray_icon_event(|tray, event| {
-            // 左键单击（抬起）= 显示并聚焦该托盘对应的云手机窗口
-            if let tauri::tray::TrayIconEvent::Click {
-                button: tauri::tray::MouseButton::Left,
-                button_state: tauri::tray::MouseButtonState::Up,
-                ..
-            } = event
-            {
+            // 左键单击（抬起）或双击 = 显示并聚焦该托盘对应的云手机窗口
+            // 同时支持单击与双击：部分 Windows 触摸板/旧系统对托盘 Up 事件丢事件，
+            // 双击作为兜底入口，保证「点托盘必出窗口」
+            let fire = matches!(
+                event,
+                tauri::tray::TrayIconEvent::Click {
+                    button: tauri::tray::MouseButton::Left,
+                    button_state: tauri::tray::MouseButtonState::Up,
+                    ..
+                } | tauri::tray::TrayIconEvent::DoubleClick {
+                    button: tauri::tray::MouseButton::Left,
+                    ..
+                }
+            );
+            if fire {
                 let app = tray.app_handle().clone();
                 let n = tray
                     .id()
@@ -754,29 +748,11 @@ pub fn create_slot_tray(app: &AppHandle, slot: u32) {
     }
 }
 
-/// 窗口显隐后刷新该槽位托盘菜单（「显示窗口/隐藏窗口」文案随状态切换）
-fn refresh_slot_tray(app: &AppHandle, slot: u32) {
-    let menu = match slot_tray_menu(app, slot) {
-        Ok(m) => m,
-        Err(_) => return,
-    };
-    let state: tauri::State<AppState> = app.state();
-    let trays = state.trays.lock().unwrap();
-    if let Some(tray) = trays.get(&slot) {
-        let _ = tray.set_menu(Some(menu));
-    }
-}
-
 fn slot_tray_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
-    let visible = {
-        let state: tauri::State<AppState> = app.state();
-        let states = state.states.lock().unwrap();
-        states.get(&slot).map(|s| s.visible).unwrap_or(true)
-    };
-    // 显示/隐藏合并为一项，文案随当前状态切换（可见 →「隐藏窗口」，已隐藏 →「显示窗口」）。
     // 菜单项一律不加 ●/○ 前缀：带前缀时「首页/新开账号/退出」等无标记项与有标记项
-    // 文字起点错位不对齐，且用户不需要圆点标记
-    let toggle = MenuItemBuilder::with_id(format!("toggle-{slot}"), if visible { "隐藏窗口" } else { "显示窗口" }).build(app)?;
+    // 文字起点错位不对齐，且用户不需要圆点标记。
+    // 「显示窗口/隐藏窗口」入口已移除：左键单击/双击托盘图标即呼出窗口（更直观，
+    // 也避免与老板键 Ctrl+N 的显隐切换语义重叠造成误解）。
     let home = MenuItemBuilder::with_id(format!("home-{slot}"), "首页").build(app)?;
     let top = MenuItemBuilder::with_id(format!("top-{slot}"), "窗口置顶").build(app)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
@@ -786,7 +762,6 @@ fn slot_tray_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tauri:
     let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
 
     let menu = MenuBuilder::new(app)
-        .item(&toggle)
         .item(&home)
         .item(&top)
         .item(&sep1)
