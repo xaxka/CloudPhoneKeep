@@ -136,6 +136,9 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
             .inner_size(w, h)
             .min_inner_size(280.0, 400.0)
             .resizable(true)
+            // 不在任务栏显示：云手机窗口只通过托盘管理（点 X 隐藏到托盘；
+            // 老板键 Ctrl+N 显隐；托盘左键显示）。任务栏无残留，符合「只在托盘显示」
+            .skip_taskbar(true)
             .initialization_script(&init_script)
             // 每个帐号独立数据目录（Cookie/缓存隔离），保存在 AppData\LocalLow\CloudPhoneKeep\<目录名>
             .data_directory(profile.clone())
@@ -671,6 +674,66 @@ fn sync_state(app: &AppHandle, slot: u32, f: impl FnOnce(&mut SlotState)) {
 // 菜单：显示窗口/隐藏窗口（合并一项，文案随状态切换）/首页/窗口置顶/分隔/新开账号/打开数据目录/分隔/退出
 // （各项均无 ●/○ 前缀，文字左对齐；左键单击=打开窗口，右键=弹出菜单）
 // ---------------------------------------------------------------------------
+
+/// 创建应用级（非槽位）托盘图标：左键单击显示设置窗口，右键菜单：新开账号 / 退出。
+/// 与每个云手机窗口的独立托盘并存：
+/// - 全局托盘【始终存在】（setup 阶段创建，程序生命周期内有效），用户隐藏设置窗口后
+///   也能通过它再次唤回——配合「不在任务栏显示」保证窗口总有途径再打开
+/// - 槽位托盘仅在该云手机窗口存活期内存在（窗口销毁即移除）
+pub fn create_global_tray(app: &AppHandle) {
+    let open_settings = MenuItemBuilder::with_id("open-settings", "新开账号").build(app);
+    let sep = PredefinedMenuItem::separator(app);
+    let quit = MenuItemBuilder::with_id("quit", "退出").build(app);
+
+    let menu = match (open_settings, sep, quit) {
+        (Ok(o), Ok(s), Ok(q)) => MenuBuilder::new(app)
+            .item(&o)
+            .item(&s)
+            .item(&q)
+            .build(),
+        (Ok(o), _, Ok(q)) => MenuBuilder::new(app).item(&o).item(&q).build(),
+        _ => {
+            logger::log(app, 0, "error", "全局托盘菜单项构建失败");
+            return;
+        }
+    };
+    let menu = match menu {
+        Ok(m) => m,
+        Err(e) => {
+            logger::log(app, 0, "error", &format!("全局托盘菜单组装失败：{e}"));
+            return;
+        }
+    };
+
+    let mut builder = TrayIconBuilder::with_id("tray-global")
+        .tooltip("CloudPhoneKeep - 新开账号")
+        .menu(&menu)
+        // 左键不再弹菜单（默认 true）：左键=显示设置窗口，右键=弹出菜单
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))
+        .on_tray_icon_event(|tray, event| {
+            // 左键单击（抬起）= 显示设置窗口（还原原版 loginForm.show(true)）
+            if let tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle().clone();
+                logger::log(&app, 0, "sys", "全局托盘左键 → 显示设置窗口");
+                show_login(&app, None);
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+
+    match builder.build(app) {
+        Ok(_) => logger::log(app, 0, "sys", "全局托盘已创建（始终存在；左键显示设置窗口，右键菜单：新开账号 / 退出）"),
+        Err(e) => logger::log(app, 0, "error", &format!("全局托盘创建失败（不影响保活）：{e}")),
+    }
+}
 
 /// 为某个槽位窗口创建独立托盘图标
 pub fn create_slot_tray(app: &AppHandle, slot: u32) {
