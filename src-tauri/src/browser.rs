@@ -615,7 +615,7 @@ pub fn toggle_address_bar(app: &AppHandle) {
     }
 }
 
-/// 打开某帐号的数据目录（WebView2 数据所在；日志统一在数据根目录单文件）。
+/// 打开某帐号的数据目录（WebView2 数据与该帐号日志所在；程序级日志在数据根目录）。
 /// 优先用「实际运行目录」登记表：数据目录被锁换用 -r2 兜底目录时，
 /// WebView2 数据在兜底目录里——按配置名重算会打开旧目录（里面没有数据）
 fn open_slot_data_dir(app: &AppHandle, slot: u32) {
@@ -642,7 +642,7 @@ fn open_slot_data_dir(app: &AppHandle, slot: u32) {
         app,
         slot,
         "sys",
-        &format!("打开数据目录：{}（全局日志在数据根目录 cpk-*.log）", dir.display()),
+        &format!("打开数据目录：{}（该帐号日志就在本目录内，程序级日志在数据根目录 cpk-*.log）", dir.display()),
     );
     let _ = app
         .opener()

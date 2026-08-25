@@ -1,19 +1,21 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-/// 诊断日志（单文件）：
-/// 1. 全部日志（程序级 sys + 帐号级 slot=N）统一写入数据根目录
-///    AppData\LocalLow\CloudPhoneKeep\cpk-YYYYMMDD.log，每天一个文件——
-///    不再按帐号分目录，避免同一天出现多个同名日志文件
-/// 2. 追加写入；每行带 [pid=N] [slot=N|sys] 前缀，多帐号/多实例混写也能按来源过滤
-/// 3. 按天滚动，保留最近 7 天
-/// 4. 逐条「打开-追加-关闭」，不缓存句柄：句柄常驻时 Windows 资源管理器
+/// 诊断日志（按归属分两处落盘）：
+/// 1. 程序级日志（slot=0/sys：启动、配置、回环服务、设置窗口等）写数据根目录
+///    AppData\LocalLow\CloudPhoneKeep\cpk-YYYYMMDD.log
+/// 2. 帐号级日志（slot=N：保活心跳/点击/退出检测/窗口生命周期等）写该帐号
+///    【实际运行的数据目录】里的同名文件（登记表中定位；数据目录被锁换用
+///    -r2/-r3 兜底目录时，日志跟着新目录走）——每个目录里每天一个文件
+/// 3. 追加写入；每行带 [pid=N] [slot=N|sys] 前缀，多实例混写也能按来源过滤
+/// 4. 按天滚动，每个目录各自保留最近 7 天
+/// 5. 逐条「打开-追加-关闭」，不缓存句柄：句柄常驻时 Windows 资源管理器
 ///    对追加写入的文件常一直显示 0 KB（句柄关闭后才刷新）；逐条开关
 ///    既让文件大小实时可见，也绝不产生「建了文件却没写入内容」的 0 字节空文件
-/// 5. 控制台模式（--console / CPK_CONSOLE=1）下同步镜像到终端
+/// 6. 控制台模式（--console / CPK_CONSOLE=1）下同步镜像到终端
 ///
 /// 格式：`HH:mm:ss.SSS [pid=N] [slot=N|sys] [level] message`
 /// level 约定：
@@ -36,8 +38,11 @@ pub fn set_console_mirror(on: bool) {
     CONSOLE_MIRROR.store(on, Ordering::Relaxed);
 }
 
-/// 最近一次清理日志的天序号（每天首条日志触发一次清理，原子抢占全天仅一次）
-static LAST_CLEAN_DAY: AtomicI64 = AtomicI64::new(i64::MIN);
+/// 最近一次清理日志的（目录 → 天序号）：每目录每天首条日志触发一次清理
+fn last_clean() -> &'static Mutex<std::collections::HashMap<PathBuf, i64>> {
+    static LAST_CLEAN: OnceLock<Mutex<std::collections::HashMap<PathBuf, i64>>> = OnceLock::new();
+    LAST_CLEAN.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
 
 /// UTC+8 毫秒时间 → (日期 YYYYMMDD, HH:mm:ss.SSS, 天序号)
 fn now_parts() -> (String, String, i64) {
@@ -72,16 +77,18 @@ fn day_str(z: i64) -> String {
     format!("{y:04}{m:02}{d:02}")
 }
 
-/// 各帐号「实际运行数据目录」登记表（托盘「打开数据目录」用：
-/// 数据目录被锁换 -r2 兜底目录时，按配置名重算会打开旧目录）。
-/// 仅影响打开哪个目录，不再影响日志落盘位置（日志已统一写数据根目录）
+/// 各帐号「实际运行数据目录」登记表：
+/// 1. 决定帐号级日志落盘位置（slot=N 的日志写进该帐号目录）
+/// 2. 托盘「打开数据目录」据此定位（数据目录被锁换 -r2 兜底目录时，
+///    按配置名重算会打开旧目录）
 fn slot_dirs() -> &'static Mutex<std::collections::HashMap<u32, PathBuf>> {
     static SLOT_DIRS: OnceLock<Mutex<std::collections::HashMap<u32, PathBuf>>> = OnceLock::new();
     SLOT_DIRS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
 /// 登记某槽位实际运行的数据目录。启动载入配置后登记全部已配置槽位，
-/// 窗口启动 / 数据目录兜底切换（-r2/-r3）时更新
+/// 窗口启动 / 数据目录兜底切换（-r2/-r3）时更新。
+/// 帐号级日志的落盘位置与托盘「打开数据目录」都由这张表决定
 pub fn register_slot_dir(slot: u32, dir: PathBuf) {
     if slot == 0 {
         return;
@@ -143,15 +150,25 @@ fn date_to_days(s: &str) -> Result<i64, ()> {
 }
 
 /// 追加一行日志（线程安全）。
-/// 所有来源写入数据根目录同一个当日文件；每条「打开-追加-关闭」，
-/// 不缓存句柄——避免 Windows 资源管理器常显 0 KB 与 0 字节空文件
-fn append(_slot: u32, line: &str) {
-    let dir = crate::config::base_dir();
+/// 帐号级（slot≠0）写该帐号实际运行的数据目录；程序级（slot=0）与
+/// 尚未登记的帐号日志落数据根目录。每条「打开-追加-关闭」，不缓存句柄——
+/// 避免 Windows 资源管理器常显 0 KB 与 0 字节空文件
+fn append(slot: u32, line: &str) {
+    let dir = if slot == 0 {
+        crate::config::base_dir()
+    } else {
+        // 登记表未命中（极少：窗口创建前的极早日志）退回数据根目录兜底
+        slot_dir(slot).unwrap_or_else(crate::config::base_dir)
+    };
     let (day, _, days) = now_parts();
     let path = dir.join(format!("cpk-{day}.log"));
 
-    // 每天首条日志触发一次过期清理（swap 原子抢占：全天仅一个线程拿到旧值）
-    if LAST_CLEAN_DAY.swap(days, Ordering::AcqRel) != days {
+    // 每目录每天首条日志触发一次过期清理（HashMap 抢占：同目录当天仅一次）
+    let need_clean = {
+        let mut last = last_clean().lock().unwrap();
+        last.insert(dir.clone(), days) != Some(days)
+    };
+    if need_clean {
         cleanup(&dir, days);
     }
 
@@ -164,7 +181,8 @@ fn append(_slot: u32, line: &str) {
 }
 
 /// 统一入口：写文件（+ 控制台模式时镜像到终端）。
-/// app 参数仅为兼容既有调用点保留（落盘目录由登记表决定），不读任何状态锁
+/// 落盘位置：帐号级（slot≠0）写该帐号实际运行的数据目录，
+/// 程序级（slot=0）写数据根目录。app 参数仅为兼容既有调用点保留，不读任何状态锁
 pub fn log(_app: &tauri::AppHandle, slot: u32, level: &str, msg: &str) {
     let msg: String = msg.chars().take(4000).collect();
     let (_, ts, _) = now_parts();
