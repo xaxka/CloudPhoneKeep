@@ -134,6 +134,10 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
             .inner_size(w, h)
             .min_inner_size(280.0, 400.0)
             .resizable(true)
+            // 只保留关闭按钮：去掉最小化/最大化（窗口跳过任务栏、仅由托盘管理，
+            // 最小化/最大化均无意义；拖拽自由调整大小保留）
+            .minimizable(false)
+            .maximizable(false)
             // 不在任务栏显示：云手机窗口只通过托盘管理（点 X 隐藏到托盘；
             // 老板键 Ctrl+N 显隐；托盘左键显示）。任务栏无残留，符合「只在托盘显示」
             .skip_taskbar(true)
@@ -341,14 +345,10 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
     if menu_event_dup(id) {
         return;
     }
-    // 全局项
-    match id {
-        "open-settings" => return show_login(app, None),
-        "quit" => {
-            quit_all(app);
-            return;
-        }
-        _ => {}
+    // 全局项（「新开账号」入口已随多 exe 多开移除，不再有 open-settings）
+    if id == "quit" {
+        quit_all(app);
+        return;
     }
 
     // 带槽位后缀的项：home-3 / top-3 / data-3
@@ -433,19 +433,6 @@ pub fn quit_all(app: &AppHandle) {
         let _ = login.destroy();
     }
     app.exit(0);
-}
-
-/// 显示设置窗口（prefill 指定槽位）
-pub fn show_login(app: &AppHandle, slot: Option<u32>) {
-    if let Some(win) = app.get_webview_window("login") {
-        let _ = win.show();
-        let _ = win.set_focus();
-        if let Some(n) = slot {
-            let _ = win.eval(&format!(
-                "try{{window.__CPK_LOAD__&&window.__CPK_LOAD__({n})}}catch(e){{}}"
-            ));
-        }
-    }
 }
 
 /// 槽位清理：热键注销、看门狗终止、移除该窗口托盘
@@ -670,14 +657,14 @@ fn sync_state(app: &AppHandle, slot: u32, f: impl FnOnce(&mut SlotState)) {
 
 // ---------------------------------------------------------------------------
 // 托盘（还原原版：每个云手机窗口创建自己的 win.util.tray）
-// 菜单：首页/窗口置顶/分隔/新开账号/打开数据目录/分隔/退出
+// 菜单：首页/窗口置顶/分隔/打开数据目录/分隔/退出
 // （各项均无 ●/○ 前缀，文字左对齐；左键单击或双击=打开窗口，右键=弹出菜单）
 // ---------------------------------------------------------------------------
 
-// 全局托盘已移除：「新开账号」设置窗口只是一个界面，启动阶段托盘区应保持干净，
-// 不应一启动就常驻全局托盘（此前启动即出现且退出后残留不消失）。设置窗口隐藏后
-// 仍可唤回——进入任一云手机窗口时一定伴随其独立托盘，该托盘菜单的「新开账号」
-// 项即可显示设置窗口。启动阶段设置窗口要么可见要么程序已退出，不存在唤不回的情况。
+// 【多 exe 多开】不建全局托盘，托盘菜单也没有「新开账号」入口：每运行一个 exe
+// 即一个独立实例（启动显示设置窗口 →「进入」后得到本实例自己的云手机窗口与
+// 独立托盘图标）。需要多开一个云手机 = 再运行一个 exe 实例，各实例的窗口、
+// 托盘、老板键状态互不干扰（数据目录冲突由 -r2/-r3 换目录兜底保护）。
 
 /// 为某个槽位窗口创建独立托盘图标
 pub fn create_slot_tray(app: &AppHandle, slot: u32) {
@@ -688,17 +675,28 @@ pub fn create_slot_tray(app: &AppHandle, slot: u32) {
             return;
         }
     };
-    let platform_label = {
+    let (platform_label, account_name) = {
         let state: tauri::State<AppState> = app.state();
         let cfg = state.config.lock().unwrap();
         cfg.slots
             .iter()
             .find(|s| s.slot == slot)
-            .map(|s| config::platform_preset(&s.platform).label.to_string())
-            .unwrap_or_else(|| "云手机保活".into())
+            .map(|s| {
+                (
+                    config::platform_preset(&s.platform).label.to_string(),
+                    s.name.trim().to_string(),
+                )
+            })
+            .unwrap_or_else(|| ("云手机保活".into(), String::new()))
+    };
+    // 多 exe 多开时多个实例的托盘图标外观相同，提示文字带上帐号名便于区分
+    let tooltip = if account_name.is_empty() {
+        platform_label
+    } else {
+        format!("{platform_label} - {account_name}")
     };
     let mut builder = TrayIconBuilder::with_id(format!("tray-{slot}"))
-        .tooltip(&platform_label)
+        .tooltip(&tooltip)
         .menu(&menu)
         // 左键不再弹菜单（默认 true）：左键=打开窗口，右键=弹出菜单
         .show_menu_on_left_click(false)
@@ -749,14 +747,15 @@ pub fn create_slot_tray(app: &AppHandle, slot: u32) {
 }
 
 fn slot_tray_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
-    // 菜单项一律不加 ●/○ 前缀：带前缀时「首页/新开账号/退出」等无标记项与有标记项
+    // 菜单项一律不加 ●/○ 前缀：带前缀时「首页/退出」等无标记项与有标记项
     // 文字起点错位不对齐，且用户不需要圆点标记。
     // 「显示窗口/隐藏窗口」入口已移除：左键单击/双击托盘图标即呼出窗口（更直观，
     // 也避免与老板键 Ctrl+N 的显隐切换语义重叠造成误解）。
+    // 「新开账号」入口已移除：多开改为多 exe 运行（再启动一个程序实例即可），
+    // 每个实例只管理自己的云手机窗口，托盘菜单不再承担开新帐号的职责。
     let home = MenuItemBuilder::with_id(format!("home-{slot}"), "首页").build(app)?;
     let top = MenuItemBuilder::with_id(format!("top-{slot}"), "窗口置顶").build(app)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
-    let open_settings = MenuItemBuilder::with_id("open-settings", "新开账号").build(app)?;
     let datadir = MenuItemBuilder::with_id(format!("data-{slot}"), "打开数据目录").build(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
@@ -765,7 +764,6 @@ fn slot_tray_menu(app: &AppHandle, slot: u32) -> Result<tauri::menu::Menu<tauri:
         .item(&home)
         .item(&top)
         .item(&sep1)
-        .item(&open_settings)
         .item(&datadir)
         .item(&sep2)
         .item(&quit)

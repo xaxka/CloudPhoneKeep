@@ -165,12 +165,6 @@
       });
   }
 
-  // 菜单「设置」重新打开时预填指定槽位
-  window.__CPK_LOAD__ = function (n) {
-    el("idx").value = n;
-    loadSlot(n);
-  };
-
   loadSlot(1);
   refreshHint();
   setInterval(refreshHint, 4000);
