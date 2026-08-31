@@ -822,12 +822,22 @@ fn ensure_addr_shortcut(app: &AppHandle) {
         return;
     }
     if let Ok(sc) = "Ctrl+U".parse::<tauri_plugin_global_shortcut::Shortcut>() {
-        if app.global_shortcut().register(sc).is_ok() {
-            app.state::<AppState>()
-                .shortcut_ids
-                .lock()
-                .unwrap()
-                .insert(sc.id(), 0);
+        match app.global_shortcut().register(sc) {
+            Ok(()) => {
+                app.state::<AppState>()
+                    .shortcut_ids
+                    .lock()
+                    .unwrap()
+                    .insert(sc.id(), 0);
+            }
+            Err(e) => {
+                logger::log(
+                    app,
+                    0,
+                    "error",
+                    &format!("Ctrl+U 地址栏热键注册失败（地址栏功能不可用，可能被其他程序占用）：{e}"),
+                );
+            }
         }
     }
 }

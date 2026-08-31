@@ -2,7 +2,7 @@
   {
     "identifier": "default",
     "description": "设置窗口与浏览器窗口的基础能力",
-    "windows": ["login", "browser-*", "winset-*"],
+    "windows": ["login", "browser-*"],
     "permissions": [
       "core:default",
       "core:window:default",

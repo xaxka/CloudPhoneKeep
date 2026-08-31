@@ -6,27 +6,34 @@ use tokio::net::{TcpListener, TcpStream};
 
 /// 启动 127.0.0.1 回环 HTTP 服务，接收页面内保活脚本的状态上报。
 /// Chromium 将环回地址视为可信来源，HTTPS 页面内 fetch http://127.0.0.1 不会被混合内容策略拦截。
+///
+/// 端口绑定必须【同步】完成：窗口创建（读取 port 写进注入脚本）紧跟在 setup 之后，
+/// 若绑定放在异步任务里，存在「窗口先建好、端口还没绑」的竞态 → 注入脚本拿到
+/// port=0，状态上报静默全失效。绑定本身是瞬时操作，同步执行不阻塞启动。
 pub fn spawn(app: tauri::AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        let listener = match TcpListener::bind("127.0.0.1:0").await {
-            Ok(l) => l,
-            Err(_) => return,
-        };
-        let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
-        if port == 0 {
+    let listener = match tauri::async_runtime::block_on(TcpListener::bind("127.0.0.1:0")) {
+        Ok(l) => l,
+        Err(e) => {
+            crate::logger::log(&app, 0, "error", &format!("状态回环服务绑定失败（保活不受影响，状态上报将失效）：{e}"));
             return;
         }
-        {
-            let state: tauri::State<AppState> = app.state();
-            *state.port.lock().unwrap() = port;
-        }
-        crate::logger::log(
-            &app,
-            0,
-            "sys",
-            &format!("状态回环服务已监听 http://127.0.0.1:{port}/report"),
-        );
+    };
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+    if port == 0 {
+        return;
+    }
+    {
+        let state: tauri::State<AppState> = app.state();
+        *state.port.lock().unwrap() = port;
+    }
+    crate::logger::log(
+        &app,
+        0,
+        "sys",
+        &format!("状态回环服务已监听 http://127.0.0.1:{port}/report"),
+    );
 
+    tauri::async_runtime::spawn(async move {
         loop {
             if let Ok((stream, _)) = listener.accept().await {
                 let app = app.clone();
@@ -142,8 +149,13 @@ fn urldecode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
+            // 用字节切片 + from_utf8：对 str 按字节下标切片遇到多字节字符边界会
+            // panic（本机任意进程可发畸形请求触发），from_utf8 失败只返回 Err
             b'%' if i + 2 < bytes.len() => {
-                if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                let parsed = std::str::from_utf8(&bytes[i + 1..i + 3])
+                    .ok()
+                    .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+                if let Some(b) = parsed {
                     out.push(b);
                     i += 3;
                 } else {
@@ -213,5 +225,15 @@ mod tests {
     fn urldecode_basic() {
         assert_eq!(super::urldecode("alive"), "alive");
         assert_eq!(super::urldecode("a%20b"), "a b");
+    }
+
+    #[test]
+    fn urldecode_malformed_no_panic() {
+        // 残缺/非法百分号序列与多字节字符边界：只允许降级处理，绝不 panic
+        assert_eq!(super::urldecode("%"), "%");
+        assert_eq!(super::urldecode("%4"), "%4");
+        assert_eq!(super::urldecode("%ZZ"), "%ZZ");
+        assert_eq!(super::urldecode("%é%41"), "%éA");
+        assert_eq!(super::urldecode("%41"), "A");
     }
 }

@@ -237,6 +237,8 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
   addrInput.placeholder = '输入网址后回车跳转，Esc 关闭';
   addrInput.style.cssText = 'width:100%;height:26px;font-size:14px;border:1px solid #888;padding:0 4px;box-sizing:border-box;outline:none;background:#fff;';
   addrInput.addEventListener('keydown', function(ev){{
+    // 输入法组词中（如中文候选词确认的回车）不触发跳转/关闭
+    if (ev.isComposing || ev.keyCode === 229) return;
     if (ev.key === 'Enter'){{
       var u = addrInput.value.trim();
       if (u) {{ try {{ location.href = u; }} catch(e){{}} }}

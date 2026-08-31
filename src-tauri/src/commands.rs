@@ -44,14 +44,17 @@ pub async fn launch_slot(app: AppHandle, cfg: SlotConfig) -> Result<Vec<String>,
             cfg.slot, cfg.name, cfg.platform, cfg.width, cfg.height
         ),
     );
-    if cfg.name.trim().is_empty() {
-        logger::log(&app, cfg.slot, "error", "进入被拒：缓存数据目录名为空");
-        return Err("缓存数据目录名不能为空".into());
+    if let Err(e) = crate::config::validate_dir_name(&cfg.name) {
+        logger::log(&app, cfg.slot, "error", &format!("进入被拒：{e}"));
+        return Err(e);
     }
 
     {
         let state: tauri::State<AppState> = app.state();
         let mut app_cfg = state.config.lock().unwrap();
+        // 多开保护：以磁盘上的最新配置为基底再合并，避免用启动时的过期内存副本
+        // 整体覆盖文件，把其他实例已保存的槽位冲掉（多开=多 exe，共享 config.json）
+        *app_cfg = crate::config::load();
         crate::config::upsert_slot(&mut app_cfg, cfg.clone());
         // 配置落盘失败不阻塞启动（例如 exe 放在只读目录），记日志继续
         if let Err(e) = crate::config::save(&app_cfg) {

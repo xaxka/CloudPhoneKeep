@@ -105,6 +105,33 @@ fn slot_folder(slot: u32, name: &str) -> String {
     }
 }
 
+/// Windows 保留设备名（不能用作文件/目录名，创建会直接失败）
+const RESERVED_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// 校验「缓存数据目录名」：
+/// - 非空
+/// - 纯 ASCII：safe_name 会把中文等非 ASCII 字符统一替换成 `_`，
+///   「张三」「李四」会碰撞成同一目录（登录态互相污染），故直接禁止
+/// - 非 Windows 保留设备名（con/nul/com1...），否则目录创建必然失败
+pub fn validate_dir_name(name: &str) -> Result<(), String> {
+    let t = name.trim();
+    if t.is_empty() {
+        return Err("缓存数据目录名不能为空".into());
+    }
+    if t.chars().any(|c| !c.is_ascii()) {
+        return Err("缓存数据目录名不支持中文等非英文字符，请使用英文字母、数字、- 或 _".into());
+    }
+    let folder = safe_name(t).to_ascii_uppercase();
+    if RESERVED_NAMES.contains(&folder.as_str()) {
+        return Err(format!("「{t}」是 Windows 保留名称，不能用作目录名，请换一个"));
+    }
+    Ok(())
+}
+
 /// 每个帐号独立的 WebView 数据目录（Cookie / 缓存隔离）。
 /// 目录名 = 用户填的「缓存数据目录名」本身（如填 1 → AppData\LocalLow\CloudPhoneKeep\1），
 /// 与原版程序语义一致；日志也写在这个目录里。

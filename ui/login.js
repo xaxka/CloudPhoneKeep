@@ -79,7 +79,29 @@
 
   el("btn-go").addEventListener("click", launch);
   document.addEventListener("keydown", function (e) {
+    // 输入法组词中的回车是确认候选词，不是提交表单（中文输入法高频误触发）
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter") launch();
+  });
+
+  // 目录名禁止中文等非英文字符（非 ASCII 会被后端统一替换成 _，「张三」「李四」
+  // 碰撞成同一目录互相污染登录态）：输入时即过滤，输入法确认后自动清除，
+  // 提交时再做一次校验兜底（与 Rust 侧 validate_dir_name 一致）
+  var RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+  function filterNonAscii(input, notify) {
+    var v = input.value;
+    var clean = v.replace(/[^\x20-\x7E]/g, "");
+    if (clean !== v) {
+      input.value = clean;
+      if (notify) showBanner("warn", "目录名不支持中文等非英文字符，已自动过滤");
+    }
+  }
+  el("name").addEventListener("input", function (e) {
+    if (e.isComposing) return;
+    filterNonAscii(this, true);
+  });
+  el("name").addEventListener("compositionend", function () {
+    filterNonAscii(this, true);
   });
 
   // 设置窗口自身显隐（还原原版 loginForm.show(false)/show(true)）。
@@ -100,8 +122,19 @@
   function launch() {
     hideBanners();
     // 还原原版校验：username 为空 → 「缓存数据目录名不能为空」并阻止启动
-    if (!el("name").value.trim()) {
+    var nameVal = el("name").value.trim();
+    if (!nameVal) {
       showBanner("err", "缓存数据目录名不能为空");
+      el("name").focus();
+      return;
+    }
+    if (/[^\x20-\x7E]/.test(nameVal)) {
+      showBanner("err", "缓存数据目录名不支持中文等非英文字符，请使用英文字母、数字、- 或 _");
+      el("name").focus();
+      return;
+    }
+    if (RESERVED.test(nameVal)) {
+      showBanner("err", "「" + nameVal + "」是 Windows 保留名称，不能用作目录名，请换一个");
       el("name").focus();
       return;
     }
@@ -115,7 +148,7 @@
     var p = PRESETS[platform] || PRESETS.mobile;
     var cfg = {
       slot: n,
-      name: el("name").value.trim(),
+      name: nameVal,
       platform: platform,
       webUri: p.url,
       width: parseFloat(el("width").value) || p.width,
