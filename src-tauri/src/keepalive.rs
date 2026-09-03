@@ -19,7 +19,9 @@ const CURSOR_PNG_B64: &str = include_str!("../assets/cursor.b64");
 ///       详情页进入云机(.detail-info-container/.enter-intance)、到期(.van-dialog__confirm)、
 ///       退回首页检测(.title-bar)
 /// 移动：解锁区进入云机(.unlocked/.enter-intance)、重连/进入/确认按钮按文字包含匹配、
-///       到期「知道了」(.van-dialog__confirm)、退回 H5 首页检测(#tabbar)
+///       到期「知道了」(.van-dialog__confirm)、退回 H5 首页检测(#tabbar)；
+///       未知文字的确认弹窗 miss 附弹窗全文与按钮清单，持续 3 分钟未识别
+///       自动整页重载（对齐 v1.9.0 联通同款分级兜底，改版不再静默失效）
 /// 通用：触点光标（默认关闭，系统默认指针）、屏蔽右键、鼠标→触摸操控模拟
 ///       （WebView2 里页面自带的模拟器不加载，鼠标拖不动云机——移植页面同款 TouchEmulator 补上）、
 ///       空闲鼠标活动模拟、
@@ -63,7 +65,7 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
   // 且两个转换器天然互斥，绝不会双重转换。
   try {{ if (!('ontouchstart' in window)) window.ontouchstart = null; }} catch(e){{}}
 
-  var state = {{ ticks: 0, clicks: 0, last: '', diagAt: {{}}, lastUrl: '', wasExited: false, stopDone: false, entered: false, n: 0, pdwMiss: 0 }};
+  var state = {{ ticks: 0, clicks: 0, last: '', diagAt: {{}}, lastUrl: '', wasExited: false, stopDone: false, entered: false, n: 0, pdwMiss: 0, cfMiss: 0 }};
   window.__CPK_STATE__ = state;
 
   // document_start 阶段 body/head 可能尚未解析（初始化脚本在文档创建时执行）：
@@ -407,9 +409,23 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
           }} else if (cfTxt.indexOf('确认') >= 0) {{
             cf.click(); acted = 'confirm'; diag('click', 'confirm -> ' + desc(cf));
           }} else {{
-            // 未知文字的确认弹窗：记录下来供改版分析，不盲点
-            diag('miss', 'confirm 按钮出现未知文字 "' + cfTxt + '"，未点击');
+            // 未知文字的确认弹窗：不盲点（还原原版决策），但补齐 v1.9.0 联通同款
+            // 诊断与分级兜底——miss 附弹窗全文与按钮清单（改版最直接证据），
+            // 持续 3 分钟未识别自动整页重载（登录态在本地数据目录，重载自动回云机页）
+            state.cfMiss++;
+            var dg = q('.van-dialog') || cf;
+            diag('miss', 'confirm 按钮出现未知文字 "' + cfTxt + '"(第' + state.cfMiss + '次) | 弹窗全文="' +
+                 ((dg.innerText || '').trim().slice(0, 160)).replace(/\s+/g, ' ') +
+                 '" 按钮清单=' + btnTexts(dg));
+            if (state.cfMiss >= 36) {{
+              state.cfMiss = 0;
+              diag('sys', '确认弹窗持续 3 分钟未识别（疑似改版），自动重载页面 ' + location.href.slice(0, 120));
+              try {{ location.reload(); }} catch(e) {{}}
+            }}
           }}
+        }} else {{
+          // 弹窗已消失：未知弹窗兜底计数复位
+          state.cfMiss = 0;
         }}
 
         // 解锁区：原作者直接点击 .unlocked 容器本身（文字含 进入 即可点）

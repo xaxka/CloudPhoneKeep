@@ -459,10 +459,16 @@ fn cleanup_slot(app: &AppHandle, slot: u32) {
     logger::log(app, slot, "sys", "窗口已关闭");
 }
 
-/// 原生看门狗：窗口隐藏时 WebView2 会把页面 JS 定时器节流到分钟级，
-/// 由 Rust 侧周期性 eval 调用页面内 tick 接管驱动，保证后台保活不掉线。
-/// 注意：窗口可见时【必须跳过】——页面自身 setInterval(1000) 在跑，
+/// 原生看门狗：窗口隐藏或最小化时 WebView2/Chromium 会把页面 JS 定时器节流到
+/// 分钟级（隐藏：后台定时器节流；最小化：页面按后台页处理，5 分钟后节流到
+/// 约 1 次/分钟），由 Rust 侧周期性 eval 调用页面内 tick 接管驱动，保证后台
+/// 保活不掉线。
+/// 注意：窗口可见且未最小化时【必须跳过】——页面自身 setInterval(1000) 在跑，
 /// 双驱动会让 actionTick 的 5 秒周期实际变成 2.5 秒（点击频率翻倍）。
+/// 最小化必须与隐藏同等对待：Win32 对最小化窗口 IsWindowVisible 返回 TRUE
+/// （tao 的 is_visible() 为 true），但页面已被 Chromium 当后台页节流——
+/// 标题栏去掉最小化按钮（minimizable(false)）挡不住 Win+D / 显示桌面 /
+/// Win+Down 等系统级最小化，此前这类窗口的保活会静默停摆且无任何日志。
 /// 周期 1 秒 = 原版 stopTimer；页面内 tick 自行分流：
 ///   - 每 1 秒：退出/到期检测（stopTimer 语义）
 ///   - 每 intervalMs：保活动作（runTimer 5 秒语义）
@@ -470,6 +476,11 @@ fn spawn_watchdog(app: AppHandle, slot: u32) {
     let task_app = app.clone();
     let handle = tauri::async_runtime::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(1000));
+        // 状态转换只记一次日志（避免每秒刷屏）：最小化接管 / 恢复
+        let mut was_minimized_driven = false;
+        // eval 连续失败计数：首次与每 30 次落盘防刷屏；连续 10 次给出明确结论
+        let mut eval_fails: u32 = 0;
+        let mut escalated = false;
         loop {
             ticker.tick().await;
             let win = match task_app.get_webview_window(&slot_label(slot)) {
@@ -477,15 +488,49 @@ fn spawn_watchdog(app: AppHandle, slot: u32) {
                 None => break,
             };
             let visible = win.is_visible().unwrap_or(true);
+            let minimized = win.is_minimized().unwrap_or(false);
             sync_state(&task_app, slot, |s| {
                 s.running = true;
                 s.visible = visible;
             });
-            // 仅隐藏时驱动：可见时页面定时器自己在跑，eval 会造成双倍 tick
-            if !visible {
+            // 仅隐藏/最小化时驱动：可见且未最小化时页面定时器自己在跑，
+            // eval 会造成双倍 tick
+            let need_drive = !visible || minimized;
+            if minimized && !was_minimized_driven {
+                was_minimized_driven = true;
+                logger::log(
+                    &task_app,
+                    slot,
+                    "sys",
+                    "窗口被最小化（Win+D/显示桌面等）：Chromium 将节流页内定时器，看门狗已接管保活驱动（恢复窗口请用托盘左键或老板键）",
+                );
+            } else if !minimized {
+                was_minimized_driven = false;
+            }
+            if need_drive {
                 if let Err(e) = win.eval("try{window.__CPK_TICK__&&window.__CPK_TICK__()}catch(e){}") {
-                    logger::log(&task_app, slot, "error", &format!("看门狗 eval 失败: {e}"));
+                    eval_fails += 1;
+                    // 每秒一条 error 会把日志刷成噪音（一天数万条）：首次与每 30 次
+                    //（约 30 秒）各落一条，足够定位又不淹没问题日志
+                    if eval_fails == 1 || eval_fails % 30 == 0 {
+                        logger::log(&task_app, slot, "error", &format!("看门狗 eval 失败(连续第 {eval_fails} 次): {e}"));
+                    }
+                    if eval_fails >= 10 && !escalated {
+                        escalated = true;
+                        logger::log(
+                            &task_app,
+                            slot,
+                            "error",
+                            "保活驱动已中断（连续 eval 失败，页面可能已崩溃）：请重新显示窗口或重启程序",
+                        );
+                    }
+                } else {
+                    eval_fails = 0;
+                    escalated = false;
                 }
+            } else {
+                eval_fails = 0;
+                escalated = false;
             }
         }
     });
