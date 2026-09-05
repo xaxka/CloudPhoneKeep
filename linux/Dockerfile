@@ -12,11 +12,13 @@ FROM rust:1-alpine AS builder
 WORKDIR /build
 COPY Cargo.toml ./
 COPY src ./src
-# 依赖仅 serde_json；cargo 缓存挂载加速增量构建
+# 依赖仅 serde_json；cargo 缓存挂载加速增量编译。
+# test -s：产物断言——二进制缺失时构建立刻失败（防静默空镜像）
 RUN --mount=type=cache,target=/build/target \
     --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release \
-    && cp target/release/cloudphonekeep /usr/local/bin/cloudphonekeep
+    && cp target/release/cloudphonekeep /usr/local/bin/cloudphonekeep \
+    && test -s /usr/local/bin/cloudphonekeep
 
 # —— 运行阶段：Alpine + 发行版 Chromium ——
 FROM alpine:3.21
@@ -42,5 +44,8 @@ EXPOSE 8080
 # 健康检查：浏览器存活 + 心跳不超龄 + 未退出云机（任一不满足 → 503 → unhealthy）
 HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
   CMD wget -q -O /dev/null "http://127.0.0.1:${CPK_REPORT_PORT:-8080}/healthz" || exit 1
+
+# Rust 引擎（musl 静态二进制，无运行时库依赖）
+COPY --from=builder /usr/local/bin/cloudphonekeep /usr/local/bin/cloudphonekeep
 
 ENTRYPOINT ["/usr/local/bin/cloudphonekeep"]
