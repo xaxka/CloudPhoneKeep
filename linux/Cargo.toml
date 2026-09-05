@@ -1,0 +1,21 @@
+[package]
+name = "cloudphonekeep-linux"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.74"
+description = "云手机网页版保活 Linux/Docker 版（Chromium Headless Shell + CDP，一容器一账号，Rust 低内存引擎）"
+authors = ["xixka"]
+license = "MIT"
+
+[[bin]]
+name = "cloudphonekeep"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "s"

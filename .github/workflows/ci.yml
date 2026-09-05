@@ -8,8 +8,12 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
+  # =====================================================================
+  # Windows 便携版（原有流程，保持不变）
+  # =====================================================================
   build:
     runs-on: windows-latest
     steps:
@@ -53,3 +57,73 @@ jobs:
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # =====================================================================
+  # Linux + Docker 版（linux/ 目录）：Rust musl 引擎 + Alpine Chromium + CDP
+  # 一容器一账号；全部编译在 CI 完成（本地无需 Rust 工具链）
+  # =====================================================================
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: linux
+
+      # —— 无浏览器环境下的快速回归：单元测试 + selftest ——
+      - name: Unit tests
+        working-directory: linux
+        run: cargo test
+
+      - name: Selftest (no browser)
+        working-directory: linux
+        run: |
+          cargo build --release
+          CPK_SELFTEST=1 CPK_DATA_DIR=${RUNNER_TEMP}/cpk-selftest ./target/release/cloudphonekeep
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 多阶段构建：Rust 编译在容器内完成（cargo 缓存挂载走 GHA cache）
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: linux
+          file: linux/Dockerfile
+          load: true
+          tags: cpk:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # —— 冒烟：跑真实 Chromium（镜像内置 Alpine chromium + Rust 引擎），
+      #    验证 WS 握手/CDP 注入/看门狗/回环服务全链路，跑 N 秒按指标退出 ——
+      - name: Smoke test image
+        run: |
+          docker run --rm \
+            -e CPK_SMOKE=1 \
+            -e CPK_SMOKE_SECONDS=60 \
+            -e CPK_URL=https://example.com \
+            cpk:ci
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image to GHCR
+        if: github.event_name != 'pull_request'
+        run: |
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          docker tag cpk:ci "ghcr.io/${OWNER}/cloudphonekeep:latest"
+          docker tag cpk:ci "ghcr.io/${OWNER}/cloudphonekeep:${GITHUB_SHA::12}"
+          docker push "ghcr.io/${OWNER}/cloudphonekeep:latest"
+          docker push "ghcr.io/${OWNER}/cloudphonekeep:${GITHUB_SHA::12}"

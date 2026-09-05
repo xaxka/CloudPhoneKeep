@@ -1,0 +1,9 @@
+.git
+.github
+src-tauri
+ui
+data
+logs
+node_modules
+*.md
+test

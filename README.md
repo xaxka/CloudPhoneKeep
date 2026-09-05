@@ -1,8 +1,8 @@
 # CloudPhoneKeep 云手机保活
 
-> 云手机网页版多开保活工具（移动云手机 / 联通云手机）— **Tauri 2 + WebView2 + Rust** 实现，界面还原原版 aardio 程序，单文件便携版。
+> 云手机网页版多开保活工具（移动云手机 / 联通云手机）— **Tauri 2 + WebView2 + Rust** 实现，界面还原原版 aardio 程序，单文件便携版。Windows 版之外另有 **Linux + Docker 版**（Alpine + Rust 引擎 + Chromium Headless + CDP，一个容器一个账号，见 [`linux/`](linux/README.md)）。
 
-![Tauri](https://img.shields.io/badge/Tauri-2.x-blue) ![License](https://img.shields.io/badge/License-MIT-green) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey) ![Portable](https://img.shields.io/badge/便携版-免安装-orange)
+![Tauri](https://img.shields.io/badge/Tauri-2.x-blue) ![License](https://img.shields.io/badge/License-MIT-green) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20Docker-lightgrey) ![Portable](https://img.shields.io/badge/便携版-免安装-orange)
 
 ## 支持平台
 
@@ -173,15 +173,18 @@ C:\Users\<用户名>\AppData\LocalLow\CloudPhoneKeep\
 - 无内存注入、无自修改代码、无加壳；自动点击全部通过标准 DOM `click()` 完成
 - 全部代码开源可审计；原版程序的第三方更新服务器后门已彻底移除
 
-## 构建
+## 构建与发布
 
 ```bash
-# 需要 Rust 1.77+ 与 Windows 环境（WebView2 运行时需系统已装）
+# Windows（需要 Rust 1.77+ 与 Windows 环境，WebView2 运行时需系统已装）
 cargo build --release --manifest-path src-tauri/Cargo.toml
 # 产物：src-tauri/target/release/CloudPhoneKeep.exe（单文件便携版）
+
+# Linux / Docker（一个容器一个账号）
+cd linux && docker compose up -d --build
 ```
 
-前端为纯静态 HTML/JS（`ui/` 目录），无 Node 构建步骤。推送代码后 GitHub Actions 自动构建并发布到 `dev` 预发布版。
+前端为纯静态 HTML/JS（`ui/` 目录），无 Node 构建步骤。推送代码后 GitHub Actions 自动构建并发布到 `dev` 预发布版（Windows exe），同时构建 Linux Docker 镜像并推送 GHCR（`ghcr.io/xaxka/cloudphonekeep`）。
 
 ## 目录结构
 
@@ -199,7 +202,12 @@ cargo build --release --manifest-path src-tauri/Cargo.toml
 │   │   ├── logger.rs        # 按天滚动诊断日志
 │   │   └── state.rs         # 槽位运行状态
 │   └── tauri.conf.json
-└── .github/workflows/       # CI 自动构建发布
+├── linux/                   # Linux + Docker 版（一容器一账号，详见 linux/README.md）
+│   ├── Dockerfile           # rust:1-alpine musl 编译 → alpine:3.21 + Chromium 运行
+│   ├── docker-compose.yml
+│   ├── src/                 # Rust 保活引擎（keepalive.rs 同源移植 + 手写 WS/CDP 客户端）
+│   └── Cargo.toml           # 仅依赖 serde_json
+└── .github/workflows/       # CI：Windows exe + Linux 镜像（GHCR）
 ```
 
 ## 免责声明
