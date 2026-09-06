@@ -19,9 +19,11 @@
 | :--- | :--- | :--- |
 | 宿主引擎 | Rust musl 静态二进制（~3MB，仅依赖 serde_json） | 替代 Node/脚本运行时（后者常驻 50-80MB）；单引擎线程 + 手写 RFC6455 WebSocket 客户端，无任何重型框架 |
 | 浏览器 | chrome-headless-shell（Chrome for Testing 官方预编译：amd64=stable 152，arm64=beta 154——CfT 自 153 起才有 linux-arm64） | 只含渲染内核，无 Chrome UI/标签页/扩展，单页面场景比完整 Chrome 省 100MB+；构建阶段保持 rust:1-alpine musl 静态编译不变 |
-| 镜像 | debian:bookworm-slim + 最小运行时库（headless-shell 为 glibc 构建） | 无 Node、无桌面、无 X11、无 VNC、无 Redis、无 SFU |
+| 镜像 | debian:bookworm-slim + 最小运行时库（headless-shell 为 glibc 构建） | 无 Node、无桌面、无 X11、无 VNC、无 Redis、无 SFU；CfT locale 仅留 en/zh、microhei 中文字体、apt/dpkg 元数据零残留 |
 
 单账号容器典型 RSS ≈ **Rust 引擎 ~10MB + headless-shell 250-450MB**（主要由云手机页面与 WebRTC 视频流决定，与 Windows WebView2 同量级）。WebRTC 走软件编解码（容器无 GPU），`--autoplay-policy=no-user-gesture-required` 确保视频流自动播放。
+
+**镜像体积**（amd64，`docker images` DISK USAGE 口径）：**579MB → 约 490MB**。瘦身项：CfT locale 资源仅留 en-US/zh-CN（-43MB；locale .pak 只是 Chrome 自身 UI 文案，页面渲染只依赖字体）、hyphen-data 删除、中文字体 `fonts-wqy-zenhei` → `fonts-wqy-microhei`（-11MB）、dpkg path-exclude 不落盘 doc/man/翻译、apt 清理补上 `/var/cache/apt`（此前 `pkgcache.bin` ~25MB 残留层内）。剩余大头是 chrome-headless-shell 二进制本体（195MB，官方 glibc 预编译，不可再压；UPX 可再省 ~100MB，但启动内存与稳定性代价不适合 7×24 保活，未采用）。
 
 ## 与 Windows 版的关系
 

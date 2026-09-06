@@ -39,7 +39,7 @@ docker logs -f cpk-138xxxx1234     # 诊断日志实时镜像
 | 层 | 内容 |
 | :--- | :--- |
 | 基础 | `debian:bookworm-slim`（glibc，无 Node / X11 / VNC） |
-| 浏览器 | CfT 官方预编译 `chrome-headless-shell`（amd64=stable 152 / arm64=beta 154） + 中文字体 `fonts-wqy-zenhei` |
+| 浏览器 | CfT 官方预编译 `chrome-headless-shell`（amd64=stable 152 / arm64=beta 154） + 中文字体 `fonts-wqy-microhei` |
 | 引擎 | Rust musl **静态二进制**（~3MB，仅依赖 serde_json；手写 RFC6455 WebSocket + CDP 客户端） |
 
 **构建即编译**：多阶段构建（`rust:1-alpine` musl 静态交叉编译 → debian 运行层下载 CfT headless-shell），

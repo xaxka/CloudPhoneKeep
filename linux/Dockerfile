@@ -40,9 +40,18 @@ ARG TARGETARCH
 ARG SHELL_AMD64=152.0.7977.82
 ARG SHELL_ARM64=154.0.8037.0
 
-# 运行时依赖（ldd 实测最小集）+ 中文字体 + tzdata；curl/unzip 仅构建期用完即删
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates tzdata wget fonts-wqy-zenhei fonts-liberation \
+# 运行时依赖（ldd 实测最小集）+ 中文字体 + tzdata；curl/unzip 仅构建期用完即删。
+# 镜像瘦身五连（amd64 579MB → 约 490MB，双架构同享）：
+#   1) dpkg path-exclude：doc/man/翻译文件自始不落盘（copyright 保留），比装完再删层更小
+#   2) 中文字体 wqy-zenhei(16MB) → wqy-microhei(5MB)：CJK 覆盖同源，截图可读
+#   3) CfT locale 资源包仅留 en-US + zh-CN：引擎默认 --lang=zh-CN；locale .pak 只是
+#      Chrome 自身 UI 文案，页面内容渲染走系统字体，删了不影响自动化（双架构目录同构）
+#   4) hyphen-data（CSS 连字符断词数据）删除：保活页面用不到
+#   5) apt 元数据清理补上 /var/cache/apt/*（仅清 lists 会把 pkgcache.bin ~25MB 留在层里）
+RUN printf 'path-exclude=/usr/share/doc/*\npath-include=/usr/share/doc/*/copyright\npath-exclude=/usr/share/man/*\npath-exclude=/usr/share/locale/*\n' \
+      > /etc/dpkg/dpkg.cfg.d/01-slim \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates tzdata wget fonts-wqy-microhei fonts-liberation \
       libnss3 libnspr4 libglib2.0-0 libexpat1 \
       libx11-6 libxcb1 libxext6 libxrender1 libxi6 \
       libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
@@ -58,11 +67,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        "https://storage.googleapis.com/chrome-for-testing-public/${V}/${P}/chrome-headless-shell-${P}.zip" \
     && unzip -q /tmp/shell.zip -d /opt \
     && mv "/opt/chrome-headless-shell-${P}" /opt/chrome-headless-shell \
+    && find /opt/chrome-headless-shell/locales -type f -name '*.pak' \
+         ! -name 'en-US*.pak' ! -name 'zh-CN*.pak' -delete \
+    && rm -rf /opt/chrome-headless-shell/hyphen-data \
     && rm -f /tmp/shell.zip \
     && chmod +x /opt/chrome-headless-shell/chrome-headless-shell \
     && apt-get purge -y curl unzip \
     && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/* \
     && test -x /opt/chrome-headless-shell/chrome-headless-shell
 
 ENV TZ=Asia/Shanghai \
