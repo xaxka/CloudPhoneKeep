@@ -17,6 +17,8 @@
 //!  - GET  /clip              读取云机选中文本（云机 → 本机剪贴板）
 //!  - POST /fps               运行时帧率上限（引擎侧软件限帧，实测 Chrome 152
 //!                            maxFrameRate 参数无效）
+//!  - POST /quality           运行时 JPEG 画质 10..90（cast 活动时重建即刻生效）
+//!  - POST /scale             运行时采集分辨率百分比 30..100（<100 编码前缩小）
 //!  - POST /platform          平台选择/切换（mobile/unicom；打开控制页时首选，
 //!                            之后可随时切换：换首页/视口/保活脚本，云机实例自动
 //!                            重启，Profile 保留双平台登录态）
@@ -546,6 +548,33 @@ fn route(
             let _ = ctrl.send(ControlRequest::SetFps { fps, reply: tx });
             (200, "text/plain".into(), b"ok".to_vec())
         }
+        "/quality" => {
+            // 实时画面 JPEG 画质（10..=90）：与 /fps 同模式——共享状态由 HTTP 层
+            // 直写（引擎待机/重启窗口期设置同样立即生效），引擎在线时尽力转发
+            // （cast 活动且有观众时 stop+start 重建让新画质即刻可见）
+            let q = unum(&req.query, &req.form, "value");
+            if !(10..=90).contains(&q) {
+                return (400, "text/plain; charset=utf-8".into(), b"value must be 10..=90".to_vec());
+            }
+            let q = q as u32;
+            shared.set_quality(q);
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let _ = ctrl.send(ControlRequest::SetQuality { quality: q, reply: tx });
+            (200, "text/plain".into(), b"ok".to_vec())
+        }
+        "/scale" => {
+            // 采集分辨率百分比（30..=100）：同 /quality 模式；<100 时 Chrome
+            // 编码前按当前平台视口等比缩小（触摸坐标是 CSS 系不受影响）
+            let s = unum(&req.query, &req.form, "value");
+            if !(30..=100).contains(&s) {
+                return (400, "text/plain; charset=utf-8".into(), b"value must be 30..=100".to_vec());
+            }
+            let s = s as u32;
+            shared.set_scale(s);
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let _ = ctrl.send(ControlRequest::SetScale { scale_pct: s, reply: tx });
+            (200, "text/plain".into(), b"ok".to_vec())
+        }
         "/type" => {
             let text = req
                 .query
@@ -925,15 +954,13 @@ mod tests {
         assert!(body4.contains("pointermove"), "控制页缺实时拖动接线");
         assert!(body4.contains("visibilitychange"), "控制页缺后台暂停接线");
         assert!(body4.contains("homei"), "控制页缺移动端圆点菜单");
-        // 移动端快捷坞：高频操作（首页/刷新/粘贴/全屏）一步直达（原需开抽屉两步）
-        assert!(body4.contains("id=\"dock\""), "控制页缺移动端快捷坞");
-        assert!(body4.contains("doReload()"), "快捷坞缺刷新接线");
-        assert!(body4.contains("pointer-events:auto"), "快捷坞钮应可点（容器不挡画面）");
-        // 抽屉下滑关闭：起点限定把手区（抽屉内容零误触）
-        assert!(body4.contains("id=\"phandle\""), "控制页缺抽屉下滑关闭把手");
-        assert!(body4.contains("sheet(false)"), "控制页缺抽屉关闭接线");
         assert!(body4.contains("id=\"pstat\""), "控制页缺状态面板（fps 收纳处）");
         assert!(body4.contains("id=\"fpsel\""), "控制页缺帧率设置");
+        // 画质/采集分辨率运行时可调（面板三旋钮：帧率/画质/分辨率）
+        assert!(body4.contains("id=\"qsel\""), "控制页缺画质设置");
+        assert!(body4.contains("id=\"sssel\""), "控制页缺采集分辨率设置");
+        assert!(body4.contains("'/quality'"), "控制页缺画质设置接线");
+        assert!(body4.contains("'/scale'"), "控制页缺分辨率设置接线");
         // fps 状态行实测+上限双指标（静止页实测远低于上限不再误读为设置失效）
         assert!(body4.contains("实测 "), "状态行缺实测帧率");
         assert!(body4.contains("上限 "), "状态行缺帧率上限");
@@ -1062,6 +1089,31 @@ mod tests {
         );
         assert_eq!(st, 200, "fps 应由 HTTP 层直写共享状态，引擎不在线也成功");
         assert_eq!(shared.snapshot().fps, 10, "帧率应写入共享状态并回显 healthz");
+        // /quality：越界 → 400；合法 → 200 直写共享状态（与 /fps 同模式：
+        // 引擎待机/重启窗口期设置不丢，下次 CDP 装配恢复）
+        let (st, _) = http(
+            port,
+            "GET /quality?value=95 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 400);
+        let (st, _) = http(
+            port,
+            "GET /quality?value=70 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 200, "画质应由 HTTP 层直写共享状态");
+        assert_eq!(shared.snapshot().quality, 70, "画质应写入共享状态并回显 healthz");
+        // /scale：越界 → 400；合法 → 200 直写共享状态
+        let (st, _) = http(
+            port,
+            "GET /scale?value=20 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 400);
+        let (st, _) = http(
+            port,
+            "GET /scale?value=75 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 200, "采集分辨率应由 HTTP 层直写共享状态");
+        assert_eq!(shared.snapshot().scale, 75, "采集分辨率应写入共享状态并回显 healthz");
         // /clip：引擎不可用 → 500
         let (st, body) = http(
             port,

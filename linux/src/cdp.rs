@@ -227,18 +227,18 @@ impl Cdp {
         self.screencast_fps = fps.clamp(1, 60);
     }
 
-    /// startScreencast 参数（订阅/自愈/SetFps 重建三路径统一）：
-    /// - everyNthFrame = floor(60/fps)：Chrome 端编码节流（若该 build 生效）
-    /// - quality：CPK_JPEG_QUALITY（默认 50；曾按帧率分档 q55/q45/q35，
-    ///   在编码占大头的弱机上低帧率档反而抬 CPU——已回退为固定值可调）
-    /// - maxWidth/maxHeight：CPK_STREAM_SCALE<100 时启用，编码前缩小降 CPU/带宽
-    /// - maxFrameRate：实测无效，保留传参无害
+    /// startScreencast 参数（订阅/自愈/画质缩放重建路径统一）：
+    /// - quality：画质（SharedState 运行时可调，默认 50）
+    /// - maxWidth/maxHeight：采集分辨率缩放 <100 时启用，编码前缩小降 CPU/带宽
+    /// - 帧率不在此处限制：everyNthFrame/maxFrameRate 已除名——实测 152 无视
+    ///   maxFrameRate；everyNthFrame=floor(60/fps) 会把「内容驱动的合成器出帧率」
+    ///   整除下来（弱机合成器本身只有 ~5fps，÷6 后 0.9/s——CPU 有余却帧数上不去，
+    ///   用户 CPK_FPS=10 实测出帧 0.4-0.9/s 的根因）。帧率唯一节流阀＝ack 门控
+    ///   （Chrome 收 ack 才采集下一帧，acks 按目标帧率窗口放行，见 pending_acks）
     fn screencast_params(&self) -> Value {
         let mut p = json!({
             "format": "jpeg",
             "quality": self.cast_quality,
-            "everyNthFrame": every_nth_for_fps(self.screencast_fps),
-            "maxFrameRate": self.screencast_fps
         });
         if let Some((w, h)) = self.cast_max {
             p["maxWidth"] = json!(w);
@@ -247,10 +247,30 @@ impl Cdp {
         p
     }
 
-    /// 引擎装配时注入 cast 调优（跨 CDP 重建从 Config 直读，无运行时修改）
+    /// 引擎装配/运行时注入 cast 调优（SharedState 单一事实源：初值来自
+    /// CPK_JPEG_QUALITY / CPK_STREAM_SCALE，控制面板 /quality /scale 改过的
+    /// 值跨 CDP 重建保留）；cast 活动且有观众时由调用方 restart_cast 重建生效
     pub fn set_cast_tuning(&mut self, quality: u32, max: Option<(u32, u32)>) {
         self.cast_quality = quality.clamp(10, 90);
         self.cast_max = max;
+    }
+
+    /// cast 是否处于活动订阅（配合 has_sinks 判断运行时改参数要不要重建：
+    /// quality/maxWidth 只在 startScreencast 时读取，无观众则下次 start 自然生效）
+    pub fn cast_active(&self) -> bool {
+        self.screencast_active
+    }
+
+    /// stop+start 重建 cast（画质/缩放运行时调整后由引擎调用；直接重发
+    /// start 会撞 Chrome「Screencast is already active」拒绝——用户日志实证）。
+    /// 续期 last_cast_frame 防 rescue 误判重建瞬间的无帧窗口；
+    /// 重建瞬时失败由 cast_rescue 兜底复活
+    pub fn restart_cast(&mut self, session: &str) {
+        self.flush_all_acks();
+        self.fire("Page.stopScreencast", json!({}), Some(session));
+        let _ =
+            self.fire_checked("Page.startScreencast", self.screencast_params(), Some(session));
+        self.last_cast_frame = Some(Instant::now());
     }
 
     /// 帧流统计（引擎 30s 窗口取差落日志）：(收帧数, 收帧 base64 字节数, 解码数)
@@ -608,29 +628,14 @@ impl Cdp {
         }
     }
 
-    /// 运行时调整实时画面帧率（控制面板「设置 → 帧率」）。
-    /// everyNthFrame 只在 startScreencast 时生效：目标帧率跨档（60/fps 取整
-    /// 变化）时先 stop 再 start 重建 cast 让 Chrome 端编码节流同步更新——
-    /// 直接重发会撞 Chrome「Screencast is already active」拒绝（用户日志
-    /// 实证，重发失败等于没调）。同档内的微调只改软件限帧值，不重建
-    /// （重建有毫秒级空窗，无谓）。旧注释「stop+start 重建也不改变发帧
-    /// 频率」针对的是无效的 maxFrameRate，与 everyNthFrame/ack 门控机制无关。
-    /// ack 门控节流无需重建：pending_acks 的到期时刻随 fps 即时变化。
-    pub fn set_screencast_fps(&mut self, fps: u32, session: &str) {
+    /// 运行时调整实时画面帧率（控制面板「设置 → 帧率」）：只更新 ack 门控的
+    /// 目标值，立即跟随（pending_acks 到期时刻随 fps 即时变化）；
+    /// cast 无需重建（screencast_params 已不含帧率字段）
+    pub fn set_screencast_fps(&mut self, fps: u32, _session: &str) {
+        // 仅更新目标值：screencast_params 已不含帧率相关字段（everyNthFrame/
+        // maxFrameRate 除名），跨档无需重建 cast——ack 门控按窗口即时跟随新值
         let fps = fps.clamp(1, 60);
-        if fps == self.screencast_fps {
-            return;
-        }
-        let nth_changed = every_nth_for_fps(fps) != every_nth_for_fps(self.screencast_fps);
         self.screencast_fps = fps;
-        if self.screencast_active && nth_changed && !self.sinks.is_empty() {
-            self.flush_all_acks();
-            self.fire("Page.stopScreencast", json!({}), Some(session));
-            let _ = self
-                .fire_checked("Page.startScreencast", self.screencast_params(), Some(session));
-            // 续期防 rescue 误判重建瞬间的无帧窗口
-            self.last_cast_frame = Some(Instant::now());
-        }
     }
 
     /// 触摸事件统一分发（引擎侧触点跟踪）。所有 /touch 输入与 tap/swipe
@@ -773,17 +778,6 @@ fn frame_throttled(last: Option<Instant>, now: Instant, fps: u32) -> bool {
     }
 }
 
-/// Chrome 端编码节流（Page.startScreencast 的 everyNthFrame）：合成器基准
-/// 60fps，取 floor(60/fps)——floor 保证 Chrome 端出帧率不低于目标（页面
-/// 动画只有 30fps 时按 30fps 出帧不受影响）；fps=10 → N=6，若 build 生效
-/// 则 Chrome 的 JPEG 编码量降为 1/6（与 ack 门控节流互为双保险：
-/// everyNthFrame 部分版本无效，ack 门控本地实测确认成立）。
-/// （maxFrameRate 实测 Chrome 152 无视；帧率精确性仍由软件限帧兜底。
-/// pub 供单测。）
-pub fn every_nth_for_fps(fps: u32) -> u32 {
-    (60 / fps.clamp(1, 60)).max(1)
-}
-
 /// ack 持有时刻决策（纯函数，可单测）：帧被软限帧拦截时返回 Some(due)
 /// = ack 持有到 due 再补发；None = 立即 ack。
 /// 规则：due = 上次推送 + 限帧窗口（窗口到期时下一帧将被放行）；
@@ -850,7 +844,7 @@ fn track_touch_points(
 
 #[cfg(test)]
 mod tests {
-    use super::{ack_hold_deadline, every_nth_for_fps, frame_throttled, is_transient_cast_error, track_touch_points, FramePoll, FrameSlot, Cdp};
+    use super::{ack_hold_deadline, frame_throttled, is_transient_cast_error, track_touch_points, FramePoll, FrameSlot, Cdp};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
@@ -940,24 +934,6 @@ mod tests {
         assert!(frame_throttled(Some(t0), t0 + Duration::from_millis(300), 0));
         assert!(!frame_throttled(Some(t0), t0 + Duration::from_millis(1100), 0));
         assert!(!frame_throttled(Some(t0), t0 + Duration::from_millis(300), 999));
-    }
-
-    /// everyNthFrame 节流映射：floor(60/fps) 保证 Chrome 端出帧率
-    /// （60/nth）不低于目标 fps（nth*fps ≤ 60，全枚举验证）；
-    /// 典型档位：10fps→6（编码量降为 1/6）、25fps→2、60fps→1。
-    #[test]
-    fn every_nth_mapping_covers_target() {
-        for fps in 1..=60u32 {
-            let nth = every_nth_for_fps(fps);
-            assert!(nth >= 1 && nth <= 60, "fps={fps} nth={nth} 越界");
-            assert!(60 / nth >= fps, "fps={fps} nth={nth}：Chrome 端帧率低于目标");
-        }
-        assert_eq!(every_nth_for_fps(10), 6);
-        assert_eq!(every_nth_for_fps(25), 2);
-        assert_eq!(every_nth_for_fps(60), 1);
-        // 乱序值 clamp 不 panic
-        assert_eq!(every_nth_for_fps(0), 60);
-        assert_eq!(every_nth_for_fps(999), 1);
     }
 
     /// ack 门控节流的持有决策：10fps（窗口 100ms）下帧到达于推送后 40ms

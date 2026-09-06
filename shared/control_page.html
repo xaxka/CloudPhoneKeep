@@ -34,14 +34,12 @@ padding:12px 14px;overflow-y:auto;display:flex;flex-direction:column;gap:9px}
 #panel h2{font-size:11px;margin:4px 0 0;color:var(--dim);font-weight:600;
 letter-spacing:.08em;text-transform:uppercase}
 .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-button{background:var(--line);color:var(--txt);border:0;border-radius:8px;padding:7px 12px;
-cursor:pointer;font-size:13px;min-height:36px;
-transition:transform .08s ease,background .15s ease}
+button{background:var(--line);color:var(--txt);border:0;border-radius:6px;padding:7px 12px;
+cursor:pointer;font-size:13px}
 button:hover{background:#475569}
-button:active{transform:scale(.96)}   /* 触摸态即时反馈：按压缩放，松手还原 */
 button.acc{background:#0369a1}button.acc:hover{background:#0284c7}
-select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:8px;
-padding:6px 8px;font-size:13px;min-height:38px}
+select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:6px;
+padding:6px 8px;font-size:13px}
 .lb{font-size:12px;color:var(--dim)}
 /* 状态行（fps 收纳于此，不再悬浮画面上遮挡内容） */
 #pstat{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--txt);
@@ -53,47 +51,33 @@ background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 
 #stats .warn{color:#f87171}
 #toast{position:fixed;bottom:70px;left:50%;transform:translateX(-50%);background:var(--line);
 padding:6px 14px;border-radius:8px;opacity:0;transition:opacity .3s;pointer-events:none;font-size:13px}
-/* —— 移动端：底部快捷坞（高频操作一步直达）+ 抽屉下滑关闭把手 —— */
-/* 容器 pointer-events:none（空隙不挡画面触摸），钮与圆点各自 auto */
-#dock{display:none;position:fixed;left:0;right:0;bottom:0;z-index:40;
-justify-content:center;align-items:center;gap:10px;
-padding:6px 12px calc(6px + env(safe-area-inset-bottom));pointer-events:none}
-#dock button{pointer-events:auto;background:#1e293bd9;border:1px solid #33415599;
-color:var(--txt);border-radius:999px;padding:0 15px;min-height:38px;font-size:13px}
-#dock button:hover{background:#334155d9}
-#dock button:active{transform:scale(.94);background:#475569e6}
-/* iOS 风格圆点（home indicator）= 菜单钮：呼出/收起底部抽屉 */
-#homei{pointer-events:auto;background:none;border:0;cursor:pointer;padding:0;
-width:88px;height:38px;align-items:center;justify-content:center;display:flex}
-#homei::after{content:'';width:88px;height:5px;border-radius:3px;background:rgba(255,255,255,.45);
+/* —— 移动端：iOS 风格圆点（home indicator）呼出底部抽屉 —— */
+/* 热区 22px 高（贴底）：配合 stage 底部 26px 留白，画面尽量占满不留大片空白 */
+#homei{display:none;position:fixed;bottom:calc(2px + env(safe-area-inset-bottom));left:50%;
+transform:translateX(-50%);z-index:40;width:88px;height:22px;align-items:center;justify-content:center;
+background:none;border:0;cursor:pointer;padding:0}
+#homei::after{content:'';width:150px;height:5px;border-radius:3px;background:rgba(255,255,255,.45);
 transition:background .15s}
 #homei:active::after{background:rgba(255,255,255,.9)}
-/* 抽屉把手：下滑关闭手势的唯一起点（限定把手区 → 抽屉内容零误触） */
-#phandle{display:none;flex:none;width:56px;height:20px;padding:7px 0 0;margin:0 auto 2px;
-cursor:grab;touch-action:none}
-#phandle::after{content:'';display:block;width:56px;height:5px;border-radius:3px;
-background:#475569;transition:background .15s}
-#phandle:active::after{background:#64748b}
 #mask{display:none;position:fixed;inset:0;background:#000a;z-index:20}
 #mask.on{display:block}
 /* 平台首选弹窗已按需求移除（启动无弹窗）：平台留空待选，控制页「设置→平台」
  * 选择后引擎才加载页面；画面区用 overlay 提示（见 poll 的 idle-plat 分支） */
 @media (max-width:820px){
-#stage{padding:6px 6px calc(58px + env(safe-area-inset-bottom))}
+/* 底部留白 46→26：旧版「底部留白太多」的唯一痛点（圆点热区瘦身到 22px 贴底，
+   画面高度 +20px；无重叠：画面底 ≤818，圆点顶 ≥820） */
+#stage{padding:6px 6px calc(26px + env(safe-area-inset-bottom))}
 #wrap{height:auto;width:100%;max-height:100%}
 #panel{position:fixed;left:0;right:0;bottom:0;width:auto;max-height:62%;z-index:30;
-border-left:0;border-top:1px solid var(--line);border-radius:20px 20px 0 0;
+border-left:0;border-top:1px solid var(--line);border-radius:16px 16px 0 0;
 transform:translateY(105%);transition:transform .26s ease;box-shadow:0 -10px 40px #000a;
 padding-bottom:calc(14px + env(safe-area-inset-bottom))}
 #panel.open{transform:none}
-#dock{display:flex}
-#phandle{display:block}
-#toast{bottom:calc(64px + env(safe-area-inset-bottom))}   /* 避开底部快捷坞 */
+#homei{display:flex}
 }
 /* 全屏（整个文档）：画面占满、面板/圆点仍可用（均为 fixed/static 正常层叠） */
 :fullscreen #stage{padding:0}
 :fullscreen #wrap{border-radius:0;border:0;box-shadow:none}
-:fullscreen #dock button{background:#0f172ab3;border-color:#33415588}  /* 全屏沉浸：坞更低调 */
 </style></head><body>
 <main>
 <section id="stage"><div id="wrap">
@@ -104,7 +88,6 @@ padding-bottom:calc(14px + env(safe-area-inset-bottom))}
 </div></section>
 </main>
 <aside id="panel">
-<div id="phandle" aria-label="下滑收起面板"></div>
 <h2>状态</h2>
 <div id="pstat"><i id="pdot"></i><span id="pst">连接中…</span></div>
 <div id="stats">—</div>
@@ -130,29 +113,41 @@ padding-bottom:calc(14px + env(safe-area-inset-bottom))}
 <div class="row">
 <span class="lb">帧率</span>
 <select id="fpsel">
+<option value="10">10 默认</option>
 <option value="25">25 流畅</option>
 <option value="15">15</option>
-<option value="10">10 低配推荐</option>
 <option value="5">5 省流</option>
 <option value="2">2</option>
 <option value="1">1 最省</option>
 </select>
 </div>
+<div class="row">
+<span class="lb">画质</span>
+<select id="qsel">
+<option value="30">30 省CPU</option>
+<option value="40">40</option>
+<option value="50">50 标准</option>
+<option value="60">60</option>
+<option value="70">70 清晰</option>
+</select>
+</div>
+<div class="row">
+<span class="lb">分辨率</span>
+<select id="sssel">
+<option value="100">100 原画</option>
+<option value="90">90</option>
+<option value="75">75</option>
+<option value="60">60</option>
+<option value="50">50 省CPU</option>
+</select>
+</div>
 <div class="row" style="color:#8aa;font-size:11px;line-height:1.5">
 <span class="lb" style="color:#8aa">提示</span>
-<span>帧率越高 CPU 越高；低配盒子建议 8~12。引擎按目标帧率自动节流（Chrome 确认一帧后才采集下一帧），传输 CPU 大致正比帧率；更省可设环境变量 CPK_STREAM_SCALE=75（降分辨率）。</span>
+<span>帧率越高 CPU 越高（默认 10 已够用）；低配盒子可降分辨率/画质。三项都在此面板即时调整，引擎按目标帧率自动节流（Chrome 确认一帧后才采集下一帧）。环境变量 CPK_FPS / CPK_JPEG_QUALITY / CPK_STREAM_SCALE 为初始值。</span>
 </div>
 </aside>
 <div id="mask"></div>
-<!-- 底部快捷坞：高频操作一步直达（原先开抽屉两步）——桌面隐藏（侧栏全功能），
-     容器空隙 pointer-events:none 不挡画面；中央圆点=呼出抽屉（原 homei） -->
-<div id="dock">
-<button onclick="doNav()">首页</button>
-<button onclick="doReload()">刷新</button>
 <button id="homei" aria-label="控制台菜单"></button>
-<button onclick="doPaste()">粘贴</button>
-<button onclick="fs()">全屏</button>
-</div>
 <div id="toast"></div>
 <script>
 var TK=(new URLSearchParams(location.search)).get('token')||'';
@@ -182,33 +177,17 @@ document.getElementById('ovt').textContent=t||'';
 document.getElementById('ovs').textContent=s||'';
 if(t){o.classList.remove('hidden')}else{o.classList.add('hidden')}}
 
-// —— 移动端控制台：底部快捷坞（高频操作）+ 底部抽屉（下滑可关）；
-// 桌面端固定右侧栏（dock 隐藏、sheet 不触发）——
-var DOCK=document.getElementById('dock');
+// —— 移动端控制台：点 iOS 风格圆点弹出/收起底部抽屉（桌面端固定右侧栏）——
 function sheet(open){
-if(open){PANEL.classList.add('open');MASK.classList.add('on');DOCK.style.display='none'}
-else{PANEL.classList.remove('open');MASK.classList.remove('on');DOCK.style.display=''}}
+if(open){PANEL.classList.add('open');MASK.classList.add('on')}
+else{PANEL.classList.remove('open');MASK.classList.remove('on')}}
 document.getElementById('homei').addEventListener('click',function(){
 sheet(!PANEL.classList.contains('open'))});
 MASK.addEventListener('click',function(){sheet(false)});
-// 把手下滑收起：起点限定把手区（抽屉内按钮/下拉零误触），
-// 纵向位移 >50px 且方向向下才收起——move 事件仅记录不拦截（passive）
-var DSY=null,HD=document.getElementById('phandle');
-HD.addEventListener('touchstart',function(ev){
-var t=ev.touches[0];DSY={y:t.clientY,x:t.clientX}
-},{passive:true});
-HD.addEventListener('touchmove',function(ev){
-if(!DSY)return;var t=ev.touches[0];
-if(t.clientY-DSY.y>50&&Math.abs(t.clientY-DSY.y)>Math.abs(t.clientX-DSY.x)){
-DSY=null;sheet(false)}
-},{passive:true});
-HD.addEventListener('touchend',function(){DSY=null},{passive:true});
-// 面板/快捷坞按钮点击后失焦：键盘输入立刻回到画面（Enter/空格不再误触发按钮）
-function blurBtns(ev){
+// 面板按钮点击后失焦：键盘输入立刻回到画面（Enter/空格不再误触发按钮）
+PANEL.addEventListener('click',function(ev){
 var b=ev.target.closest?ev.target.closest('button'):null;
-if(b)setTimeout(function(){b.blur()},0)}
-PANEL.addEventListener('click',blurBtns);
-DOCK.addEventListener('click',blurBtns);
+if(b)setTimeout(function(){b.blur()},0)});
 
 // —— 状态轮询（3s）：抽屉状态 + 状态色点（状态行内）+ 视口尺寸（触摸坐标映射基准）——
 var PAGEMAP={loading:'加载中',ok:'页面正常',reloading:'重载中','nav-error':'导航失败·重试中'};
@@ -227,6 +206,8 @@ var PB=document.getElementById('pbadge');
 if(j.page==='nav-error'){PB.style.display='block';
 PB.textContent='首页导航失败·引擎自动重试中'}else{PB.style.display='none'}
 syncFpsSel(j.fps);
+syncQSel(j.quality);
+syncSSel(j.scale);
 syncPlatSel(j.platform);
 // 平台留空（引擎待机）：不连流，画面区提示选择；选择后（healthz 回显平台）
 // 自动开流——「选择好了再加载页面」
@@ -276,6 +257,33 @@ if(j&&j.fps===v){ping('帧率上限已设为 '+v+' fps（画面静止时按页�
 else{FPSEL._t=0;ping('帧率设置未生效（引擎侧仍为 '+(j&&j.fps!=null?j.fps:'?')+' fps），请重试',4000)}
 }).catch(function(e){FPSEL._t=0;ping('帧率设置失败：'+e.message)});
 });
+
+// —— 画质/采集分辨率：与帧率同模式（POST → healthz 回读验证不谎报）。
+// 两者都是 startScreencast 参数：引擎在线且有人观看时 stop+start 重建
+// 即刻生效（毫秒级空窗），否则下次开流自然用新值；改分辨率会重启画面流 ——
+function bindCastSel(id,path,key,label,fmt){
+var S=document.getElementById(id);
+function sync(v){
+if(!v||S._t)return;
+var has=Array.prototype.some.call(S.options,function(o){return o.value===String(v)});
+if(!has){var o=document.createElement('option');o.value=String(v);o.textContent=fmt(v);S.appendChild(o)}
+S.value=String(v);
+}
+S.addEventListener('change',function(){
+var v=parseInt(this.value,10)||0;this._t=1;this.blur();
+post(path,'value='+v).then(function(r){
+if(!r.ok)throw new Error('HTTP '+r.status);
+return fetch(U('/healthz')).then(function(r2){return r2.json()});
+}).then(function(j){
+S._t=0;
+if(j&&j[key]===v){ping(label+'已设为 '+fmt(v)+'（画面约 1 帧闪动）')}
+else{ping(label+'设置未生效（引擎侧仍为 '+(j&&j[key]!=null?fmt(j[key]):'?')+'），请重试',4000)}
+}).catch(function(e){S._t=0;ping(label+'设置失败：'+e.message)});
+});
+return sync;
+}
+var syncQSel=bindCastSel('qsel','/quality','quality','画质',function(v){return v});
+var syncSSel=bindCastSel('sssel','/scale','scale','采集分辨率',function(v){return v+'%'});
 
 // —— 平台选择（启动无弹窗：平台留空待选，此处选好后引擎加载页面）——
 // healthz 同步 + POST /platform；引擎按新平台（首页/视口/保活脚本）启动或
@@ -689,8 +697,7 @@ post('/nav','url='+encodeURIComponent(HOME)).then(function(){ping('已回首页'
 .catch(function(e){ping('回首页失败：'+e.message)})}
 function fs(){var el=document.documentElement;
 if(document.fullscreenElement){document.exitFullscreen()}
-else if(el.requestFullscreen){el.requestFullscreen()}
-else{ping('此浏览器不支持网页全屏（iOS 可用 Safari「添加到主屏幕」）',3000)}}
+else if(el.requestFullscreen){el.requestFullscreen()}}
 
 // —— 状态转换通知（对齐 Windows 版系统通知：退出云机/到期）——
 // 双通道：① /report 状态迁移（与 Windows 版 on_report 同语义，页面重载后

@@ -77,6 +77,10 @@ pub struct Health {
     pub started_at_ms: i64,
     /// 当前实时画面帧率（控制面板 /fps 运行时可调）
     pub fps: u32,
+    /// 当前画质（控制面板 /quality 运行时可调，10..90）
+    pub quality: u32,
+    /// 当前采集分辨率百分比（控制面板 /scale 运行时可调，30..100）
+    pub scale: u32,
     /// 页面标题（采样周期回读；对齐 Windows 版窗口标题/标题变化日志的可见性）
     pub title: String,
     /// 页面上报的最近一次状态（alive/retry/enter/…/exited/expired）；
@@ -102,6 +106,8 @@ pub struct SharedState {
     stop: AtomicBool,
     beat_stale_sec: u64,
     fps: AtomicU32,
+    quality: AtomicU32,
+    scale: AtomicU32,
 }
 
 impl SharedState {
@@ -131,6 +137,8 @@ impl SharedState {
             last_error: String::new(),
             started_at_ms: util::now_ms(),
             fps: cfg.fps.clamp(1, 60),
+            quality: cfg.jpeg_quality.clamp(10, 90),
+            scale: cfg.stream_scale_pct.clamp(30, 100),
             title: String::new(),
             last_status: String::new(),
         };
@@ -141,6 +149,8 @@ impl SharedState {
             stop: AtomicBool::new(false),
             beat_stale_sec: cfg.beat_stale_sec,
             fps: AtomicU32::new(cfg.fps.clamp(1, 60)),
+            quality: AtomicU32::new(cfg.jpeg_quality.clamp(10, 90)),
+            scale: AtomicU32::new(cfg.stream_scale_pct.clamp(30, 100)),
         })
     }
 
@@ -149,6 +159,8 @@ impl SharedState {
         h.last_beat_ms = self.last_beat_ms.load(Ordering::Relaxed);
         h.exited = self.exited.load(Ordering::Relaxed);
         h.fps = self.fps.load(Ordering::Relaxed);
+        h.quality = self.quality.load(Ordering::Relaxed);
+        h.scale = self.scale.load(Ordering::Relaxed);
         let age = if h.last_beat_ms > 0 {
             Some(((util::now_ms() - h.last_beat_ms).max(0) / 1000) as u64)
         } else {
@@ -188,6 +200,11 @@ impl SharedState {
     /// 运行时调整实时画面帧率（控制面板 /fps；跨 CDP 重建保留）
     pub fn set_fps(&self, n: u32) { self.fps.store(n.clamp(1, 60), Ordering::Relaxed); }
     pub fn fps(&self) -> u32 { self.fps.load(Ordering::Relaxed) }
+    /// 运行时调整画质/采集缩放（控制面板 /quality /scale；跨 CDP 重建保留）
+    pub fn set_quality(&self, n: u32) { self.quality.store(n.clamp(10, 90), Ordering::Relaxed); }
+    pub fn quality(&self) -> u32 { self.quality.load(Ordering::Relaxed) }
+    pub fn set_scale(&self, n: u32) { self.scale.store(n.clamp(30, 100), Ordering::Relaxed); }
+    pub fn scale(&self) -> u32 { self.scale.load(Ordering::Relaxed) }
     pub fn bump_reloads(&self) { self.update(|h| h.reloads += 1); }
     pub fn set_dialogs(&self, n: u32) { self.update(|h| h.dialogs = n); }
     pub fn set_chrome_version(&self, v: &str) { self.update(|h| h.chrome_version = v.into()); }
@@ -262,6 +279,8 @@ pub fn health_json(h: &Health) -> Value {
         "chromeVersion": h.chrome_version,
         "lastError": h.last_error,
         "fps": h.fps,
+        "quality": h.quality,
+        "scale": h.scale,
         "title": h.title,
         "lastStatus": h.last_status,
     })
@@ -315,6 +334,11 @@ pub enum ControlRequest {
     ClipGet { reply: Sender<Result<String, String>> },
     /// 运行时调整实时画面帧率（控制面板「设置 → 帧率」）
     SetFps { fps: u32, reply: Sender<Result<(), String>> },
+    /// 运行时调整实时画面 JPEG 画质（控制面板「设置 → 画质」；quality 是
+    /// startScreencast 参数，cast 活动且有观众时 stop+start 重建生效）
+    SetQuality { quality: u32, reply: Sender<Result<(), String>> },
+    /// 运行时调整采集分辨率百分比（控制面板「设置 → 分辨率」；同上重建生效）
+    SetScale { scale_pct: u32, reply: Sender<Result<(), String>> },
     /// 切换平台（/platform）：更新共享状态（healthz 即刻回显）+ 重启云机实例
     /// （重注入平台对应 CFG 的保活脚本 + 新视口 + 导航新首页——与冷启动同路径，
     /// 登录态在同一 Profile 里两平台共存，切换后已登过的平台无需重登）
@@ -389,6 +413,8 @@ fn fail_request(req: ControlRequest, reason: &str) {
         ControlRequest::KeyEvent { reply, .. } => { let _ = reply.send(Err(r)); }
         ControlRequest::ClipGet { reply } => { let _ = reply.send(Err(r)); }
         ControlRequest::SetFps { reply, .. } => { let _ = reply.send(Err(r)); }
+        ControlRequest::SetQuality { reply, .. } => { let _ = reply.send(Err(r)); }
+        ControlRequest::SetScale { reply, .. } => { let _ = reply.send(Err(r)); }
         ControlRequest::SetPlatform { reply, .. } => { let _ = reply.send(Err(r)); }
         ControlRequest::TypeText { reply, .. } => { let _ = reply.send(Err(r)); }
         ControlRequest::Key { reply, .. } => { let _ = reply.send(Err(r)); }
@@ -441,6 +467,17 @@ fn wait_platform(
                     // 恢复 + 稳态循环每周期同步）——不再因引擎待机被拒
                     shared.set_fps(fps);
                     logger.log(1, "sys", &format!("实时画面帧率设为 {fps}（引擎待机，启动后生效）"));
+                    let _ = reply.send(Ok(()));
+                }
+                ControlRequest::SetQuality { quality, reply } => {
+                    // 待机期同样接受：值入共享状态，下次 CDP 装配自然用新参数
+                    shared.set_quality(quality);
+                    logger.log(1, "sys", &format!("实时画面画质设为 {quality}（引擎待机，启动后生效）"));
+                    let _ = reply.send(Ok(()));
+                }
+                ControlRequest::SetScale { scale_pct, reply } => {
+                    shared.set_scale(scale_pct);
+                    logger.log(1, "sys", &format!("实时画面采集分辨率设为 {scale_pct}%（引擎待机，启动后生效）"));
                     let _ = reply.send(Ok(()));
                 }
                 other => {
@@ -657,8 +694,9 @@ struct Stats {
     nav_backoff: Duration,
     nav_next_retry: Option<Instant>,
     /// 帧流统计窗口（30s）：起点 + 期初计数（收帧/字节/解码）。
-    /// 诊断「传输画面 CPU」用：收帧 fps ≈ 合成器实际出帧（everyNthFrame/
-    /// ack 门控是否生效的直接证据），解码 fps ≈ 推送给观看端的帧率。
+    /// 诊断「传输画面 CPU/帧率」用：收帧 fps ≈ 合成器内容实际出帧率
+    /// （ack 门控生效时 ≤ 目标帧率，远低于目标＝页面内容变化慢），
+    /// 解码 fps ≈ 推送给观看端的帧率。
     cast_stat_at: Instant,
     cast_stat_prev: (u64, u64, u64),
 }
@@ -732,8 +770,9 @@ fn steady_loop(
             }
         }
         // —— 帧流统计（30s 窗口，仅观看中采样；静默窗口不刷日志）——
-        // 收帧 = Chrome 实际采集+编码数（CPU 正相关；明显超目标帧率即
-        // everyNthFrame/ack 门控未生效的证据）；解码推送 = 观看端帧率。
+        // 收帧 = Chrome 实际采集+编码数（CPU 正相关；收帧≈页面内容变化率：
+        // ack 门控生效时收帧≤目标帧率，远低于目标＝内容本身变化慢，
+        // 非「帧数上不去」故障）；解码推送 = 观看端帧率。
         if cdp.has_sinks() && stats.cast_stat_at.elapsed() >= Duration::from_secs(30) {
             let (recv, bytes, decoded) = cdp.cast_stats();
             let (pr, pb, pd) = stats.cast_stat_prev;
@@ -1116,6 +1155,8 @@ fn is_fast(req: &ControlRequest) -> bool {
             | ControlRequest::Mouse { .. }
             | ControlRequest::KeyEvent { .. }
             | ControlRequest::SetFps { .. }
+            | ControlRequest::SetQuality { .. }
+            | ControlRequest::SetScale { .. }
             | ControlRequest::TypeText { .. }
             | ControlRequest::Key { .. }
             | ControlRequest::Navigate { .. }
@@ -1322,6 +1363,8 @@ fn handle_control(
         | ControlRequest::Mouse { .. }
         | ControlRequest::KeyEvent { .. }
         | ControlRequest::SetFps { .. }
+        | ControlRequest::SetQuality { .. }
+        | ControlRequest::SetScale { .. }
         | ControlRequest::TypeText { .. }
         | ControlRequest::Key { .. }
         | ControlRequest::Navigate { .. }
@@ -1426,6 +1469,31 @@ fn dispatch_input(
             shared.set_fps(fps);
             cdp.set_screencast_fps(fps, session);
             logger.log(1, "sys", &format!("实时画面帧率设为 {fps}"));
+            let _ = reply.send(Ok(()));
+        }
+        ControlRequest::SetQuality { quality, reply } => {
+            // 画质是 startScreencast 参数：更新值；cast 活动且有观众时
+            // stop+start 重建生效（毫秒级空窗由信箱心跳掩盖），无人观看则
+            // 下次订阅自然用新值。值存 SharedState 跨重建保留
+            shared.set_quality(quality);
+            let p = shared.platform();
+            cdp.set_cast_tuning(shared.quality(), cast_max_for(shared.scale(), p.vw, p.vh));
+            if cdp.cast_active() && cdp.has_sinks() {
+                cdp.restart_cast(session);
+            }
+            logger.log(1, "sys", &format!("实时画面画质设为 {quality}"));
+            let _ = reply.send(Ok(()));
+        }
+        ControlRequest::SetScale { scale_pct, reply } => {
+            // 采集分辨率缩放同为 startScreencast 参数（按当前平台视口计算
+            // maxWidth/maxHeight；触摸坐标是 CSS 系不受影响）
+            shared.set_scale(scale_pct);
+            let p = shared.platform();
+            cdp.set_cast_tuning(shared.quality(), cast_max_for(shared.scale(), p.vw, p.vh));
+            if cdp.cast_active() && cdp.has_sinks() {
+                cdp.restart_cast(session);
+            }
+            logger.log(1, "sys", &format!("实时画面采集分辨率设为 {scale_pct}%"));
             let _ = reply.send(Ok(()));
         }
         ControlRequest::TypeText { text, reply } => {
@@ -1656,6 +1724,18 @@ fn wait_devtools(child: &mut Child, cfg: &Config, timeout_ms: u64) -> Result<u16
     }
 }
 
+/// 采集分辨率百分比 → startScreencast 的 maxWidth/maxHeight（按平台视口）。
+/// 100 = 原画不传（Chrome 按视口采集）；<100 时 Chrome 编码前先缩小，
+/// 编码 CPU 与带宽按像素数近线性下降
+fn cast_max_for(scale_pct: u32, vw: u32, vh: u32) -> Option<(u32, u32)> {
+    if scale_pct >= 100 {
+        return None;
+    }
+    let w = ((vw as u64 * scale_pct as u64) / 100).max(1) as u32;
+    let h = ((vh as u64 * scale_pct as u64) / 100).max(1) as u32;
+    Some((w, h))
+}
+
 /// CDP 装配：复用/新建页面目标 → attach → enable → UA 对齐 → 注入保活脚本
 /// （navigate=true 时导航到云手机首页；重连场景 navigate=false）
 fn attach_all(
@@ -1670,16 +1750,10 @@ fn attach_all(
     let mut cdp = Cdp::connect(port)?;
     // 帧率沿用 SharedState 当前值：控制面板改过的帧率跨 CDP 重建保留
     cdp.set_default_fps(shared.fps());
-    // cast 调优（静态配置直读）：JPEG 质量 + 采集分辨率缩放（CPK_JPEG_QUALITY /
-    // CPK_STREAM_SCALE，弱机降 CPU/带宽的两档旋钮；触摸坐标是 CSS 系不受影响）
-    let cast_max = if cfg.stream_scale_pct < 100 {
-        let w = ((cfg.width as u64 * cfg.stream_scale_pct as u64) / 100).max(1) as u32;
-        let h = ((cfg.height as u64 * cfg.stream_scale_pct as u64) / 100).max(1) as u32;
-        Some((w, h))
-    } else {
-        None
-    };
-    cdp.set_cast_tuning(cfg.jpeg_quality, cast_max);
+    // cast 调优同样以 SharedState 为单一事实源（/quality /scale 运行时改过的值
+    // 跨重建保留）；缩放按当前平台视口计算（触摸坐标是 CSS 系不受影响）
+    let plat = shared.platform();
+    cdp.set_cast_tuning(shared.quality(), cast_max_for(shared.scale(), plat.vw, plat.vh));
     // 复用已有 page 目标（chrome-headless-shell 启动自带一个 about:blank）
     let targets = cdp.call("Target.getTargets", json!({}), None, 10000)?;
     let existing = targets
