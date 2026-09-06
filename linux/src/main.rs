@@ -199,6 +199,19 @@ fn selftest(cfg: &config::Config, logger: &Arc<Logger>) -> i32 {
             checks.push(("server: healthz JSON", false));
         }
     }
+    // 实时画面流端点：自检无引擎 → 3s 订阅超时 504（证明端点与控制通道已接线）
+    match util::http_get(p, "/stream.mjpg", 6000) {
+        Ok((st, body)) if st == 500 || st == 504 => {
+            checks.push((
+                "server: 实时画面流端点",
+                body.contains("画面流") || body.contains("引擎"),
+            ));
+        }
+        other => {
+            logger.log(0, "error", &format!("selftest stream 端点异常：{other:?}"));
+            checks.push(("server: 实时画面流端点", false));
+        }
+    }
     let mut failed = 0;
     for (name, ok) in &checks {
         logger.log(0, "sys", &format!("selftest {} {}", if *ok { "PASS" } else { "FAIL" }, name));

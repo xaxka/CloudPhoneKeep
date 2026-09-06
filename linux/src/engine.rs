@@ -52,6 +52,9 @@ pub struct Health {
     pub platform_label: String,
     pub account: String,
     pub home_uri: String,
+    /// 视口尺寸（控制页触摸坐标映射与画面宽高比的数据源）
+    pub vw: u32,
+    pub vh: u32,
     pub version: String,
     pub ticks: u64,
     pub clicks: u64,
@@ -86,6 +89,8 @@ impl SharedState {
             platform_label: cfg.platform_label.clone(),
             account: cfg.account.clone(),
             home_uri: cfg.url.clone(),
+            vw: cfg.width,
+            vh: cfg.height,
             version: format!("{} (win {})", crate::VERSION, crate::WIN_VERSION),
             ticks: 0,
             clicks: 0,
@@ -160,6 +165,8 @@ pub fn health_json(h: &Health) -> Value {
         "platformLabel": h.platform_label,
         "account": h.account,
         "homeUri": h.home_uri,
+        "vw": h.vw,
+        "vh": h.vh,
         "version": h.version,
         "ticks": h.ticks,
         "clicks": h.clicks,
@@ -187,6 +194,10 @@ pub enum ControlRequest {
     Key { key: String, reply: Sender<Result<(), String>> },
     Navigate { url: String, reply: Sender<Result<(), String>> },
     Reload { reply: Sender<Result<(), String>> },
+    /// 实时画面流订阅（/stream.mjpg → 引擎注册帧通道 + 开启 Page.startScreencast）
+    ScreencastAttach { reply: Sender<Result<(u32, Receiver<Vec<u8>>), String>> },
+    /// 取消订阅（最后一个订阅者离开时引擎自动 Page.stopScreencast）
+    ScreencastDetach { id: u32, reply: Sender<Result<(), String>> },
 }
 
 // ---------------------------------------------------------------------------
@@ -593,7 +604,13 @@ fn steady_loop(
             return SteadyOutcome::Restart;
         }
 
-        thread::sleep(Duration::from_millis(100));
+        // —— 空闲期改睡为泵：分发实时画面帧（screencast）/事件，断流走重连 ——
+        // 泵内阻塞读 socket（≤50ms poll），预算 100ms 与原睡眠同节奏；
+        // 帧到达即分发，实时画面延迟 ≤ 监督周期
+        if let Err(e) = cdp.pump_events(Duration::from_millis(100)) {
+            logger.log(0, "sys", &format!("CDP 事件泵传输失败：{e}"));
+            return SteadyOutcome::Reattach;
+        }
     }
 }
 
@@ -658,6 +675,21 @@ fn handle_control(cdp: &mut Cdp, session: &str, req: ControlRequest, logger: &Ar
         ControlRequest::Reload { reply } => {
             logger.log(1, "nav", "控制页重载");
             cdp.call("Page.reload", json!({ "ignoreCache": true }), Some(session), 20000)?;
+            let _ = reply.send(Ok(()));
+        }
+        ControlRequest::ScreencastAttach { reply } => {
+            match cdp.screencast_subscribe(session) {
+                Ok(sub) => {
+                    let _ = reply.send(Ok(sub));
+                }
+                Err(e) => {
+                    logger.log(0, "error", &format!("实时画面流开启失败：{e}"));
+                    let _ = reply.send(Err(e));
+                }
+            }
+        }
+        ControlRequest::ScreencastDetach { id, reply } => {
+            cdp.screencast_unsubscribe(id, session);
             let _ = reply.send(Ok(()));
         }
     }
@@ -739,6 +771,7 @@ pub fn build_args(cfg: &Config) -> Vec<String> {
         "--remote-allow-origins=*".into(), // 允许外部 DevTools 一次性登录（仅回环暴露）
         format!("--window-size={},{}", cfg.width, cfg.height),
         "--force-device-scale-factor=1".into(),
+        "--hide-scrollbars".into(), // 截图/实时画面无滚动条，视口与触摸坐标严格对齐
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
         "--disable-gpu".into(),                          // 容器内无 GPU；WebRTC 走软件编解码

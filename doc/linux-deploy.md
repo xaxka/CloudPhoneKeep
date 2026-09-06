@@ -57,9 +57,13 @@ docker logs -f cpk-138xxxx1234     # 诊断日志实时镜像
 
 ## 首次登录与控制页
 
-浏览器打开 `http://127.0.0.1:8088/`：页面即云手机画面的实时截图，点击 =
-触摸（CDP `Input.dispatchTouchEvent`，内核级注入）。首次登录在控制页完成；
-之后 Cookie/LocalStorage 持久化在 `/data` volume，重启免登录。
+浏览器打开 `http://127.0.0.1:8088/`：**左侧实时画面 + 右侧操作栏**（窄屏自动上下堆叠）。
+画面为 `Page.startScreencast` 合成器帧直推的 MJPEG 流（页面一有更新即出帧，
+局域网延迟 ≈ 引擎监督周期）；单击＝触摸、按住拖动＝滑动
+（CDP `Input.dispatchTouchEvent`，内核级注入）；右侧可输入文本、按键、方向滑动、全屏。
+VLC 等标准播放器也可直接打开 `http://<host>:<port>/stream.mjpg` 观看。
+实时流不可用（引擎忙/重启）时页面自动退化为 0.6s/帧截图轮询，恢复后自动重连。
+首次登录在控制页完成；之后 Cookie/LocalStorage 持久化在 `/data` volume，重启免登录。
 
 - 复杂调试可 `docker run` 加 `-e CPK_CDP_PORT=9222 -p 127.0.0.1:9222:9222`，
   桌面 Chrome 打开 `chrome://inspect` 直连（仅本机调试，公网勿开）
