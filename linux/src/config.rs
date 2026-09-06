@@ -96,27 +96,35 @@ fn sanitize(s: &str) -> String {
 
 impl Config {
     pub fn from_env() -> Config {
-        // 平台留空启动（无弹窗、不加载页面）：容器启动后引擎待机，
-        // 打开控制页在「设置→平台」选移动/联通后才启动 Chromium 并加载页面
-        // （Profile 保留双平台登录态，切回已登过的平台无需重登）。
-        // CPK_URL 显式指定时视为明确要自动启动（CI 冒烟/自定义 H5），
-        // 按 mobile 视口直接起
+        // 平台三态启动（还原 CPK_PLATFORM 启动参数）：
+        //   ① CPK_URL 显式 → 自动启动（CI 冒烟/自定义 H5），按 mobile 视口起
+        //   ② CPK_PLATFORM=mobile/unicom 显式 → 自动启动该平台（环境变量
+        //      直达：compose/CLI 部署免开控制页选择；非法值忽略走待机，
+        //      不会静默起错平台）
+        //   ③ 两者都无 → 平台留空待机（控制页「设置→平台」选择后启动）。
+        //      Profile 保留双平台登录态，切回已登过的平台无需重登
         let explicit_url = envs("CPK_URL");
-        let (platform, platform_label, default_url, w, h) = match &explicit_url {
-            Some(u) => (
+        let platform_env = envs("CPK_PLATFORM")
+            .filter(|p| p == "mobile" || p == "unicom");
+        let (platform, platform_label, default_url, w, h) = if let Some(u) = &explicit_url {
+            (
                 "mobile".to_string(),
                 PLATFORM_MOBILE_LABEL.to_string(),
                 u.clone(),
                 PLATFORM_MOBILE_W as i64,
                 PLATFORM_MOBILE_H as i64,
-            ),
-            None => (
+            )
+        } else if let Some(p) = &platform_env {
+            let (label, url, pw, ph) = platform_profile(p).expect("已过滤合法平台");
+            (p.clone(), label.to_string(), url.to_string(), pw as i64, ph as i64)
+        } else {
+            (
                 String::new(),
                 "未选择".to_string(),
                 String::new(),
                 PLATFORM_MOBILE_W as i64,
                 PLATFORM_MOBILE_H as i64,
-            ),
+            )
         };
         let account = envs("CPK_ACCOUNT").unwrap_or_else(|| "account1".into());
         let data_dir = PathBuf::from(envs("CPK_DATA_DIR").unwrap_or_else(|| "/data".into()));
@@ -207,10 +215,30 @@ mod tests {
         assert_eq!(cfg.report_port, 9090);
         assert!(cfg.profile_dir.to_string_lossy().contains("18612341234"));
 
-        // CPK_PLATFORM 已移除：残留环境变量不改变启动平台（防回归）
+        // CPK_PLATFORM 还原：显式平台直接启动（URL 未设时生效）
+        std::env::remove_var("CPK_URL");
         std::env::set_var("CPK_PLATFORM", "unicom");
         let cfg = Config::from_env();
-        assert_eq!(cfg.platform, "mobile");
+        assert_eq!(cfg.platform, "unicom", "CPK_PLATFORM=unicom 应自动启动联通");
+        assert_eq!(cfg.platform_label, "联通云手机");
+        assert_eq!(cfg.url, "https://uphone.wo-adv.cn/cloudphone/#/home");
+        assert_eq!(cfg.width, 405, "联通视口 405x720");
+        assert_eq!(cfg.height, 720);
+        // CPK_URL 优先级高于 CPK_PLATFORM（自定义 H5 明确意图）
+        std::env::set_var("CPK_URL", "https://example.com/h5");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.platform, "mobile", "CPK_URL 优先于 CPK_PLATFORM");
+        assert_eq!(cfg.url, "https://example.com/h5");
+        // 非法平台值忽略 → 待机（不静默起错平台）
+        std::env::remove_var("CPK_URL");
+        std::env::set_var("CPK_PLATFORM", "telecom");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.platform, "", "非法 CPK_PLATFORM 应忽略走待机");
+        // mobile 显式 → 启动
+        std::env::set_var("CPK_PLATFORM", "mobile");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.platform, "mobile", "CPK_PLATFORM=mobile 应自动启动");
+        assert_eq!(cfg.url, "https://cloudphoneh5.buy.139.com");
 
         // bool/int 解析健壮性：非数字回默认、越界截断
         std::env::set_var("CPK_PLATFORM", "mobile");
@@ -226,10 +254,14 @@ mod tests {
         let cfg = Config::from_env();
         assert_eq!(cfg.ua_mode, "windows");
 
-        // 去掉 CPK_URL 后回到待机默认（防回归：URL 不残留影响留空判定）
+        // 去掉 CPK_URL 后：CPK_PLATFORM=mobile 仍在 → 保持启动（平台变量独立生效）
         std::env::remove_var("CPK_URL");
         let cfg = Config::from_env();
-        assert_eq!(cfg.platform, "", "无 CPK_URL 应回到待机");
+        assert_eq!(cfg.platform, "mobile", "无 CPK_URL 但 CPK_PLATFORM=mobile 应保持启动");
+        // 平台也清空 → 回到待机默认（防回归）
+        std::env::remove_var("CPK_PLATFORM");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.platform, "", "URL 与平台都未设时应回到待机");
 
         std::env::remove_var("CPK_PLATFORM");
         std::env::remove_var("CPK_ACCOUNT");

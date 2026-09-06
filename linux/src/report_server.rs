@@ -504,7 +504,14 @@ var gap=Date.now()-pt.at;
 // 不得携带触点——带点形态违反协议点列表约束会被 Chrome 拒绝，页面
 // 收不到 tap 收尾，远端 H5 表现为「点击没反应」；puppeteer 同款
 // 规范形态）
-function fin(){if(flushEnd!==fin)return;flushEnd=null;
+// fin 幂等防重入：同一 fin 只发一次（touchDown 冲刷 + setTimeout 到期
+// 双路径都调它；旧身份检查 if(flushEnd!==fin)return 在立即执行路径
+// （gap≥60ms 正常点击/拖动收尾，flushEnd===null）恒真 return —— end
+// 永远不发出：远端页面收到 touchstart 无 touchend，Chrome 不合成
+// click，所有 gap≥60ms 的点击全部无效（本地双 Chrome 端到端复现实证，
+// gap<60ms 超快轻点才走延迟路径侥幸生效）。done 标志三种场景全对：
+// 立即路径直发、延迟路径到期直发、冲刷后 setTimeout 二次调用防双发）
+function fin(){if(fin.done)return;fin.done=true;flushEnd=null;
 tSend(isEnd?'end':'cancel','')}
 // 轻点补足 ≥60ms 按下时长：贴近真实触摸节奏，保证 tap 手势识别（合成 click）
 if(GT===1&&isEnd&&gap<60){flushEnd=fin;setTimeout(fin,60-gap)}else{fin()}
@@ -590,7 +597,7 @@ if(useMousePath(ev)){mouseMove(ev)}else{touchMove(ev)}
 function ptrUp(ev,phase){
 if(useMousePath(ev)){
 if(MSE.mode==='drag'){touchUp(ev,phase)}   // 拖动中取消：按触摸流收尾
-else{MSE.down=false;MSE.mode=''}
+else{mouseUp(ev)}   // 纯点击 → 完整鼠标序列（此前误置空 mode，点击零事件发出）
 }else{touchUp(ev,phase)}
 }
 IMG.addEventListener('pointerup',function(ev){ptrUp(ev,'end')});

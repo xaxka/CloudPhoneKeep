@@ -23,6 +23,7 @@ C:\Users\<用户名>\AppData\LocalLow\CloudPhoneKeep\
 | 变量 | 默认 | 说明 |
 | :--- | :--- | :--- |
 | `CPK_ACCOUNT` | `account1` | 账号名（数据目录名、日志标识） |
+| `CPK_PLATFORM` | 空（待机待选） | 启动平台：`mobile`（移动云手机）/ `unicom`（联通云手机）；留空则控制页「设置→平台」选择后加载；与 `CPK_URL` 同设时 URL 优先 |
 | `CPK_URL` | 平台默认 | 覆盖云手机入口 URL（调试/私有部署用） |
 | `CPK_WIDTH` / `CPK_HEIGHT` | 414×896（mobile） | 窗口分辨率 |
 | `CPK_KEEP_ALIVE` | `1` | 保活总开关 |

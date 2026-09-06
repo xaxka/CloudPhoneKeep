@@ -8,7 +8,8 @@
 #
 # 多账号：把下方服务块复制一份，改 服务名/CPK_ACCOUNT/
 #         data 目录/端口映射 —— 每个账号独立容器、独立 Profile、独立恢复。
-#         平台（移动/联通）启动后留空：控制页「设置→平台」选择后加载，无环境变量。
+#         平台三态：CPK_PLATFORM 环境变量直接指定（mobile/unicom，启动即加载，
+#         免开控制页选择）；留空则控制页「设置→平台」选择后加载。
 #
 # 不想本地构建：注释掉 build:，直接用 GHCR 镜像
 #   image: ghcr.io/xaxka/cloudphonekeep:latest
@@ -30,8 +31,8 @@ services:
     # oom_score_adj: 500            # 可选：内存吃紧时优先牺牲本容器而不是宿主关键服务
     environment:
       CPK_ACCOUNT: "138xxxx1234"    # 账号标识（决定 Profile 目录名，建议手机号）
+      CPK_PLATFORM: "mobile"        # 启动平台（mobile=移动 / unicom=联通）；删除此行则留空，控制页「设置→平台」选择后加载
       TZ: Asia/Shanghai
-      # 平台不在此设置：启动留空，控制页「设置→平台」选择后引擎加载页面
       # —— 可选调优（默认即可）——
       # CPK_URL: "https://cloudphoneh5.buy.139.com"   # 覆盖平台默认入口
       # CPK_INTERVAL_MS: "5000"     # actionTick 周期（默认 5000ms）
