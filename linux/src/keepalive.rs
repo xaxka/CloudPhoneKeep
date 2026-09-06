@@ -63,6 +63,7 @@ mod tests {
             tick_fail_reload: 10,
             frozen_reload: 3,
             beat_stale_sec: 180,
+            fps: 25,
             selftest: false,
             smoke: false,
             smoke_seconds: 60,

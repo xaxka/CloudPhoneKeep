@@ -29,6 +29,9 @@ pub struct Cdp {
     /// Page.startScreencast 是否在跑（首个订阅者开启，最后一个离开自动关，
     /// 无人观看不消耗 JPEG 编码 CPU）
     screencast_active: bool,
+    /// 当前 screencast 目标帧率（控制面板 /fps 可运行时调整；重建 CDP 会话时
+    /// 从 SharedState 恢复，设置跨重连存活）
+    screencast_fps: u32,
 }
 
 /// 「最新帧信箱」：生产者覆盖写入（旧帧直接作废，观看端永远拿到最新画面），
@@ -158,7 +161,14 @@ impl Cdp {
             last_dialog: None,
             sinks: Vec::new(),
             screencast_active: false,
+            screencast_fps: 25,
         })
+    }
+
+    /// 连接后设置默认帧率（引擎装配时从 SharedState 读取——运行时改过的值
+    /// 跨 CDP 重建保留）
+    pub fn set_default_fps(&mut self, fps: u32) {
+        self.screencast_fps = fps.clamp(1, 60);
     }
 
     fn build_msg(&mut self, method: &str, params: Value, session: Option<&str>) -> (u64, String) {
@@ -173,8 +183,17 @@ impl Cdp {
 
     /// 发后即忘（不等待应答；响应到达时按「无关 id」静默丢弃）
     pub fn fire(&mut self, method: &str, params: Value, session: Option<&str>) {
+        let _ = self.fire_checked(method, params, session);
+    }
+
+    /// 发后即忘但检查发送结果：WS 断裂（写失败）立刻可见——控制类命令
+    /// （导航/输入事件）用它在毫秒级拿到传输层错误，而不是等下轮 tick 才发现。
+    /// 错误以「WS:」前缀返回，调用方据此走重连路径。
+    pub fn fire_checked(&mut self, method: &str, params: Value, session: Option<&str>) -> Result<(), String> {
         let (_, text) = self.build_msg(method, params, session);
-        let _ = self.ws.send_text(&text);
+        self.ws
+            .send_text(&text)
+            .map_err(|e| format!("WS: 发送 {method} 失败({e:?})"))
     }
 
     /// 发送命令并等待应答。等待期间分发事件（含对话框自动确认）。
@@ -273,7 +292,7 @@ impl Cdp {
     /// 占满 10s 超时——把 ScreencastAttach 应答压在队尾，表现为「连接实时画面…」
     /// 10 秒。首帧由调用方补一帧 captureScreenshot 兜底（静态页/错误页合成器
     /// 无更新时 screencast 可能长期不发帧）。
-    /// jpeg 50% 逐合成器帧 + 显式 maxFrameRate 25（部分 Chromium 默认保守）；
+    /// jpeg 50% 逐合成器帧 + maxFrameRate（默认 25，控制面板 /fps 运行时可调）；
     /// 帧尺寸 = 视口像素，与触摸坐标同坐标系。
     pub fn screencast_subscribe(&mut self, session: &str) -> Result<(u32, FrameBox), String> {
         if !self.screencast_active {
@@ -283,7 +302,7 @@ impl Cdp {
                     "format": "jpeg",
                     "quality": 50,
                     "everyNthFrame": 1,
-                    "maxFrameRate": 25
+                    "maxFrameRate": self.screencast_fps
                 }),
                 Some(session),
             );
@@ -305,6 +324,26 @@ impl Cdp {
         if self.screencast_active && self.sinks.is_empty() {
             self.screencast_active = false;
             self.fire("Page.stopScreencast", json!({}), Some(session));
+        }
+    }
+
+    /// 运行时调整实时画面帧率（控制面板「设置 → 帧率」）。
+    /// 流在跑则 stop+start 重建（maxFrameRate 只在 start 时生效）；
+    /// 无人观看只记值，下次订阅自动生效。
+    pub fn set_screencast_fps(&mut self, fps: u32, session: &str) {
+        self.screencast_fps = fps.clamp(1, 60);
+        if self.screencast_active {
+            self.fire("Page.stopScreencast", json!({}), Some(session));
+            self.fire(
+                "Page.startScreencast",
+                json!({
+                    "format": "jpeg",
+                    "quality": 50,
+                    "everyNthFrame": 1,
+                    "maxFrameRate": self.screencast_fps
+                }),
+                Some(session),
+            );
         }
     }
 

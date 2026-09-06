@@ -42,6 +42,8 @@ pub struct Config {
     pub tick_fail_reload: u32,
     pub frozen_reload: u32,
     pub beat_stale_sec: u64,
+    /// 实时画面目标帧率上限（控制面板 /fps 可运行时调整；此为初始值）
+    pub fps: u32,
     pub selftest: bool,
     pub smoke: bool,
     pub smoke_seconds: u64,
@@ -135,6 +137,7 @@ impl Config {
             tick_fail_reload: i64_env("CPK_TICK_FAIL_RELOAD", 10, 3, 600) as u32,
             frozen_reload: i64_env("CPK_FROZEN_RELOAD", 3, 1, 100) as u32,
             beat_stale_sec: i64_env("CPK_BEAT_STALE_SEC", 180, 30, 3600) as u64,
+            fps: i64_env("CPK_FPS", 25, 1, 60) as u32,
             selftest: bool_env("CPK_SELFTEST", false),
             smoke: bool_env("CPK_SMOKE", false),
             smoke_seconds: i64_env("CPK_SMOKE_SECONDS", 60, 10, 3600) as u64,

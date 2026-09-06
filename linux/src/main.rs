@@ -221,6 +221,21 @@ fn selftest(cfg: &config::Config, logger: &Arc<Logger>) -> i32 {
             checks.push(("server: 触控端点参数校验", false));
         }
     }
+    // 新输入端点参数校验（HTTP 层 400，不依赖引擎/浏览器）
+    for (name, path) in [
+        ("server: 鼠标端点参数校验", "/mouse?action=poke&x=1&y=1"),
+        ("server: 键盘端点参数校验", "/kbd?t=press&key=a"),
+        ("server: 帧率端点参数校验", "/fps?value=99"),
+        ("server: 多点触控参数校验", "/touch?phase=start&ps=1,2,bad"),
+    ] {
+        match util::http_get(p, path, 3000) {
+            Ok((st, _)) if st == 400 => checks.push((name, true)),
+            other => {
+                logger.log(0, "error", &format!("selftest {name} 异常：{other:?}"));
+                checks.push((name, false));
+            }
+        }
+    }
     let mut failed = 0;
     for (name, ok) in &checks {
         logger.log(0, "sys", &format!("selftest {} {}", if *ok { "PASS" } else { "FAIL" }, name));

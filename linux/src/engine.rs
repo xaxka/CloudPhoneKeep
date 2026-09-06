@@ -20,7 +20,7 @@ use crate::logger::Logger;
 use crate::util;
 use serde_json::{json, Value};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -33,6 +33,8 @@ pub const TICK_EXPR: &str = "(function(){try{if(!window.__CPK_TICK__)return 'nos
 pub const SNAPSHOT_EXPR: &str = "(function(){try{var s=window.__CPK_STATE__;var d=window.__CPK_DRAIN__?window.__CPK_DRAIN__():[];if(!s)return JSON.stringify({no:1,d:d});return JSON.stringify({ticks:s.ticks,clicks:s.clicks,last:s.last,wasExited:s.wasExited,stopDone:s.stopDone,entered:s.entered,url:location.href.slice(0,200),title:(document.title||'').slice(0,60),ready:document.readyState,d:d})}catch(e){return JSON.stringify({err:String(e&&e.message)})}})()";
 /// 重连探测：当前文档是否已装保活脚本（返回 'y'/'n' 字符串便于 evaluate 读取）
 pub const PROBE_EXPR: &str = "window.__CPK_INSTALLED__===true?'y':'n'";
+/// 剪贴板读取：云机页面当前选中文本（含输入框选区）——/copy（云机 → 本机）数据源
+pub const CLIP_EXPR: &str = "(function(){try{var s='';try{s=String(document.getSelection())}catch(e){}if(!s){var a=document.activeElement;try{if(a&&(/^(INPUT|TEXTAREA)$/.test(a.tagName))&&('value'in a)&&a.selectionStart!=null){s=String(a.value).slice(a.selectionStart,a.selectionEnd)}}catch(e){}}return JSON.stringify({t:s})}catch(e){return JSON.stringify({t:''})}})()";
 
 extern "C" {
     #[link_name = "kill"]
@@ -69,6 +71,8 @@ pub struct Health {
     pub chrome_version: String,
     pub last_error: String,
     pub started_at_ms: i64,
+    /// 当前实时画面帧率（控制面板 /fps 运行时可调）
+    pub fps: u32,
 }
 
 pub struct SharedState {
@@ -77,6 +81,7 @@ pub struct SharedState {
     exited: AtomicBool,
     stop: AtomicBool,
     beat_stale_sec: u64,
+    fps: AtomicU32,
 }
 
 impl SharedState {
@@ -105,6 +110,7 @@ impl SharedState {
             chrome_version: String::new(),
             last_error: String::new(),
             started_at_ms: util::now_ms(),
+            fps: cfg.fps.clamp(1, 60),
         };
         Arc::new(SharedState {
             health: Mutex::new(health),
@@ -112,6 +118,7 @@ impl SharedState {
             exited: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             beat_stale_sec: cfg.beat_stale_sec,
+            fps: AtomicU32::new(cfg.fps.clamp(1, 60)),
         })
     }
 
@@ -119,6 +126,7 @@ impl SharedState {
         let mut h = self.health.lock().unwrap().clone();
         h.last_beat_ms = self.last_beat_ms.load(Ordering::Relaxed);
         h.exited = self.exited.load(Ordering::Relaxed);
+        h.fps = self.fps.load(Ordering::Relaxed);
         let age = if h.last_beat_ms > 0 {
             Some(((util::now_ms() - h.last_beat_ms).max(0) / 1000) as u64)
         } else {
@@ -155,6 +163,9 @@ impl SharedState {
             .unwrap_or(false)
     }
     pub fn set_restarts(&self, n: u32) { self.update(|h| h.restarts = n); }
+    /// 运行时调整实时画面帧率（控制面板 /fps；跨 CDP 重建保留）
+    pub fn set_fps(&self, n: u32) { self.fps.store(n.clamp(1, 60), Ordering::Relaxed); }
+    pub fn fps(&self) -> u32 { self.fps.load(Ordering::Relaxed) }
     pub fn bump_reloads(&self) { self.update(|h| h.reloads += 1); }
     pub fn set_dialogs(&self, n: u32) { self.update(|h| h.dialogs = n); }
     pub fn set_chrome_version(&self, v: &str) { self.update(|h| h.chrome_version = v.into()); }
@@ -188,6 +199,7 @@ pub fn health_json(h: &Health) -> Value {
         "dialogs": h.dialogs,
         "chromeVersion": h.chrome_version,
         "lastError": h.last_error,
+        "fps": h.fps,
     })
 }
 
@@ -201,8 +213,44 @@ pub enum ControlRequest {
     Swipe { x1: f64, y1: f64, x2: f64, y2: f64, reply: Sender<Result<(), String>> },
     /// 实时触摸流（/touch）：按下/移动/抬起/取消逐点直通 CDP Input.dispatchTouchEvent
     /// ——页面拖动跟手（不再「松手才补发整段滑动」）；move 高频，仅按下留日志、
-    /// 超时收紧防积压（渲染卡顿时移动点丢弃链路继续，不占引擎 5s）
-    Touch { phase: String, x: f64, y: f64, reply: Sender<Result<(), String>> },
+    /// 超时收紧防积压（渲染卡顿时移动点丢弃链路继续，不占引擎 5s）。
+    /// points = 本次变动的触点（Chromium 逐点语义：start 新增 / move 移动 /
+    /// end 列出释放的触点，空=整组释放）——支撑双指缩放等多点手势
+    Touch {
+        phase: String,
+        points: Vec<TouchPoint>,
+        reply: Sender<Result<(), String>>,
+    },
+    /// 真实鼠标事件（/mouse）：move/press/release/wheel（全键位/拖动/双击/滚轮）
+    Mouse {
+        action: String,
+        x: f64,
+        y: f64,
+        button: String,
+        buttons: u32,
+        click_count: u32,
+        dx: f64,
+        dy: f64,
+        modifiers: u32,
+        reply: Sender<Result<(), String>>,
+    },
+    /// 键盘事件（/kbd）：rawKeyDown/keyDown/keyUp 全字段直通
+    /// （t=down 且有 text → keyDown，否则 rawKeyDown；t=up → keyUp）
+    KeyEvent {
+        typ: String,
+        key: String,
+        code: String,
+        vk: u32,
+        text: String,
+        modifiers: u32,
+        location: u32,
+        auto_repeat: bool,
+        reply: Sender<Result<(), String>>,
+    },
+    /// 读取云机选中文本（/clip：云机 → 本机剪贴板的数据源）
+    ClipGet { reply: Sender<Result<String, String>> },
+    /// 运行时调整实时画面帧率（控制面板「设置 → 帧率」）
+    SetFps { fps: u32, reply: Sender<Result<(), String>> },
     TypeText { text: String, reply: Sender<Result<(), String>> },
     Key { key: String, reply: Sender<Result<(), String>> },
     Navigate { url: String, reply: Sender<Result<(), String>> },
@@ -211,6 +259,14 @@ pub enum ControlRequest {
     ScreencastAttach { reply: Sender<Result<(u32, FrameBox), String>> },
     /// 取消订阅（最后一个订阅者离开时引擎自动 Page.stopScreencast）
     ScreencastDetach { id: u32, reply: Sender<Result<(), String>> },
+}
+
+/// 触摸点（id 由控制页分配，1..=10）
+#[derive(Clone, Copy)]
+pub struct TouchPoint {
+    pub x: f64,
+    pub y: f64,
+    pub id: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +295,48 @@ enum SteadyOutcome {
     Stop,
 }
 
+/// 引擎重建期（CDP 重连/浏览器重启）快速失败积压的控制请求：
+/// 立刻回 Err 而不是让 HTTP 层干等 20s 超时——控制页输入通道毫秒级感知
+/// 「引擎忙」并提示，而不是整页「点不动」。
+/// 请求本就无法送达（WS 已断/进程已死），快速失败才是正确语义；
+/// 旧版在这些阶段不清空队列，触摸/导航请求全部压到 20s 超时，
+/// 表现为「点了回首页后再也点不动」。
+fn drain_ctrl_fail(ctrl_rx: &Receiver<ControlRequest>, reason: &str) {
+    while let Ok(req) = ctrl_rx.try_recv() {
+        let r = reason.to_string();
+        match req {
+            ControlRequest::Screenshot { reply } => { let _ = reply.send(Err(r)); }
+            ControlRequest::Tap { reply, .. } => { let _ = reply.send(Err(r)); }
+            ControlRequest::Swipe { reply, .. } => { let _ = reply.send(Err(r)); }
+            ControlRequest::Touch { reply, .. } => { let _ = reply.send(Err(r)); }
+            ControlRequest::Mouse { reply, .. } => { let _ = reply.send(Err(r)); }
+            ControlRequest::KeyEvent { reply, .. } => { let _ = reply.send(Err(r)); }
+            ControlRequest::ClipGet { reply } => { let _ = reply.send(Err(r)); }
+            ControlRequest::SetFps { reply, .. } => { let _ = reply.send(Err(r)); }
+            ControlRequest::TypeText { reply, .. } => { let _ = reply.send(Err(r)); }
+            ControlRequest::Key { reply, .. } => { let _ = reply.send(Err(r)); }
+            ControlRequest::Navigate { reply, .. } => { let _ = reply.send(Err(r)); }
+            ControlRequest::Reload { reply } => { let _ = reply.send(Err(r)); }
+            ControlRequest::ScreencastAttach { reply } => { let _ = reply.send(Err(r)); }
+            ControlRequest::ScreencastDetach { reply, .. } => { let _ = reply.send(Err(r)); }
+        }
+    }
+}
+
+/// 退避/重试睡眠 + 持续快速失败积压请求（200ms 切片，睡眠期间请求不积压）
+fn sleep_drain(dur: Duration, ctrl_rx: &Receiver<ControlRequest>, reason: &str) {
+    let deadline = Instant::now() + dur;
+    loop {
+        drain_ctrl_fail(ctrl_rx, reason);
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        thread::sleep(left.min(Duration::from_millis(200)));
+    }
+    drain_ctrl_fail(ctrl_rx, reason);
+}
+
 fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<SharedState>, ctrl_rx: Receiver<ControlRequest>) {
     let script = keepalive::build_init_script(cfg, report_port);
     let mut backoff: u64 = 5;
@@ -265,7 +363,7 @@ fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<
                     logger.log(0, "error", &format!("Chromium 启动失败：{e}"));
                     shared.set_last_error(&e);
                     shared.set_browser("failed");
-                    thread::sleep(Duration::from_secs(backoff));
+                    sleep_drain(Duration::from_secs(backoff), &ctrl_rx, "浏览器启动失败，重试中");
                     backoff = (backoff * 2).min(300);
                     continue 'outer;
                 }
@@ -282,7 +380,7 @@ fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<
                     shared.set_last_error(&e);
                     kill_child(&mut child, &logger);
                     shared.set_browser("stopped");
-                    thread::sleep(Duration::from_secs(backoff));
+                    sleep_drain(Duration::from_secs(backoff), &ctrl_rx, "DevTools 未就绪，重启中");
                     backoff = (backoff * 2).min(300);
                     continue 'outer;
                 }
@@ -302,7 +400,7 @@ fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<
                     shared.set_last_error(&e);
                     kill_child(&mut child, &logger);
                     shared.set_browser("stopped");
-                    thread::sleep(Duration::from_secs(backoff));
+                    sleep_drain(Duration::from_secs(backoff), &ctrl_rx, "CDP 装配失败，重启中");
                     backoff = (backoff * 2).min(300);
                     continue 'outer;
                 }
@@ -328,6 +426,9 @@ fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<
             }
             SteadyOutcome::Reattach => {
                 logger.log(0, "sys", "CDP 传输断裂，重建会话（Chromium 进程保留，页面不重载）");
+                // 立刻清空积压：触摸/导航/订阅请求全部快速失败（毫秒级反馈），
+                // 不让任何请求挂着 20s 超时卡死控制页输入通道
+                drain_ctrl_fail(&ctrl_rx, "引擎重建 CDP 会话中，稍后自动恢复");
                 if let Some(mut c) = cdp.take() {
                     c.close();
                 }
@@ -361,13 +462,13 @@ fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<
                         }
                         Err(_) => {}
                     }
-                    thread::sleep(Duration::from_secs(3));
+                    sleep_drain(Duration::from_secs(3), &ctrl_rx, "引擎重建 CDP 会话中，稍后自动恢复");
                 }
                 if !ok {
                     logger.log(0, "sys", "CDP 会话重建耗尽，重启 Chromium");
                     kill_child(&mut child, &logger);
                     shared.set_browser("stopped");
-                    thread::sleep(Duration::from_secs(backoff));
+                    sleep_drain(Duration::from_secs(backoff), &ctrl_rx, "浏览器重启中，稍后自动恢复");
                     backoff = (backoff * 2).min(300);
                     continue 'outer;
                 }
@@ -381,7 +482,7 @@ fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<
                 }
                 kill_child(&mut child, &logger);
                 shared.set_browser("stopped");
-                thread::sleep(Duration::from_secs(backoff));
+                sleep_drain(Duration::from_secs(backoff), &ctrl_rx, "浏览器重启中，稍后自动恢复");
                 backoff = (backoff * 2).min(300);
                 continue 'outer;
             }
@@ -451,7 +552,7 @@ fn steady_loop(
         }
         // 控制请求（每个监督周期清空一次；单请求超时上限 15s）
         while let Ok(req) = ctrl_rx.try_recv() {
-            if let Err(e) = handle_control(cdp, session, req, logger) {
+            if let Err(e) = handle_control(cdp, session, shared, req, logger) {
                 logger.log(0, "error", &format!("控制请求处理失败：{e}"));
                 if e.starts_with("WS:") {
                     return SteadyOutcome::Reattach;
@@ -745,7 +846,13 @@ fn nav_home(
 // 控制请求执行（CDP Input 域 = 内核级触摸/输入模拟）
 // ---------------------------------------------------------------------------
 
-fn handle_control(cdp: &mut Cdp, session: &str, req: ControlRequest, logger: &Arc<Logger>) -> Result<(), String> {
+fn handle_control(
+    cdp: &mut Cdp,
+    session: &str,
+    shared: &Arc<SharedState>,
+    req: ControlRequest,
+    logger: &Arc<Logger>,
+) -> Result<(), String> {
     match req {
         ControlRequest::Screenshot { reply } => {
             let v = cdp.call(
@@ -768,31 +875,120 @@ fn handle_control(cdp: &mut Cdp, session: &str, req: ControlRequest, logger: &Ar
             swipe(cdp, session, x1, y1, x2, y2)?;
             let _ = reply.send(Ok(()));
         }
-        ControlRequest::Touch { phase, x, y, reply } => {
+        ControlRequest::Touch { phase, points, reply } => {
             // fire 即发即答：Input.dispatchTouchEvent 的应答无信息量，同步等 CDP
             // 应答曾在弱机上占 1-5s（tap 手势窗口 ~300ms 早过了，轻点直接失效；
             // 拖动点大量积压“不跟手”）——发后即忘，事件在 WS 管道保序，Chrome
             // 按序消化，引擎线程占用 <0.1ms；WS 断裂由下轮 tick 的同步 call 发现
             // （触摸指令在 HTTP 层已校验 phase）
-            let (typ, points): (&str, Value) = match phase.as_str() {
-                "start" => ("touchStart", json!([{ "x": x, "y": y, "id": 1 }])),
-                "move" => ("touchMove", json!([{ "x": x, "y": y, "id": 1 }])),
-                "end" => ("touchEnd", json!([])),
-                _ => ("touchCancel", json!([])),
+            let typ = match phase.as_str() {
+                "start" => "touchStart",
+                "move" => "touchMove",
+                "end" => "touchEnd",
+                _ => "touchCancel",
             };
-            if phase == "start" {
-                logger.log(1, "click", &format!("触摸按下 ({x:.0},{y:.0})"));
+            let pts: Vec<Value> = points
+                .iter()
+                .map(|p| json!({ "x": p.x, "y": p.y, "id": p.id }))
+                .collect();
+            if phase == "start" && !points.is_empty() {
+                logger.log(1, "click", &format!("触摸按下 ({:.0},{:.0}) id={}（在按 {} 点）", points[0].x, points[0].y, points[0].id, points.len()));
             }
-            cdp.fire(
+            cdp.fire_checked(
                 "Input.dispatchTouchEvent",
-                json!({ "type": typ, "touchPoints": points }),
+                json!({ "type": typ, "touchPoints": pts }),
                 Some(session),
-            );
+            )?;
+            let _ = reply.send(Ok(()));
+        }
+        ControlRequest::Mouse { action, x, y, button, buttons, click_count, dx, dy, modifiers, reply } => {
+            // 真实鼠标事件同样 fire 即发（应答无信息量；与触摸同链路同理由）。
+            // 全键位：left/right/middle；clickCount 2/3 → 远端合成 dblclick/三击
+            let mut params = json!({
+                "type": match action.as_str() {
+                    "down" => "mousePressed",
+                    "up" => "mouseReleased",
+                    "wheel" => "mouseWheel",
+                    _ => "mouseMoved",
+                },
+                "x": x,
+                "y": y,
+                "button": button,
+                "buttons": buttons,
+                "modifiers": modifiers,
+            });
+            if action == "down" || action == "up" {
+                params["clickCount"] = Value::from(click_count.max(1));
+            }
+            if action == "wheel" {
+                params["deltaX"] = Value::from(dx);
+                params["deltaY"] = Value::from(dy);
+            }
+            if action == "down" {
+                logger.log(1, "click", &format!("鼠标按下 {button} ({x:.0},{y:.0})×{click_count}"));
+            }
+            cdp.fire_checked("Input.dispatchMouseEvent", params, Some(session))?;
+            let _ = reply.send(Ok(()));
+        }
+        ControlRequest::KeyEvent { typ, key, code, vk, text, modifiers, location, auto_repeat, reply } => {
+            // t=down 且带文本 → keyDown（Chrome 生成字符输入）；其余 down →
+            // rawKeyDown；t=up → keyUp。修饰键位图：Alt=1 Ctrl=2 Meta=4 Shift=8
+            let mut params = json!({
+                "type": if typ == "up" { "keyUp" } else if text.is_empty() { "rawKeyDown" } else { "keyDown" },
+                "key": key,
+                "code": code,
+                "windowsVirtualKeyCode": vk,
+                "nativeVirtualKeyCode": vk,
+                "modifiers": modifiers,
+            });
+            if location > 0 {
+                params["location"] = Value::from(location);
+            }
+            if auto_repeat {
+                params["autoRepeat"] = Value::Bool(true);
+            }
+            if typ == "down" && !text.is_empty() {
+                params["text"] = Value::String(text.clone());
+                params["unmodifiedText"] = Value::String(text.clone());
+            }
+            if typ == "down" {
+                logger.log(1, "click", &format!("按键 {key}{}", if text.is_empty() { String::new() } else { format!("（{text}）") }));
+            }
+            cdp.fire_checked("Input.dispatchKeyEvent", params, Some(session))?;
+            let _ = reply.send(Ok(()));
+        }
+        ControlRequest::ClipGet { reply } => {
+            // 云机选区 → 控制页（控制页写入本机剪贴板）：页面普通选区 +
+            // 输入框内选区，最多 64KB（防异常超大选区拖垮 HTTP 层）
+            let r = cdp::eval_string(cdp, session, CLIP_EXPR, 5000);
+            let out = match r {
+                Ok(s) => serde_json::from_str::<Value>(&s)
+                    .ok()
+                    .and_then(|v| v.get("t").and_then(|x| x.as_str()).map(|t| t.to_string()))
+                    .unwrap_or_default(),
+                Err(e) => {
+                    if e.starts_with("WS:") {
+                        return Err(e);
+                    }
+                    String::new()
+                }
+            };
+            let cut: String = out.chars().take(65536).collect();
+            let _ = reply.send(Ok(cut));
+        }
+        ControlRequest::SetFps { fps, reply } => {
+            // 流在跑则 stop+start 重建（maxFrameRate 只在 start 时生效）；
+            // 值存 SharedState——CDP 重建后沿用（用户设置不因重连丢失）
+            shared.set_fps(fps);
+            cdp.set_screencast_fps(fps, session);
+            logger.log(1, "sys", &format!("实时画面帧率设为 {fps}"));
             let _ = reply.send(Ok(()));
         }
         ControlRequest::TypeText { text, reply } => {
             logger.log(1, "click", &format!("输入文本（{} 字符）", text.chars().count()));
-            cdp.call("Input.insertText", json!({ "text": text }), Some(session), 5000)?;
+            // fire 即发：insertText 应答无信息量；页面忙时同步等曾在弱机占 5s，
+            // 输入法打字逐字卡顿——事件在 WS 管道保序，Chrome 输入线程照常消化
+            cdp.fire_checked("Input.insertText", json!({ "text": text }), Some(session))?;
             let _ = reply.send(Ok(()));
         }
         ControlRequest::Key { key, reply } => {
@@ -802,23 +998,16 @@ fn handle_control(cdp: &mut Cdp, session: &str, req: ControlRequest, logger: &Ar
         }
         ControlRequest::Navigate { url, reply } => {
             logger.log(1, "nav", &format!("控制页导航 {url}"));
-            // 命令已发出即视为受理：导航本身可费时数十秒（弱网/慢站），同步等完
-            // 会把引擎线程占住 20s——结果由实时画面流里直接看到；传输断裂仍如实报错
-            match cdp.call("Page.navigate", json!({ "url": url }), Some(session), 5000) {
-                Ok(_) => { let _ = reply.send(Ok(())); }
-                Err(e) if e.starts_with("WS:") => return Err(e),
-                Err(e) if e.contains("命令超时") => { let _ = reply.send(Ok(())); }
-                Err(e) => { let _ = reply.send(Err(e)); }
-            }
+            // 发后即忘：导航本身可费时数十秒（弱网/慢站），同步等完会把引擎线程
+            // 占住最多 20s——期间触摸/输入全部压队（表现为「回首页后无法操作」）；
+            // 结果由实时画面流直接看到，传输断裂则立刻报错走重连
+            cdp.fire_checked("Page.navigate", json!({ "url": url }), Some(session))?;
+            let _ = reply.send(Ok(()));
         }
         ControlRequest::Reload { reply } => {
             logger.log(1, "nav", "控制页重载");
-            match cdp.call("Page.reload", json!({ "ignoreCache": true }), Some(session), 5000) {
-                Ok(_) => { let _ = reply.send(Ok(())); }
-                Err(e) if e.starts_with("WS:") => return Err(e),
-                Err(e) if e.contains("命令超时") => { let _ = reply.send(Ok(())); }
-                Err(e) => { let _ = reply.send(Err(e)); }
-            }
+            cdp.fire_checked("Page.reload", json!({ "ignoreCache": true }), Some(session))?;
+            let _ = reply.send(Ok(()));
         }
         ControlRequest::ScreencastAttach { reply } => {
             match cdp.screencast_subscribe(session) {
@@ -867,44 +1056,54 @@ fn touch_event(
     session: &str,
     typ: &str,
     points: Value,
-    timeout_ms: u64,
 ) -> Result<(), String> {
-    cdp.call(
+    // fire 即发：Input 事件应答无信息量，同步等会占引擎线程（与 /touch 同理由）
+    cdp.fire_checked(
         "Input.dispatchTouchEvent",
         json!({ "type": typ, "touchPoints": points }),
         Some(session),
-        timeout_ms,
     )
-    .map(|_| ())
 }
 
 fn tap(cdp: &mut Cdp, session: &str, x: f64, y: f64) -> Result<(), String> {
-    touch_event(cdp, session, "touchStart", json!([{ "x": x, "y": y, "id": 1 }]), 5000)?;
+    touch_event(cdp, session, "touchStart", json!([{ "x": x, "y": y, "id": 1 }]))?;
     thread::sleep(Duration::from_millis(80));
-    touch_event(cdp, session, "touchEnd", json!([]), 5000)
+    touch_event(cdp, session, "touchEnd", json!([]))
 }
 
 fn swipe(cdp: &mut Cdp, session: &str, x1: f64, y1: f64, x2: f64, y2: f64) -> Result<(), String> {
-    touch_event(cdp, session, "touchStart", json!([{ "x": x1, "y": y1, "id": 1 }]), 5000)?;
+    touch_event(cdp, session, "touchStart", json!([{ "x": x1, "y": y1, "id": 1 }]))?;
     for i in 1..=8 {
         let t = i as f64 / 8.0;
         let xi = x1 + (x2 - x1) * t;
         let yi = y1 + (y2 - y1) * t;
-        touch_event(cdp, session, "touchMove", json!([{ "x": xi, "y": yi, "id": 1 }]), 5000)?;
+        touch_event(cdp, session, "touchMove", json!([{ "x": xi, "y": yi, "id": 1 }]))?;
         thread::sleep(Duration::from_millis(16));
     }
-    touch_event(cdp, session, "touchEnd", json!([]), 5000)
+    touch_event(cdp, session, "touchEnd", json!([]))
 }
 
 fn key_event(cdp: &mut Cdp, session: &str, key: &str) -> Result<(), String> {
+    // /key 兼容端点（控制页现已用 /kbd 全键位直通；此处保留常用控制键）
     let (code, vk, text): (&str, u32, &str) = match key {
         "Backspace" => ("Backspace", 8, ""),
         "Tab" => ("Tab", 9, "\t"),
         "Escape" => ("Escape", 27, ""),
+        "Delete" => ("Delete", 46, ""),
+        "Insert" => ("Insert", 45, ""),
+        "Home" => ("Home", 36, ""),
+        "End" => ("End", 35, ""),
+        "PageUp" => ("PageUp", 33, ""),
+        "PageDown" => ("PageDown", 34, ""),
+        "ArrowLeft" => ("ArrowLeft", 37, ""),
+        "ArrowUp" => ("ArrowUp", 38, ""),
+        "ArrowRight" => ("ArrowRight", 39, ""),
+        "ArrowDown" => ("ArrowDown", 40, ""),
+        "Space" | " " => ("Space", 32, " "),
         _ => ("Enter", 13, "\r"),
     };
     let mut kd = json!({
-        "type": "keyDown",
+        "type": if text.is_empty() { "rawKeyDown" } else { "keyDown" },
         "key": key,
         "code": code,
         "windowsVirtualKeyCode": vk,
@@ -913,8 +1112,9 @@ fn key_event(cdp: &mut Cdp, session: &str, key: &str) -> Result<(), String> {
     if !text.is_empty() {
         kd["text"] = Value::String(text.to_string());
     }
-    cdp.call("Input.dispatchKeyEvent", kd, Some(session), 5000)?;
-    cdp.call(
+    // fire 即发：按键事件应答无信息量，绝不占引擎线程
+    cdp.fire_checked("Input.dispatchKeyEvent", kd, Some(session))?;
+    cdp.fire_checked(
         "Input.dispatchKeyEvent",
         json!({
             "type": "keyUp",
@@ -924,7 +1124,6 @@ fn key_event(cdp: &mut Cdp, session: &str, key: &str) -> Result<(), String> {
             "nativeVirtualKeyCode": vk,
         }),
         Some(session),
-        5000,
     )?;
     Ok(())
 }
@@ -1056,6 +1255,8 @@ fn attach_all(
     navigate: bool,
 ) -> Result<(Cdp, String), String> {
     let mut cdp = Cdp::connect(port)?;
+    // 帧率沿用 SharedState 当前值：控制面板改过的帧率跨 CDP 重建保留
+    cdp.set_default_fps(shared.fps());
     // 复用已有 page 目标（chrome-headless-shell 启动自带一个 about:blank）
     let targets = cdp.call("Target.getTargets", json!({}), None, 10000)?;
     let existing = targets
@@ -1230,6 +1431,7 @@ mod tests {
             tick_fail_reload: 10,
             frozen_reload: 3,
             beat_stale_sec: 180,
+            fps: 25,
             selftest: false,
             smoke: false,
             smoke_seconds: 60,

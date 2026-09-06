@@ -46,6 +46,7 @@ C:\Users\<用户名>\AppData\LocalLow\CloudPhoneKeep\
 | `CPK_TICK_FAIL_RELOAD` | `10` | tick 连续失败 N 次后导航回首页 |
 | `CPK_FROZEN_RELOAD` | `3` | 状态冻结 N 个采样周期后导航回首页 |
 | `CPK_BEAT_STALE_SEC` | `180` | 心跳超龄 N 秒硬重启浏览器 |
+| `CPK_FPS` | `25` | 实时画面帧率上限（1-60；控制台「设置→帧率」可运行时调整，此为初始值） |
 | `CPK_SELFTEST` | `0` | 自检模式（不启动 Chromium，CI 用） |
 | `CPK_SMOKE` / `CPK_SMOKE_SECONDS` | `0` / `60` | 冒烟模式（跑 N 秒按指标退出，CI 用） |
 

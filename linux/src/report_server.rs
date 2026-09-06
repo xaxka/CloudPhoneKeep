@@ -10,15 +10,20 @@
 //!  - GET  /stream.mjpg       实时画面流（MJPEG multipart，Page.startScreencast 帧直推，
 //!                            断流自动重连；页面侧不可用时退化 /shot.jpg 轮询）
 //!  - GET  /shot.jpg          单帧页面截图（JPEG，兼容/兜底用）
-//!  - POST /tap /swipe /touch /type /key /nav /reload  控制端点（token 可选保护；
-//!                            /touch=实时触摸流 phase=start/move/end/cancel）
+//!  - POST /touch             实时触摸流（phase=start/move/end/cancel；多点 ps=x,y,id;…）
+//!  - POST /mouse             真实鼠标事件（action=move/down/up/wheel，全键位/滚轮）
+//!  - POST /kbd               键盘事件全字段直通（t=down/up，key/code/vk/text/mods）
+//!  - POST /type              文本插入（Input.insertText；输入法/粘贴整段发送）
+//!  - GET  /clip              读取云机选中文本（云机 → 本机剪贴板）
+//!  - POST /fps               运行时帧率上限（Page.startScreencast maxFrameRate）
+//!  - POST /tap /swipe /key /nav /reload  控制端点（token 可选保护；兼容保留）
 //!
 //!  说明：控制端点经 channel 由引擎线程用 CDP Input 域执行 = 内核级触摸模拟，
 //!        无需桌面/VNC；/report 与 /log 即使被 Chromium 专用网络访问(PNA)策略
 //!        拦截也不影响保活（诊断另有 CDP __CPK_DRAIN__ 通道兜底，双保险）。
 
 use crate::cdp::FramePoll;
-use crate::engine::{health_json, ControlRequest, SharedState};
+use crate::engine::{health_json, ControlRequest, SharedState, TouchPoint};
 use crate::logger::Logger;
 use crate::util::urldecode;
 use std::collections::HashMap;
@@ -72,19 +77,16 @@ main{flex:1;display:flex;min-width:0;min-height:0}
 border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 6px 28px #0009}
 #shot{width:100%;height:100%;display:block;object-fit:contain;cursor:pointer;
 touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+/* 画面上的提示层：不挡触摸——重连/截图模式下点击照常穿透到画面 */
 #overlay{position:absolute;inset:0;display:flex;flex-direction:column;gap:8px;align-items:center;
-justify-content:center;background:#020617e6;color:var(--dim);font-size:13px;text-align:center;padding:0 24px}
+justify-content:center;background:#020617e6;color:var(--dim);font-size:13px;text-align:center;
+padding:0 24px;pointer-events:none;z-index:5}
 #overlay.hidden{display:none}
 #ovt{color:var(--txt);font-size:15px}
-/* 导航失败徽标：不挡触摸（pointer-events:none），仅提示「白屏=网络/DNS」 */
+/* 导航失败徽标：不挡触摸，仅提示「白屏=网络/DNS」 */
 #pbadge{position:absolute;top:10px;left:10px;background:#dc2626e6;color:#fff;font-size:12px;
 font-weight:600;padding:4px 11px;border-radius:999px;display:none;z-index:7;pointer-events:none;
 max-width:92%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-/* fps/状态徽标：画面右上角小胶囊，替代原顶栏 */
-#fpsb{position:absolute;top:8px;right:8px;z-index:7;pointer-events:none;display:flex;align-items:center;
-gap:5px;font-size:10px;color:#e2e8f0d9;background:#0f172ab3;padding:3px 9px;border-radius:99px}
-#fpsb i{width:6px;height:6px;border-radius:50%;background:#64748b;flex:none}
-#fpsb i.ok{background:#22c55e}#fpsb i.bad{background:#ef4444}#fpsb i.warn{background:#f59e0b}
 /* 触摸反馈点：按下显示、拖动跟随，操作即时可见 */
 #tdot{position:absolute;width:28px;height:28px;border-radius:50%;border:2px solid #ffffffb3;
 box-shadow:0 0 14px #000c;background:#ffffff1f;pointer-events:none;display:none;
@@ -94,13 +96,21 @@ transform:translate(-50%,-50%);z-index:6}
 padding:12px 14px;overflow-y:auto;display:flex;flex-direction:column;gap:9px}
 #panel h2{font-size:11px;margin:4px 0 0;color:var(--dim);font-weight:600;
 letter-spacing:.08em;text-transform:uppercase}
-.row{display:flex;gap:6px;flex-wrap:wrap}
-input[type=text]{flex:1;min-width:120px;background:var(--bg);color:var(--txt);
+.row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+input[type=text]{flex:1;min-width:120px;background:var(--bg);color:var(--txt);font-size:16px;
 border:1px solid var(--line);border-radius:6px;padding:7px 9px}
 button{background:var(--line);color:var(--txt);border:0;border-radius:6px;padding:7px 12px;
 cursor:pointer;font-size:13px}
 button:hover{background:#475569}
 button.acc{background:#0369a1}button.acc:hover{background:#0284c7}
+select{background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:6px;
+padding:6px 8px;font-size:13px}
+.lb{font-size:12px;color:var(--dim)}
+/* 状态行（fps 收纳于此，不再悬浮画面上遮挡内容） */
+#pstat{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--txt);
+background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+#pstat i{width:8px;height:8px;border-radius:50%;background:#64748b;flex:none}
+#pstat i.ok{background:#22c55e}#pstat i.bad{background:#ef4444}#pstat i.warn{background:#f59e0b}
 #stats{font-size:12px;color:var(--dim);line-height:1.65;word-break:break-all}
 #stats b{color:var(--txt);font-weight:600}
 #stats .warn{color:#f87171}
@@ -134,23 +144,47 @@ padding-bottom:calc(14px + env(safe-area-inset-bottom))}
 <img id="shot" alt="云手机实时画面" draggable="false">
 <div id="overlay"><div id="ovt">等待画面…</div><div id="ovs"></div></div>
 <div id="pbadge"></div>
-<div id="fpsb"><i></i><span id="fpst"></span></div>
 <div id="tdot"></div>
 </div></section>
 </main>
 <aside id="panel">
 <h2>状态</h2>
+<div id="pstat"><i id="pdot"></i><span id="pst">连接中…</span></div>
 <div id="stats">—</div>
-<h2>操作</h2>
-<div class="row"><input type="text" id="text" placeholder="输入文本，回车发送"></div>
-<div class="row">
-<button onclick="sendKey('Enter')">Enter</button>
-<button onclick="sendKey('Backspace')">⌫ 删除</button>
-<button onclick="doReload()">刷新</button>
+<h2>输入</h2>
+<div class="row" id="kbrow" style="display:none">
+<input type="text" id="kbin" placeholder="输入/粘贴后自动发送到云机" autocomplete="off"
+autocapitalize="off" autocorrect="off" spellcheck="false">
 </div>
+<div class="row">
+<button id="kbt">键盘 关</button>
+<button onclick="doCopy()">复制</button>
+<button onclick="doPaste()">粘贴</button>
+</div>
+<h2>操作</h2>
 <div class="row">
 <button onclick="doNav()">回首页</button>
 <button class="acc" onclick="fs()">全屏</button>
+</div>
+<h2>设置</h2>
+<div class="row">
+<span class="lb">触控</span>
+<select id="imode">
+<option value="auto">自动（点击=鼠标，拖动=触摸）</option>
+<option value="touch">触摸（移动页）</option>
+<option value="mouse">鼠标（桌面页）</option>
+</select>
+</div>
+<div class="row">
+<span class="lb">帧率</span>
+<select id="fpsel">
+<option value="25">25 流畅</option>
+<option value="15">15</option>
+<option value="10">10</option>
+<option value="5">5 省流</option>
+<option value="2">2</option>
+<option value="1">1 最省</option>
+</select>
 </div>
 </aside>
 <div id="mask"></div>
@@ -160,10 +194,12 @@ padding-bottom:calc(14px + env(safe-area-inset-bottom))}
 var TK=(new URLSearchParams(location.search)).get('token')||'';
 var VW=414,VH=896,HOME='';
 var live={mode:'none',abort:null,frames:0,last:0,shotTimer:null,shotBusy:false,shotGuard:null};
-var lastFrameAt=0;
+var lastFrameAt=0,HLTH={ok:false,page:''};
 var IMG=document.getElementById('shot');
 var WRAP=document.getElementById('wrap');
 var TD=document.getElementById('tdot');
+var PANEL=document.getElementById('panel'),MASK=document.getElementById('mask');
+var KBIN=document.getElementById('kbin');
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){
 return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function U(p){var u=new URL(p,location.origin);if(TK)u.searchParams.set('token',TK);return u}
@@ -178,15 +214,18 @@ document.getElementById('ovs').textContent=s||'';
 if(t){o.classList.remove('hidden')}else{o.classList.add('hidden')}}
 
 // —— 移动端控制台：点 iOS 风格圆点弹出/收起底部抽屉（桌面端固定右侧栏）——
-var PANEL=document.getElementById('panel'),MASK=document.getElementById('mask');
 function sheet(open){
 if(open){PANEL.classList.add('open');MASK.classList.add('on')}
 else{PANEL.classList.remove('open');MASK.classList.remove('on')}}
 document.getElementById('homei').addEventListener('click',function(){
 sheet(!PANEL.classList.contains('open'))});
 MASK.addEventListener('click',function(){sheet(false)});
+// 面板按钮点击后失焦：键盘输入立刻回到画面（Enter/空格不再误触发按钮）
+PANEL.addEventListener('click',function(ev){
+var b=ev.target.closest?ev.target.closest('button'):null;
+if(b)setTimeout(function(){b.blur()},0)});
 
-// —— 状态轮询（3s）：抽屉状态 + 状态色点（fps 徽标内）+ 视口尺寸（触摸坐标映射基准）——
+// —— 状态轮询（3s）：抽屉状态 + 状态色点（状态行内）+ 视口尺寸（触摸坐标映射基准）——
 var PAGEMAP={loading:'加载中',ok:'页面正常',reloading:'重载中','nav-error':'导航失败·重试中'};
 function pt(s){return PAGEMAP[s]||s||'—'}
 function poll(){
@@ -194,12 +233,14 @@ if(document.hidden)return;   // 切后台不轮询（省唤醒）
 fetch(U('/healthz')).then(function(r){return r.json()}).then(function(j){
 VW=j.vw||414;VH=j.vh||896;
 WRAP.style.aspectRatio=VW+'/'+VH;
-document.getElementById('fpsb').firstElementChild.className=
+HLTH={ok:!!j.ok,page:j.page||''};
+document.getElementById('pdot').className=
 j.ok?(j.page==='nav-error'?'warn':'ok'):'bad';
 if(j.homeUri)HOME=j.homeUri;
 var PB=document.getElementById('pbadge');
 if(j.page==='nav-error'){PB.style.display='block';
 PB.textContent='首页导航失败·引擎自动重试中'}else{PB.style.display='none'}
+syncFpsSel(j.fps);
 document.getElementById('stats').innerHTML=
 '<b>'+esc(j.account||'')+' · '+esc(j.platformLabel||'')+' · '+pt(j.page)+
 (j.exited?' · 已退出云机!':'')+'</b>'+
@@ -211,13 +252,28 @@ document.getElementById('stats').innerHTML=
 (j.lastError?'<br><span class="warn"><b>错误</b> '+
 esc(String(j.lastError).slice(0,100))+'</span>':'')+
 (j.exited?'<br><span class="warn">已退出云机！</span>':'');
-}).catch(function(){document.getElementById('fpsb').firstElementChild.className='bad'});
+}).catch(function(){document.getElementById('pdot').className='bad'});
 }
 poll();setInterval(poll,3000);
 
+// —— 帧率设置：引擎侧 Page.startScreencast maxFrameRate 即刻生效 ——
+var FPSEL=document.getElementById('fpsel');
+function syncFpsSel(fps){
+if(!fps||FPSEL._t)return;
+var has=Array.prototype.some.call(FPSEL.options,function(o){return o.value===String(fps)});
+if(!has){var o=document.createElement('option');o.value=String(fps);o.textContent=fps;
+FPSEL.appendChild(o)}
+FPSEL.value=String(fps);
+}
+FPSEL.addEventListener('change',function(){
+var v=parseInt(this.value,10)||25;this._t=1;this.blur();
+post('/fps','value='+v).then(function(){ping('帧率已设为 '+v+' fps')})
+.catch(function(){ping('帧率设置失败')});
+});
+
 // —— 实时画面：fetch MJPEG 流 → JPEG SOI/EOI 切帧 → Blob 直显 ——
 // 断流（引擎重建/浏览器重启）自动重连；流建立失败 → 截图轮询兜底，8s 后重试实时流
-// 画面新鲜（8s 内有帧）时重连不闪全屏「连接实时画面…」：画面保留，徽标提示等待
+// 画面新鲜（8s 内有帧）时重连不闪全屏「连接实时画面…」：画面保留，状态行提示等待
 function staleShot(){return !lastFrameAt||Date.now()-lastFrameAt>8000}
 function stopLive(){
 if(live.abort){try{live.abort.abort()}catch(e){}live.abort=null}
@@ -296,12 +352,18 @@ if(document.hidden){stopLive();live.mode='paused'}
 else if(live.mode!=='live'){startLive()}
 });
 if(!document.hidden)startLive();  // 后台打开的标签页：回前台再连，落地即省 CPU
+// —— 状态行（fps 已收纳于此）：每秒刷新 fps/连接模式/页面状态 ——
 setInterval(function(){
-var t=document.getElementById('fpst');
-if(live.mode==='paused'){t.textContent='已暂停';return}
-if(live.mode!=='live'){t.textContent='';return}
-var fps=live.frames-live.last;live.last=live.frames;
-t.textContent=(Date.now()-lastFrameAt>3000)?'等帧…':(fps+' fps');
+var f=0,stale=false;
+if(live.mode==='live'){f=live.frames-live.last;live.last=live.frames;
+stale=Date.now()-lastFrameAt>3000}
+var mode=live.mode==='live'?'实时':live.mode==='shot'?'截图':live.mode==='paused'?'已暂停':'连接中';
+var fpsTxt=live.mode==='live'?(stale?'等帧…':f+' fps'):mode;
+document.getElementById('pst').textContent=pt(HLTH.page||'')+' · '+fpsTxt+' · '+mode;
+var dot=document.getElementById('pdot');
+if(!HLTH.ok&&HLTH.page){dot.className='bad'}
+else if(HLTH.page==='nav-error'||stale){dot.className='warn'}
+else if(HLTH.page){dot.className='ok'}
 },1000);
 
 // —— 触摸坐标映射：帧原始尺寸等比换算（object-fit:contain 居中修正）——
@@ -316,61 +378,324 @@ return [Math.max(0,Math.min(nw,(cx-ox)/dw*nw)),Math.max(0,Math.min(nh,(cy-oy)/dh
 function tdotShow(cx,cy){
 var w=WRAP.getBoundingClientRect();
 TD.style.left=(cx-w.left)+'px';TD.style.top=(cy-w.top)+'px';TD.style.display='block'}
-// —— 实时触摸流：按下/移动/抬起逐点直通引擎（CDP Input.dispatchTouchEvent，fire 即答）——
-// 串行化 + 最新点覆盖：引擎响应慢时自动丢弃中间点（最新位置为准，绝不积压）
-var TCH={pending:null,busy:false,down:false,lastMove:0,downAt:0};
-function tsend(phase,x,y){TCH.pending=[phase,x,y];if(!TCH.busy)tpump()}
-function tpump(){
-if(!TCH.pending)return;
-var e=TCH.pending;TCH.pending=null;TCH.busy=true;
-post('/touch','phase='+e[0]+'&x='+e[1].toFixed(1)+'&y='+e[2].toFixed(1))
-.catch(function(){})
-.then(function(){TCH.busy=false;tpump()});
+
+// ══════════════════════════════════════════════════════════════
+// 输入通道：所有远端输入事件（触摸/鼠标/键盘/文本）串行走同一 FIFO，
+// 保证「按下→抬起」「keyDown→keyUp」配对顺序；引擎响应慢时丢弃的是
+// 中途的 move（位置事件），配对事件绝不丢。失败不再静默——节流 toast。
+// ══════════════════════════════════════════════════════════════
+var INQ=[],inBusy=false,inpErrAt=0;
+function iev(b){  // b:{path,body,move?}  move=true 的可丢（拖动/悬停位置流）
+if(b.move){
+INQ=INQ.filter(function(x){return !x.move});  // 位置事件只留最新一条
+INQ.push(b);
+}else{INQ.push(b);
+if(INQ.length>96){ // 极端积压：仍优先保配对事件
+for(var i=0;i<INQ.length;i++){if(INQ[i].move){INQ.splice(i,1);break}}
+}
+}
+if(!inBusy)ipump();
+}
+function ipump(){
+if(!INQ.length){inBusy=false;return}
+inBusy=true;
+var e=INQ.shift();
+post(e.path,e.body).then(function(r){
+if(r&&!r.ok&&Date.now()-inpErrAt>5000){inpErrAt=Date.now();
+ping('输入通道异常：HTTP '+r.status+'（引擎忙/重启）')}
+ipump();
+}).catch(function(){
+if(Date.now()-inpErrAt>5000){inpErrAt=Date.now();ping('输入发送失败（网络）')}
+ipump();
+});
+}
+
+// —— 实时触摸流（CDP Input.dispatchTouchEvent，多点直通）——
+// PTR=当前按下的指针；按下/抬起带变动的触点（Chromium 逐点语义：
+// start 新增 / end 列出释放，空=整组）；移动带全部在按触点（双指缩放协同）
+var PTR=new Map(),TID=0,GT=0,tLastMv=0;
+function fmtPt(p){return p.x.toFixed(1)+','+p.y.toFixed(1)+','+p.tid}
+function allPts(){var a=[];PTR.forEach(function(p){a.push(fmtPt(p))});return a.join(';')}
+function tSend(phase,pts){iev({path:'/touch',move:phase==='move',
+body:'phase='+phase+(pts?'&ps='+encodeURIComponent(pts):'')})}
+function touchDown(ev){
+var p=xy(ev.clientX,ev.clientY);
+if(flushEnd)flushEnd();
+TID++;var tid=((TID-1)%10)+1;   // 触点 id 1..10 循环
+PTR.set(ev.pointerId,{x:p[0],y:p[1],tid:tid,at:Date.now()});
+GT=Math.max(GT,PTR.size);
+tSend('start',fmtPt(PTR.get(ev.pointerId)));
+tdotShow(ev.clientX,ev.clientY);
+}
+function touchMove(ev){
+var pt=PTR.get(ev.pointerId);if(!pt)return;
+var n=Date.now();if(n-tLastMv<33)return;tLastMv=n;  // ≤30 事件/秒：CDP 从容，弱机不积压
+var p=xy(ev.clientX,ev.clientY);
+pt.x=p[0];pt.y=p[1];
+tSend('move',allPts());   // 全部在按触点一起移动（双指缩放协同，不会互相冲掉）
+tdotShow(ev.clientX,ev.clientY);
+}
+var flushEnd=null;  // 延迟中的轻点 end（新按下前冲刷，防 start 被 end 越过）
+function touchUp(ev,phase){
+var pt=PTR.get(ev.pointerId);if(!pt)return;
+PTR.delete(ev.pointerId);
+var isEnd=phase==='end';
+if(PTR.size===0){
+TD.style.display='none';
+var gap=Date.now()-pt.at;
+function fin(){if(flushEnd!==fin)return;flushEnd=null;
+tSend(isEnd?'end':'cancel','')}     // 全部抬起：空点=整组释放（久经验证路径）
+// 轻点补足 ≥60ms 按下时长：贴近真实触摸节奏，保证 tap 手势识别（合成 click）
+if(GT===1&&isEnd&&gap<60){flushEnd=fin;setTimeout(fin,60-gap)}else{fin()}
+GT=0;
+}else{
+// 还有手指按着（双指缩放中途抬一指）：仅释放该触点，手势继续
+tSend(isEnd?'end':'cancel',fmtPt(pt));
+}
+}
+
+// —— 真实鼠标事件（CDP Input.dispatchMouseEvent）：点击/双击/右键/滚轮 ——
+var MBTN={0:'left',1:'middle',2:'right'};
+var MSE={down:false,btn:0,mode:'',x0:0,y0:0,lastMv:0,lastWh:0,cnt:0,ct:0,cx:0,cy:0};
+function mSend(b){iev({path:'/mouse',move:b.indexOf('action=move')===0||b.indexOf('action=wheel')===0,body:b})}
+function clkCnt(p){
+var n=Date.now();
+if(n-MSE.ct<500&&Math.abs(p[0]-MSE.cx)<8&&Math.abs(p[1]-MSE.cy)<8){MSE.cnt=Math.min(3,MSE.cnt+1)}
+else{MSE.cnt=1}
+MSE.ct=n;MSE.cx=p[0];MSE.cy=p[1];return MSE.cnt;
+}
+// 完整点击序列（guaranteed click：页面一定能收到 mousedown/mouseup/click）
+function mClickSeq(p,btn,n,m){
+var bn=MBTN[btn]||'left',bit=btn===0?1:btn===2?2:btn===1?4:0;
+mSend('action=down&x='+p[0].toFixed(1)+'&y='+p[1].toFixed(1)+'&b='+bn+'&n='+n+'&m='+m+'&bb='+bit);
+mSend('action=up&x='+p[0].toFixed(1)+'&y='+p[1].toFixed(1)+'&b='+bn+'&n='+n+'&m='+m+'&bb=0');
+}
+function mouseDown(ev){
+var p=xy(ev.clientX,ev.clientY);
+MSE.down=true;MSE.btn=ev.button;MSE.mode='pend';
+MSE.x0=p[0];MSE.y0=p[1];
+if(IMODE==='mouse'){
+mSend('action=down&x='+p[0].toFixed(1)+'&y='+p[1].toFixed(1)+'&b='+(MBTN[ev.button]||'left')+
+'&n='+clkCnt(p)+'&m='+mods(ev)+'&bb='+(ev.buttons||1));
+}
+// 自动模式：抬起时判定——不动=真实点击序列，移动超阈值=转触摸拖动（移动页滚动）
+}
+function mouseMove(ev){
+var n=Date.now();if(n-MSE.lastMv<33)return;MSE.lastMv=n;
+var p=xy(ev.clientX,ev.clientY);
+if(IMODE==='mouse'){
+mSend('action=move&x='+p[0].toFixed(1)+'&y='+p[1].toFixed(1)+'&b='+
+(ev.buttons?(MBTN[MSE.btn]||'left'):'none')+'&bb='+ev.buttons+'&m='+mods(ev));
+return;
+}
+if(!MSE.down){   // 纯悬停：真实 mouseMoved（桌面页 hover 菜单可用）
+mSend('action=move&x='+p[0].toFixed(1)+'&y='+p[1].toFixed(1)+'&b=none&bb=0&m='+mods(ev));
+return;
+}
+if(MSE.mode==='pend'){
+if(Math.abs(p[0]-MSE.x0)<8&&Math.abs(p[1]-MSE.y0)<8)return;  // 抖动内仍算点击
+MSE.mode='drag';   // 判定拖动 → 从按下点起转触摸流（移动页拖动/滚动跟手）
+TID++;
+PTR.set(ev.pointerId,{x:MSE.x0,y:MSE.y0,tid:((TID-1)%10)+1,at:Date.now()});
+GT=1;
+tSend('start',fmtPt(PTR.get(ev.pointerId)));
+tdotShow(ev.clientX,ev.clientY);
+}
+if(MSE.mode==='drag')touchMove(ev);
+}
+function mouseUp(ev){
+var p=xy(ev.clientX,ev.clientY);
+if(IMODE==='mouse'){
+mSend('action=up&x='+p[0].toFixed(1)+'&y='+p[1].toFixed(1)+'&b='+(MBTN[MSE.btn]||'left')+
+'&n='+clkCnt(p)+'&m='+mods(ev)+'&bb=0');
+MSE.down=false;return;
+}
+if(MSE.mode==='drag'){MSE.down=false;MSE.mode='';touchUp(ev,'end');return}
+if(MSE.mode==='pend'){    // 纯点击（左/右/中键）→ 真实鼠标点击序列（远程合成 click/dblclick/contextmenu）
+MSE.down=false;MSE.mode='';
+mClickSeq(p,MSE.btn,clkCnt(p),mods(ev));
+}
+}
+
+// —— 滚轮：真实 mouseWheel（移动页/桌面页均可滚动）——
+IMG.addEventListener('wheel',function(ev){
+ev.preventDefault();
+var n=Date.now();if(n-MSE.lastWh<40)return;MSE.lastWh=n;
+var p=xy(ev.clientX,ev.clientY);
+var k=ev.deltaMode===1?40:ev.deltaMode===2?800:1;
+mSend('action=wheel&x='+p[0].toFixed(1)+'&y='+p[1].toFixed(1)+
+'&dx='+(ev.deltaX*k).toFixed(1)+'&dy='+(ev.deltaY*k).toFixed(1)+'&m='+mods(ev));
+},{passive:false});
+
+// —— 输入路由：触控方式（自动=鼠标指针走混合模式，触摸指针走触摸流）——
+var IMODE=localStorage.getItem('cpk_imode')||'auto';
+document.getElementById('imode').value=IMODE;
+document.getElementById('imode').addEventListener('change',function(){
+IMODE=this.value;localStorage.setItem('cpk_imode',IMODE);this.blur();
+if(IMODE!=='mouse'){PTR.clear();MSE.down=false;MSE.mode=''}
+});
+function useMousePath(ev){
+if(IMODE==='mouse')return true;
+if(IMODE==='touch')return false;
+return ev.pointerType==='mouse';
 }
 IMG.addEventListener('contextmenu',function(ev){ev.preventDefault()});
 IMG.addEventListener('pointerdown',function(ev){
 ev.preventDefault();
 try{this.setPointerCapture(ev.pointerId)}catch(e){}
-// 先冲刷上一轻点延迟中的 end：保证触摸序列合法（双击 zoom 场景 start→end→start→end）
-if(flushEnd)flushEnd();
-var p=xy(ev.clientX,ev.clientY);
-TCH.down=true;TCH.downAt=Date.now();TCH.lastMove=0;
-tsend('start',p[0],p[1]);
-tdotShow(ev.clientX,ev.clientY);
+if(useMousePath(ev)){mouseDown(ev)}else{touchDown(ev)}
 });
 IMG.addEventListener('pointermove',function(ev){
-if(!TCH.down)return;
-var n=Date.now();if(n-TCH.lastMove<33)return;  // ≤30 点/秒：CDP 从容，弱机不积压
-TCH.lastMove=n;
-var p=xy(ev.clientX,ev.clientY);
-tsend('move',p[0],p[1]);
-tdotShow(ev.clientX,ev.clientY);
+if(useMousePath(ev)){mouseMove(ev)}else{touchMove(ev)}
 });
-var flushEnd=null;  // 延迟中的轻点 end（新按下前冲刷，防 start 被 end 越过）
-function tUp(ev,phase){
-if(!TCH.down)return;TCH.down=false;TD.style.display='none';
-var p=xy(ev.clientX,ev.clientY),gap=Date.now()-TCH.downAt;
-function fin(){if(flushEnd!==fin)return;flushEnd=null;tsend(phase,p[0],p[1])}
-// 轻点补足 ≥60ms 按下时长：贴近真实触摸节奏，保证 tap 手势识别（合成 click）
-if(gap<60){flushEnd=fin;setTimeout(fin,60-gap)}else{fin()}
+function ptrUp(ev,phase){
+if(useMousePath(ev)){
+if(MSE.mode==='drag'){touchUp(ev,phase)}   // 拖动中取消：按触摸流收尾
+else{MSE.down=false;MSE.mode=''}
+}else{touchUp(ev,phase)}
 }
-IMG.addEventListener('pointerup',function(ev){tUp(ev,'end')});
-IMG.addEventListener('pointercancel',function(ev){tUp(ev,'cancel')});
+IMG.addEventListener('pointerup',function(ev){ptrUp(ev,'end')});
+IMG.addEventListener('pointercancel',function(ev){ptrUp(ev,'cancel')});
+
+// ══════════════════════════════════════════════════════════════
+// 键盘：物理键盘全键位直通（CDP Input.dispatchKeyEvent）；
+// 移动端「键盘」开关弹出输入框（IME 拼音/粘贴 → insertText 整段发送）
+// ══════════════════════════════════════════════════════════════
+var KBON=false;
+function kbOn(on){
+KBON=on;
+document.getElementById('kbrow').style.display=on?'flex':'none';
+var b=document.getElementById('kbt');
+b.textContent=on?'键盘 开':'键盘 关';
+if(on){b.classList.add('acc')}else{b.classList.remove('acc')}
+if(on){KBIN.focus()}else{KBIN.blur()}
+}
+document.getElementById('kbt').addEventListener('click',function(){kbOn(!KBON)});
+function mods(ev){return (ev.altKey?1:0)|(ev.ctrlKey?2:0)|(ev.metaKey?4:0)|(ev.shiftKey?8:0)}
+function vkOf(ev){
+var k=ev.key,c=ev.code;
+if(c){
+if(c.indexOf('Key')===0&&c.length===3)return c.charCodeAt(1);
+if(c.indexOf('Digit')===0&&c.length===6)return c.charCodeAt(5);
+var np={Numpad0:96,Numpad1:97,Numpad2:98,Numpad3:99,Numpad4:100,Numpad5:101,
+Numpad6:102,Numpad7:103,Numpad8:104,Numpad9:105,NumpadMultiply:106,NumpadAdd:107,
+NumpadSubtract:109,NumpadDecimal:110,NumpadDivide:111};
+if(np[c])return np[c];
+}
+var m={Enter:13,Backspace:8,Tab:9,Escape:27,Space:32,Delete:46,Insert:45,Home:36,End:35,
+PageUp:33,PageDown:34,ArrowLeft:37,ArrowUp:38,ArrowRight:39,ArrowDown:40,Shift:16,Control:17,
+Alt:18,Meta:91,CapsLock:20,NumLock:144,ScrollLock:145,ContextMenu:93,Pause:19};
+if(m[k]!==undefined)return m[k];
+if(k&&k.length===1){var cc=k.toUpperCase().charCodeAt(0);return cc<128?cc:229}
+if(k&&/^F\d+$/.test(k))return 111+parseInt(k.slice(1),10);
+return 0;
+}
+var KD={};  // 已转发 keydown 的键（keyup 配对转发）
+function kbody(t,ev){
+var printable=t==='down'&&ev.key&&ev.key.length===1&&ev.key>=' '&&ev.key!=='\x7f'&&!ev.ctrlKey&&!ev.metaKey;
+var b='t='+t+'&key='+encodeURIComponent(ev.key||'')+
+'&code='+encodeURIComponent(ev.code||'')+'&vk='+vkOf(ev)+'&m='+mods(ev)+
+'&l='+(ev.location||0)+'&r='+(ev.repeat?1:0);
+if(printable)b+='&text='+encodeURIComponent(ev.key);
+return {path:'/kbd',body:b};
+}
+function kdown(ev){KD[ev.key]=1;iev(kbody('down',ev))}
+function kup(ev){if(KD[ev.key]){delete KD[ev.key];iev(kbody('up',ev))}}
+document.addEventListener('keydown',function(ev){
+var ae=document.activeElement,k=ev.key;
+if(ae&&ae.tagName==='SELECT')return;              // 用户正在操作下拉框
+if(ev.isComposing||k==='Process')return;          // IME 合成中间态
+var inKB=ae===KBIN;
+if(inKB){
+if(k&&k.length===1&&!ev.ctrlKey&&!ev.metaKey)return;   // 可打印字符留在输入框 → insertText
+if(k==='Backspace'){if(KBIN.value)return;ev.preventDefault();kdown(ev);return}
+if(k==='Enter'){ev.preventDefault();kdown(ev);return}
+// 方向键/修饰键/Ctrl 组合等继续直通远端
+}
+if(ev.ctrlKey||ev.metaKey){
+var lk=(k||'').toLowerCase();
+if(lk==='v'&&!ev.shiftKey&&!ev.altKey){
+// 粘贴：本机剪贴板 → 云机（insertText）。键本身不转发（远端剪贴板为空）。
+if(navigator.clipboard&&navigator.clipboard.readText){ev.preventDefault();doPaste()}
+else{KBIN.focus()}   // 非安全上下文：聚焦输入框让原生粘贴落入 → input 事件转发
+return;
+}
+if((lk==='c'||lk==='x')&&!ev.shiftKey&&!ev.altKey){
+ev.preventDefault();kdown(ev);doCopy();return    // 转发按键（页面自身复制逻辑）+ 同步到本机
+}
+if(lk==='a'&&!ev.shiftKey&&!ev.altKey){ev.preventDefault();kdown(ev);return}
+if(lk==='r'){ev.preventDefault();kdown(ev);doReload();return}
+}
+if(k==='F5'){ev.preventDefault();kdown(ev);return}   // F5 → 云机刷新而非本页刷新
+if(k===' '||k==='Enter'||k==='Tab'||k==='Backspace'||k.indexOf('Arrow')===0){
+ev.preventDefault()}   // 不触发本页滚动/焦点移动/按钮激活
+kdown(ev);
+});
+document.addEventListener('keyup',function(ev){
+if(document.activeElement&&document.activeElement.tagName==='SELECT')return;
+kup(ev);
+});
+
+// —— 键盘输入框（移动端 IME / 粘贴落点）：内容即发即清 ——
+KBIN.addEventListener('input',function(ev){
+if(ev.isComposing||ev.inputType==='insertFromPaste')return;
+sendKbText();
+});
+KBIN.addEventListener('compositionend',function(){setTimeout(sendKbText,30)});
+function sendKbText(){
+var v=KBIN.value;
+if(v){iev({path:'/type',body:'text='+encodeURIComponent(v)});KBIN.value=''}
+}
+// 原生粘贴落入输入框：paste 事件统一接管（阻止本地插入，直接转发远端）
+document.addEventListener('paste',function(ev){
+ev.preventDefault();
+var t=ev.clipboardData?ev.clipboardData.getData('text/plain'):'';
+if(t){iev({path:'/type',body:'text='+encodeURIComponent(t)});ping('已粘贴 '+t.length+' 字')}
+});
+
+// —— 剪贴板：云机选区 → 本机（复制）；本机剪贴板 → 云机（粘贴）——
+function legacyCopy(t){
+return new Promise(function(res,rej){
+var ta=document.createElement('textarea');ta.value=t;
+ta.style.cssText='position:fixed;left:-9999px;top:0;opacity:0';
+document.body.appendChild(ta);ta.focus();ta.select();
+var ok=false;try{ok=document.execCommand('copy')}catch(e){}
+setTimeout(function(){document.body.removeChild(ta);
+ok?res():rej(new Error('copy denied'))},0);
+});
+}
+function copyLocal(t){
+if(navigator.clipboard&&navigator.clipboard.writeText){
+return navigator.clipboard.writeText(t).catch(function(){return legacyCopy(t)});
+}
+return legacyCopy(t);
+}
+function doCopy(){
+fetch(U('/clip')).then(function(r){return r.ok?r.text():Promise.reject('HTTP '+r.status)})
+.then(function(t){
+if(!t){ping('云机无选中文本');return}
+copyLocal(t).then(function(){ping('已复制 '+t.length+' 字到本机')},
+function(){ping('本机复制被浏览器拒绝')});
+}).catch(function(){ping('读取云机选区失败')});
+}
+function doPaste(){
+if(navigator.clipboard&&navigator.clipboard.readText){
+navigator.clipboard.readText().then(function(t){
+if(!t){ping('本机剪贴板为空');return}
+iev({path:'/type',body:'text='+encodeURIComponent(t)});
+ping('已粘贴 '+t.length+' 字');
+}).catch(function(){kbOn(true);
+ping('无剪贴板权限：已弹出输入框，Ctrl+V 或长按粘贴')});
+}else{kbOn(true);ping('已弹出输入框：Ctrl+V 或长按粘贴')}
+}
+
 // —— 面板操作 ——
-function sendKey(k){post('/key','key='+encodeURIComponent(k)).then(function(){ping('按键 '+k)})}
 function doReload(){post('/reload','').then(function(){ping('已刷新页面')})}
 function doNav(){if(!HOME){ping('未知首页地址');return}
 post('/nav','url='+encodeURIComponent(HOME)).then(function(){ping('已回首页')})}
 function fs(){var el=document.documentElement;
 if(document.fullscreenElement){document.exitFullscreen()}
 else if(el.requestFullscreen){el.requestFullscreen()}}
-document.getElementById('text').addEventListener('keydown',function(ev){
-if(ev.key!=='Enter')return;
-var v=this.value;this.value='';
-post('/type','text='+encodeURIComponent(v)).then(function(){
-return post('/key','key=Enter');
-}).then(function(){ping('已输入 '+v.slice(0,24))});
-});
 </script></body></html>"#;
 
 /// 启动服务（端口绑定必须在保活脚本注入前完成——脚本里写死了端口号）
@@ -675,7 +1000,8 @@ fn route(
             control_void(ctrl, move |reply| ControlRequest::Swipe { x1, y1, x2, y2, reply })
         }
         "/touch" => {
-            // 实时触摸流：phase 在 HTTP 层校验（非法 400，不占引擎）；坐标与 /tap 同坐标系
+            // 实时触摸流：phase/ps 在 HTTP 层校验（非法 400，不占引擎）；坐标与 /tap 同坐标系。
+            // 单点兼容：phase + x/y；多点：ps="x1,y1,id1;x2,y2,id2"（Chromium 逐点语义）
             let phase = req
                 .query
                 .get("phase")
@@ -689,9 +1015,125 @@ fn route(
                     b"phase must be start/move/end/cancel".to_vec(),
                 );
             }
+            let ps = req
+                .query
+                .get("ps")
+                .or_else(|| req.form.get("ps"))
+                .cloned()
+                .unwrap_or_default();
+            let points: Vec<TouchPoint> = if !ps.is_empty() {
+                match parse_touch_points(&ps) {
+                    Some(v) => v,
+                    None => {
+                        return (
+                            400,
+                            "text/plain; charset=utf-8".into(),
+                            b"ps must be x,y,id triples joined by ; (id 1..=10)".to_vec(),
+                        )
+                    }
+                }
+            } else {
+                let x = num(&req.query, &req.form, "x");
+                let y = num(&req.query, &req.form, "y");
+                vec![TouchPoint { x, y, id: 1 }]
+            };
+            control_void(ctrl, move |reply| ControlRequest::Touch { phase, points, reply })
+        }
+        "/mouse" => {
+            // 真实鼠标事件：action/action 按钮在 HTTP 层校验；坐标与 /touch 同坐标系。
+            // move=悬停/拖动，down/up=按下/抬起（clickCount 支撑双击/三击），
+            // wheel=滚轮（dx/dy 像素）。修饰键位图：Alt=1 Ctrl=2 Meta=4 Shift=8
+            let action = req
+                .query
+                .get("action")
+                .or_else(|| req.form.get("action"))
+                .cloned()
+                .unwrap_or_default();
+            if !matches!(action.as_str(), "move" | "down" | "up" | "wheel") {
+                return (
+                    400,
+                    "text/plain; charset=utf-8".into(),
+                    b"action must be move/down/up/wheel".to_vec(),
+                );
+            }
+            let button = req
+                .query
+                .get("b")
+                .or_else(|| req.form.get("b"))
+                .cloned()
+                .unwrap_or_else(|| "left".into());
+            if !matches!(button.as_str(), "none" | "left" | "right" | "middle") {
+                return (
+                    400,
+                    "text/plain; charset=utf-8".into(),
+                    b"b must be none/left/right/middle".to_vec(),
+                );
+            }
             let x = num(&req.query, &req.form, "x");
             let y = num(&req.query, &req.form, "y");
-            control_void(ctrl, move |reply| ControlRequest::Touch { phase, x, y, reply })
+            let dx = num(&req.query, &req.form, "dx");
+            let dy = num(&req.query, &req.form, "dy");
+            let buttons = unum(&req.query, &req.form, "bb") as u32;
+            let click_count = (unum(&req.query, &req.form, "n") as u32).clamp(1, 3);
+            let modifiers = (unum(&req.query, &req.form, "m") as u32).min(31);
+            control_void(ctrl, move |reply| ControlRequest::Mouse {
+                action, x, y, button, buttons, click_count, dx, dy, modifiers, reply,
+            })
+        }
+        "/kbd" => {
+            // 键盘事件全字段直通：t=down/up；key/code 限长防滥用；vk 0..=255；
+            // text ≤16 字符（长文本/粘贴走 /type insertText）
+            let typ = req
+                .query
+                .get("t")
+                .or_else(|| req.form.get("t"))
+                .cloned()
+                .unwrap_or_default();
+            if !matches!(typ.as_str(), "down" | "up") {
+                return (
+                    400,
+                    "text/plain; charset=utf-8".into(),
+                    b"t must be down/up".to_vec(),
+                );
+            }
+            let key = take(&req, "key", 32);
+            let code = take(&req, "code", 32);
+            let vk = (unum(&req.query, &req.form, "vk") as u32).min(65535);
+            let text = take(&req, "text", 16);
+            let modifiers = (unum(&req.query, &req.form, "m") as u32).min(31);
+            let location = (unum(&req.query, &req.form, "l") as u32).min(3);
+            let auto_repeat = matches!(
+                req.query.get("r").or_else(|| req.form.get("r")).map(|s| s.as_str()),
+                Some("1" | "true")
+            );
+            control_void(ctrl, move |reply| ControlRequest::KeyEvent {
+                typ, key, code, vk, text, modifiers, location, auto_repeat, reply,
+            })
+        }
+        "/clip" => {
+            // 云机选区 → 控制页（控制页写入本机剪贴板）：复制按钮/Ctrl+C 数据源
+            let (tx, rx) = std::sync::mpsc::channel();
+            if ctrl.send(ControlRequest::ClipGet { reply: tx }).is_err() {
+                return (500, "text/plain".into(), b"engine unavailable".to_vec());
+            }
+            match rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(Ok(t)) => (200, "text/plain; charset=utf-8".into(), t.into_bytes()),
+                Ok(Err(e)) => (500, "text/plain; charset=utf-8".into(), e.into_bytes()),
+                Err(_) => (504, "text/plain".into(), b"engine busy / timeout".to_vec()),
+            }
+        }
+        "/fps" => {
+            // 帧率上限：1..=60；引擎侧 stop+start 重建 screencast 生效
+            let fps = unum(&req.query, &req.form, "value");
+            if !(1..=60).contains(&fps) {
+                return (
+                    400,
+                    "text/plain; charset=utf-8".into(),
+                    b"value must be 1..=60".to_vec(),
+                );
+            }
+            let fps = fps as u32;
+            control_void(ctrl, move |reply| ControlRequest::SetFps { fps, reply })
         }
         "/type" => {
             let text = req
@@ -747,6 +1189,56 @@ fn num(query: &HashMap<String, String>, form: &HashMap<String, String>, key: &st
         .or_else(|| form.get(key))
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(0.0)
+}
+
+/// 无符号整数参数（非法/缺失 → 0）
+fn unum(query: &HashMap<String, String>, form: &HashMap<String, String>, key: &str) -> u64 {
+    query
+        .get(key)
+        .or_else(|| form.get(key))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// 字符串参数截断（限长防滥用）
+fn take(req: &Req, key: &str, max_chars: usize) -> String {
+    req.query
+        .get(key)
+        .or_else(|| req.form.get(key))
+        .cloned()
+        .unwrap_or_default()
+        .chars()
+        .take(max_chars)
+        .collect()
+}
+
+/// 多点触控参数解析："x1,y1,id1;x2,y2,id2"（id 1..=10，最多 10 点）
+fn parse_touch_points(s: &str) -> Option<Vec<TouchPoint>> {
+    let mut v = Vec::new();
+    for part in s.split(';') {
+        if part.is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = part.split(',').collect();
+        if f.len() != 3 {
+            return None;
+        }
+        let x: f64 = f[0].trim().parse().ok()?;
+        let y: f64 = f[1].trim().parse().ok()?;
+        let id: i64 = f[2].trim().parse().ok()?;
+        if !(1..=10).contains(&id) {
+            return None;
+        }
+        v.push(TouchPoint { x, y, id });
+        if v.len() > 10 {
+            return None;
+        }
+    }
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
 }
 
 fn screenshot(ctrl: &Sender<ControlRequest>) -> Result<Vec<u8>, String> {
@@ -1006,9 +1498,95 @@ mod tests {
         assert!(body4.contains("pointermove"), "控制页缺实时拖动接线");
         assert!(body4.contains("visibilitychange"), "控制页缺后台暂停接线");
         assert!(body4.contains("homei"), "控制页缺移动端圆点菜单");
-        assert!(body4.contains("id=\"fpsb\""), "控制页缺 fps 徽标");
+        assert!(body4.contains("id=\"pstat\""), "控制页缺状态面板（fps 收纳处）");
+        assert!(body4.contains("id=\"fpsel\""), "控制页缺帧率设置");
+        assert!(body4.contains("id=\"kbin\""), "控制页缺键盘输入框");
+        assert!(!body4.contains("id=\"fpsb\""), "fps 悬浮徽标应已移入状态面板");
+        assert!(body4.contains("pointer-events:none"), "提示层不应挡触摸");
         assert!(!body4.contains("上滑"), "方向滑动按钮应已删除");
+        assert!(!body4.contains("sendKey"), "旧按键按钮应已删除");
         assert!(!body4.contains("<header"), "顶栏应已删除");
+    }
+
+    #[test]
+    fn mouse_kbd_fps_clip_endpoint_guards() {
+        // /mouse：action/按钮非法 → 400；合法但引擎不可用 → 500（已过参数校验）
+        let (port, _shared, _tx) = start_server("");
+        let (st, body) = http(
+            port,
+            "GET /mouse?action=poke&x=1&y=2 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 400);
+        assert!(body.contains("action"), "{body}");
+        let (st, _) = http(
+            port,
+            "GET /mouse?action=down&x=1&y=2&b=left&n=1&m=0&bb=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 500);
+        let (st, _) = http(
+            port,
+            "GET /mouse?action=wheel&x=1&y=2&dx=0&dy=120 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 500);
+        // /kbd：t 非法 → 400；合法 → 500（引擎不可用）
+        let (st, body) = http(
+            port,
+            "GET /kbd?t=press&key=a HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 400);
+        assert!(body.contains("down/up"), "{body}");
+        let (st, _) = http(
+            port,
+            "GET /kbd?t=down&key=a&code=KeyA&vk=65&text=a&m=0 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 500);
+        // /fps：越界 → 400；合法 → 500（引擎不可用）
+        let (st, _) = http(
+            port,
+            "GET /fps?value=99 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 400);
+        let (st, _) = http(
+            port,
+            "GET /fps?value=10 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 500);
+        // /clip：引擎不可用 → 500
+        let (st, body) = http(
+            port,
+            "GET /clip HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 500);
+        assert!(body.contains("engine unavailable"), "{body}");
+        // /touch 多点：ps 非法 → 400；合法多点 → 500（已过参数校验）
+        let (st, _) = http(
+            port,
+            "GET /touch?phase=start&ps=1,2,3;bad HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 400);
+        let (st, _) = http(
+            port,
+            "GET /touch?phase=start&ps=100,200,1;400,600,2 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 500);
+    }
+
+    #[test]
+    fn touch_points_parsing() {
+        // 多点解析："x,y,id;…"，id 1..=10，最多 10 点
+        let v = parse_touch_points("100.5,200.5,1;400.0,600.0,2").unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].x, 100.5);
+        assert_eq!(v[1].y, 600.0);
+        assert_eq!(v[1].id, 2);
+        assert!(parse_touch_points("").is_none());
+        assert!(parse_touch_points("1,2").is_none());
+        assert!(parse_touch_points("1,2,3,4").is_none());
+        assert!(parse_touch_points("1,2,0").is_none()); // id 超下界
+        assert!(parse_touch_points("1,2,11").is_none()); // id 超上界
+        assert!(parse_touch_points("a,b,1").is_none());
+        let many = "1,1,1;2,2,2;3,3,3;4,4,4;5,5,5;6,6,6;7,7,7;8,8,8;9,9,9;10,10,10;11,11,11";
+        assert!(parse_touch_points(many).is_none()); // 超 10 点
     }
 
     #[test]
