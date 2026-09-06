@@ -15,7 +15,10 @@
 //!  - POST /kbd               键盘事件全字段直通（t=down/up，key/code/vk/text/mods）
 //!  - POST /type              文本插入（Input.insertText；输入法/粘贴整段发送）
 //!  - GET  /clip              读取云机选中文本（云机 → 本机剪贴板）
-//!  - POST /fps               运行时帧率上限（Page.startScreencast maxFrameRate）
+//!  - POST /fps               运行时帧率上限（引擎侧软件限帧，实测 Chrome 152
+//!                            maxFrameRate 参数无效）
+//!  - POST /platform          运行时平台切换（mobile/unicom；换首页/视口/保活脚本，
+//!                            云机实例自动重启，Profile 保留双平台登录态）
 //!  - POST /tap /swipe /key /nav /reload  控制端点（token 可选保护；兼容保留）
 //!
 //!  说明：控制端点经 channel 由引擎线程用 CDP Input 域执行 = 内核级触摸模拟，
@@ -168,6 +171,13 @@ autocapitalize="off" autocorrect="off" spellcheck="false">
 </div>
 <h2>设置</h2>
 <div class="row">
+<span class="lb">平台</span>
+<select id="psel">
+<option value="mobile">移动云手机</option>
+<option value="unicom">联通云手机</option>
+</select>
+</div>
+<div class="row">
 <span class="lb">触控</span>
 <select id="imode">
 <option value="auto">自动（点击=鼠标，拖动=触摸）</option>
@@ -242,6 +252,7 @@ var PB=document.getElementById('pbadge');
 if(j.page==='nav-error'){PB.style.display='block';
 PB.textContent='首页导航失败·引擎自动重试中'}else{PB.style.display='none'}
 syncFpsSel(j.fps);
+syncPlatSel(j.platform);
 document.getElementById('stats').innerHTML=
 '<b>'+esc(j.account||'')+' · '+esc(j.platformLabel||'')+' · '+pt(j.page)+
 (j.exited?' · 已退出云机!':'')+'</b>'+
@@ -271,6 +282,19 @@ FPSEL.addEventListener('change',function(){
 var v=parseInt(this.value,10)||25;this._t=1;this.blur();
 post('/fps','value='+v).then(function(){ping('帧率已设为 '+v+' fps')})
 .catch(function(){ping('帧率设置失败')});
+});
+
+// —— 平台切换（移动/联通）：healthz 同步 + POST /platform；
+// 引擎换首页/视口/保活脚本后重启云机实例（约 10 秒），流自动重连
+var PLSEL=document.getElementById('psel');
+function syncPlatSel(p){
+if(!p||PLSEL._t)return;
+PLSEL.value=(p==='unicom')?'unicom':'mobile';
+}
+PLSEL.addEventListener('change',function(){
+var v=this.value;this._t=1;this.blur();
+post('/platform','value='+v).then(function(){ping('平台切换中：云机实例重启（约 10 秒）',5000)})
+.catch(function(){ping('平台切换失败（引擎忙/重启中）')});
 });
 
 // —— 实时画面：fetch MJPEG 流 → JPEG SOI/EOI 切帧 → Blob 直显 ——
@@ -1154,8 +1178,27 @@ fn route(
                 Err(_) => (504, "text/plain".into(), b"engine busy / timeout".to_vec()),
             }
         }
+        "/platform" => {
+            // 平台运行时切换：mobile/unicom（HTTP 层校验）。引擎更新共享状态后
+            // 重启云机实例（新视口/新保活脚本 CFG/新首页导航）
+            let p = req
+                .query
+                .get("value")
+                .or_else(|| req.form.get("value"))
+                .cloned()
+                .unwrap_or_default();
+            if !matches!(p.as_str(), "mobile" | "unicom") {
+                return (
+                    400,
+                    "text/plain; charset=utf-8".into(),
+                    b"value must be mobile/unicom".to_vec(),
+                );
+            }
+            control_void(ctrl, move |reply| ControlRequest::SetPlatform { platform: p, reply })
+        }
         "/fps" => {
-            // 帧率上限：1..=60；引擎侧 stop+start 重建 screencast 生效
+            // 帧率上限：1..=60；引擎侧软件限帧即刻生效（Chrome 152 的
+            // startScreencast maxFrameRate 参数实测无效，见 cdp.rs push_frame）
             let fps = unum(&req.query, &req.form, "value");
             if !(1..=60).contains(&fps) {
                 return (
@@ -1573,6 +1616,37 @@ mod tests {
         assert!(body3.contains("Notification.permission"), "控制页缺系统通知权限申请");
         assert!(body3.contains("lastStatus"), "控制页未消费 lastStatus");
         assert!(body3.contains("j.title"), "控制页未显示页面标题");
+    }
+
+    #[test]
+    fn platform_endpoint_guards_and_page_wiring() {
+        // /platform：非法值 → 400（HTTP 层校验）；合法值但引擎不可用 → 500
+        let (port, _shared, _tx) = start_server("");
+        let (st, body) = http(
+            port,
+            "POST /platform HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 13\r\nConnection: close\r\n\r\nvalue=telecom",
+        );
+        assert_eq!(st, 400);
+        assert!(body.contains("mobile/unicom"), "{body}");
+        let (st, _) = http(
+            port,
+            "POST /platform HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 12\r\nConnection: close\r\n\r\nvalue=unicom",
+        );
+        assert_eq!(st, 500);
+        // token 保护与其它控制端点同策略
+        let (port2, _shared2, _tx2) = start_server("s3cret");
+        let (st2, _) = http(
+            port2,
+            "POST /platform HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\nConnection: close\r\n\r\nvalue=unicom",
+        );
+        assert_eq!(st2, 403);
+        // 控制页接线：平台选择器 + healthz 同步 + POST
+        let (st3, body3) = http(port2, "GET /?token=s3cret HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        assert_eq!(st3, 200);
+        assert!(body3.contains("id=\"psel\""), "控制页缺平台选择器");
+        assert!(body3.contains(">联通云手机</option>"), "控制页缺联通选项");
+        assert!(body3.contains("syncPlatSel"), "控制页缺平台同步逻辑");
+        assert!(body3.contains("/platform"), "控制页缺平台切换接线");
     }
 
     #[test]

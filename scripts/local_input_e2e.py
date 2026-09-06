@@ -25,11 +25,24 @@ body{margin:0;font:16px sans-serif;background:#111;color:#fff}
 #ti{font-size:20px;padding:14px;width:80%;margin:20px 0 0 5%}
 #scr{height:220px;overflow-y:scroll;background:#222;margin:20px 5%;padding:6px}
 #scr p{height:80px;border-bottom:1px solid #444}
+#ani{position:fixed;top:0;left:0;width:100%;height:3px;background:#fff}
 </style></head><body>
+<canvas id="ani" width="414" height="896"></canvas>
 <div id="btn">点我（0）</div>
 <input id="ti" placeholder="键盘输入测试">
 <div id="scr"><p>1</p><p>2</p><p>3</p><p>4</p><p>5</p><p>6</p><p>7</p><p>8</p></div>
 <script>
+// 动画 canvas：持续重绘（合成器恒有新帧 → 软件限帧可测）
+(function(){var c=document.getElementById('ani'),x=c.getContext('2d');
+function draw(){x.fillStyle='#111';x.fillRect(0,0,414,896);
+x.fillStyle='#'+((Date.now()/16|0)%4096).toString(16).padStart(3,'0');
+x.fillRect(0,(Date.now()/8)%800,414,10);
+requestAnimationFrame(draw)}draw()})();
+// busy 模式（?busy=1）：主线程周期性阻塞 3.5s/5s——模拟真实云机页
+// （WebRTC 视频/重 JS）让引擎 eval 常态秒级，检验输入泵让点击仍即时可达
+if(location.search.indexOf('busy=1')>=0){
+setInterval(function(){var t=Date.now();while(Date.now()-t<3500);},5000);
+}
 var n=0;
 function log(m){try{fetch('/log',{method:'POST',
 headers:{'content-type':'application/x-www-form-urlencoded'},
@@ -227,6 +240,94 @@ post("/touch", "phase=end&x=207&y=98")
 clicks = wait_events(lambda e: e.startswith("click#"), 3.0)
 check("/nav 返回毫秒级（fire 化）", nav_ms < 400, f"{nav_ms:.0f}ms")
 check("导航后触摸立即可用（回首页回归）", clicks, f"{clicks}")
+
+# ── 11) 重页面输入延迟（输入泵：eval 阻塞期点击仍即时可达）──
+events.clear()
+post("/nav", "url=" + urllib.parse.quote(f"http://127.0.0.1:{PORT}/t.html?busy=1"), timeout=10)
+time.sleep(2.5)   # 等新文档加载 + busy 定时器起转
+t_busy = time.time()
+post("/mouse", "action=down&x=207&y=98&b=left&n=1&m=0&bb=1")
+post("/mouse", "action=up&x=207&y=98&b=left&n=1&m=0&bb=0")
+got = []
+t0 = time.time()
+while time.time() - t0 < 9:
+    got = [e for e in events if e.startswith("click#")]
+    if got: break
+    time.sleep(0.2)
+busy_ms = (time.time() - t_busy) * 1000
+# busy 页主线程阻塞最长 3.5s（渲染侧固有）+ 泵修复后引擎侧 ≤0.2s ≈ 3.7s；
+# 无输入泵时引擎 tick(5s超时)+sample(8s超时) eval 串行占线程，点击排队 7s+
+check("重页面点击即时可达（输入泵）", bool(got) and busy_ms < 6000,
+      f"点击→页面收到 {busy_ms:.0f}ms {'有事件' if got else '无事件'}")
+
+# ── 12) 软件限帧：fps 目标值精确生效（maxFrameRate 无效的替代）──
+def stream_count(seconds):
+    resp = get("/stream.mjpg", seconds + 8)
+    t0 = time.time(); n = 0; buf = b""
+    while time.time() - t0 < seconds:
+        chunk = resp.read(65536)
+        if not chunk: break
+        buf += chunk
+    return buf.count(b"\xff\xd8")
+post("/nav", "url=" + urllib.parse.quote(f"http://127.0.0.1:{PORT}/t.html"), timeout=10)
+time.sleep(2.0)
+post("/fps", "value=5")
+time.sleep(1.0)
+f5 = stream_count(6)
+post("/fps", "value=30")
+time.sleep(1.0)
+f30 = stream_count(6)
+check("软件限帧 fps=5 精确生效", 15 <= f5 <= 45, f"6s {f5} 帧（≈{f5/6:.1f} fps）")
+check("软件限帧 fps=30 放开", f30 > f5, f"6s {f30} 帧（≈{f30/6:.1f} fps）")
+post("/fps", "value=25")
+
+# ── 13) 平台运行时切换：healthz 即刻回显 + 实例重启生效 ─────
+def hz_read(t=8):
+    # 重启期 healthz 合法返回 503（浏览器 stopped）——按 JSON 读而非异常
+    import urllib.error
+    try:
+        return json.loads(get("/healthz", t).read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read().decode())
+        except Exception:
+            return {}
+    except Exception:
+        return {}
+hz0 = hz_read()
+r0 = hz0.get("restarts", 0)
+post("/platform", "value=unicom", timeout=25)
+time.sleep(1.0)
+hz1 = hz_read()
+check("/platform→healthz 即刻回显", hz1.get("platform") == "unicom"
+      and hz1.get("platformLabel") == "联通云手机"
+      and hz1.get("vw") == 405 and hz1.get("vh") == 720,
+      f"{hz1.get('platform')}/{hz1.get('vw')}x{hz1.get('vh')}")
+# 重启异步完成（kill+relaunch+attach 约 10s）：等计数上升而非 1s 即查
+r_new = r0
+t0 = time.time()
+while time.time() - t0 < 40:
+    if hz_read(5).get("restarts", 0) > r0:
+        r_new = hz_read(5).get("restarts", 0); break
+    time.sleep(1.5)
+check("平台切换触发实例重启", r_new > r0, f"restarts {r0}→{r_new}")
+# 等联通首页加载（真实站点，网络可达；CI 无网时容忍 nav-error）
+ok_uni = False
+t0 = time.time()
+while time.time() - t0 < 60:
+    hz = hz_read(5)
+    if hz.get("page") == "ok" or "uphone" in (hz.get("pageUrl") or ""):
+        ok_uni = True; break
+    if hz.get("page") == "nav-error":
+        break
+    time.sleep(2)
+check("联通平台首页加载", ok_uni, f"page={hz.get('page')} url={ (hz.get('pageUrl') or '')[:50]}")
+# 切回移动（回到真实移动站）
+post("/platform", "value=mobile", timeout=25)
+time.sleep(1.0)
+hz2 = hz_read()
+check("切回移动平台", hz2.get("platform") == "mobile" and hz2.get("vw") == 414,
+      f"{hz2.get('platform')}/{hz2.get('vw')}x{hz2.get('vh')}")
 
 proc.send_signal(signal.SIGTERM)
 try: proc.wait(10)

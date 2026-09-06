@@ -105,6 +105,13 @@ autocapitalize="off" autocorrect="off" spellcheck="false">
 </div>
 <h2>设置</h2>
 <div class="row">
+<span class="lb">平台</span>
+<select id="psel">
+<option value="mobile">移动云手机</option>
+<option value="unicom">联通云手机</option>
+</select>
+</div>
+<div class="row">
 <span class="lb">触控</span>
 <select id="imode">
 <option value="auto">自动（点击=鼠标，拖动=触摸）</option>
@@ -179,6 +186,7 @@ var PB=document.getElementById('pbadge');
 if(j.page==='nav-error'){PB.style.display='block';
 PB.textContent='首页导航失败·引擎自动重试中'}else{PB.style.display='none'}
 syncFpsSel(j.fps);
+syncPlatSel(j.platform);
 document.getElementById('stats').innerHTML=
 '<b>'+esc(j.account||'')+' · '+esc(j.platformLabel||'')+' · '+pt(j.page)+
 (j.exited?' · 已退出云机!':'')+'</b>'+
@@ -208,6 +216,19 @@ FPSEL.addEventListener('change',function(){
 var v=parseInt(this.value,10)||25;this._t=1;this.blur();
 post('/fps','value='+v).then(function(){ping('帧率已设为 '+v+' fps')})
 .catch(function(){ping('帧率设置失败')});
+});
+
+// —— 平台切换（移动/联通）：healthz 同步 + POST /platform；
+// 引擎换首页/视口/保活脚本后重启云机实例（约 10 秒），流自动重连
+var PLSEL=document.getElementById('psel');
+function syncPlatSel(p){
+if(!p||PLSEL._t)return;
+PLSEL.value=(p==='unicom')?'unicom':'mobile';
+}
+PLSEL.addEventListener('change',function(){
+var v=this.value;this._t=1;this.blur();
+post('/platform','value='+v).then(function(){ping('平台切换中：云机实例重启（约 10 秒）',5000)})
+.catch(function(){ping('平台切换失败（引擎忙/重启中）')});
 });
 
 // —— 实时画面：fetch MJPEG 流 → JPEG SOI/EOI 切帧 → Blob 直显 ——

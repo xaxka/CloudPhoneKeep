@@ -32,6 +32,11 @@ pub struct Cdp {
     /// 当前 screencast 目标帧率（控制面板 /fps 可运行时调整；重建 CDP 会话时
     /// 从 SharedState 恢复，设置跨重连存活）
     screencast_fps: u32,
+    /// 软件限帧基准：上次向订阅者推帧时刻。
+    /// 实测 Chrome 152 的 Page.startScreencast maxFrameRate 参数无效
+    /// （设 5 仍以合成器帧率 ~30fps 发帧），帧率上限由本侧丢帧实现：
+    /// 距上次推送不足 1000/fps ms 的帧直接丢弃（ack 照发，Chrome 不受影响）
+    last_frame_push: Option<Instant>,
 }
 
 /// 「最新帧信箱」：生产者覆盖写入（旧帧直接作废，观看端永远拿到最新画面），
@@ -162,6 +167,7 @@ impl Cdp {
             sinks: Vec::new(),
             screencast_active: false,
             screencast_fps: 25,
+            last_frame_push: None,
         })
     }
 
@@ -206,6 +212,24 @@ impl Cdp {
         session: Option<&str>,
         timeout_ms: u64,
     ) -> Result<Value, String> {
+        self.call_pumped(method, params, session, timeout_ms, &mut |_c| {})
+    }
+
+    /// call() 的可泵变体：等待应答的每个 200ms 空窗期回调 `pump`——
+    /// 引擎用它把控制通道里的输入事件（fire 即发，不占等待）即时分发出去，
+    /// 消灭「页面慢 eval 阻塞引擎线程 → 触摸/点击排队秒级」的输入锁死：
+    /// 真实云机页（WebRTC 视频）上 tick/采样 eval 常态秒级，旧结构下
+    /// 控制请求最长早 13s 无人应答（点击「没用」/ /fps 超时的根因）。
+    /// 回调在等待空窗内独占 &mut Cdp（发 fire 类消息不影响 id 配对），
+    /// 绝不在读到消息的周期里回调（避免与事件分发重入）。
+    pub fn call_pumped(
+        &mut self,
+        method: &str,
+        params: Value,
+        session: Option<&str>,
+        timeout_ms: u64,
+        pump: &mut dyn FnMut(&mut Cdp),
+    ) -> Result<Value, String> {
         let (id, text) = self.build_msg(method, params, session);
         self.ws
             .send_text(&text)
@@ -237,7 +261,11 @@ impl Cdp {
                     }
                 }
                 Ok(WsMessage::Close) => return Err(format!("WS: 连接已关闭({method})")),
-                Err(crate::ws::WsError::Timeout) => continue, // 本轮 poll 无消息
+                Err(crate::ws::WsError::Timeout) => {
+                    // 本轮 poll 无消息：等待空窗——泵入输入事件（fire 类，不占等待）
+                    pump(self);
+                    continue;
+                }
                 Err(e) => return Err(format!("WS: 读取错误({method}): {e:?}")),
             }
         }
@@ -277,11 +305,18 @@ impl Cdp {
     }
 
     /// 向所有订阅者推送一帧（screencast 事件与首帧兜底共用）：
-    /// 覆盖写入信箱（丢旧保新）：观看端永远拿到最新画面，旧帧作废不排队
+    /// 覆盖写入信箱（丢旧保新）：观看端永远拿到最新画面，旧帧作废不排队。
+    /// 软件限帧（Chrome 152 maxFrameRate 无效，实测设 5 仍 ~30fps 发帧）：
+    /// 距上次推送不足 1000/fps ms 的帧直接丢弃——ack 已先行（Chromium 不受
+    /// 影响，合成器照常出帧），观看端帧率精确受限；无人观看不记账。
     pub fn push_frame(&mut self, frame: Vec<u8>) {
         if self.sinks.is_empty() {
             return;
         }
+        if frame_throttled(self.last_frame_push, Instant::now(), self.screencast_fps) {
+            return;
+        }
+        self.last_frame_push = Some(Instant::now());
         for (_, box_) in &self.sinks {
             box_.post(frame.clone());
         }
@@ -328,23 +363,11 @@ impl Cdp {
     }
 
     /// 运行时调整实时画面帧率（控制面板「设置 → 帧率」）。
-    /// 流在跑则 stop+start 重建（maxFrameRate 只在 start 时生效）；
-    /// 无人观看只记值，下次订阅自动生效。
-    pub fn set_screencast_fps(&mut self, fps: u32, session: &str) {
+    /// 软件限帧（见 push_frame）：只更新目标值即刻生效，无需重启 cast
+    /// （实测 Chrome 152 stop+start 重建也不改变发帧频率——maxFrameRate
+    /// 参数本身无效，重启反而白白造成一次流空窗）。
+    pub fn set_screencast_fps(&mut self, fps: u32, _session: &str) {
         self.screencast_fps = fps.clamp(1, 60);
-        if self.screencast_active {
-            self.fire("Page.stopScreencast", json!({}), Some(session));
-            self.fire(
-                "Page.startScreencast",
-                json!({
-                    "format": "jpeg",
-                    "quality": 50,
-                    "everyNthFrame": 1,
-                    "maxFrameRate": self.screencast_fps
-                }),
-                Some(session),
-            );
-        }
     }
 
     /// 稳态循环空闲期泵取并分发 WS 消息（实时画面帧/事件）——
@@ -414,11 +437,21 @@ pub fn eval_string(cdp: &mut Cdp, session: &str, expr: &str, timeout_ms: u64) ->
         .to_string())
 }
 
+/// 软件限帧判定（纯函数，可单测）：距上次推送不足 1000/fps ms → 丢帧。
+/// last=None（首次/重新订阅）永不丢。
+fn frame_throttled(last: Option<Instant>, now: Instant, fps: u32) -> bool {
+    let min_gap = Duration::from_millis(1000 / fps.clamp(1, 60) as u64);
+    match last {
+        Some(t) => now.duration_since(t) < min_gap,
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FramePoll, FrameSlot, Cdp};
+    use super::{frame_throttled, FramePoll, FrameSlot, Cdp};
     use serde_json::json;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn ws_error_prefix_convention() {
@@ -487,6 +520,24 @@ mod tests {
         eprintln!("Rust 客户端 8s 帧数={frames} 每秒={:?}", per_sec);
         cdp.close();
         assert!(frames >= 60, "Rust 客户端帧率过低：{frames}（python 同环境 60fps）→ 瓶颈在 ws.rs/cdp.rs");
+    }
+
+    /// 软件限帧判定：5fps → 200ms 内的连发第二帧丢弃；超窗通过；首次不丢；
+    /// fps 乱序值（0/999）clamp 到安全区间不 panic。
+    #[test]
+    fn frame_throttle_decision() {
+        let t0 = Instant::now();
+        assert!(!frame_throttled(None, t0, 5), "首次推送永不丢");
+        assert!(frame_throttled(Some(t0), t0 + Duration::from_millis(50), 5), "200ms 窗内应丢");
+        assert!(frame_throttled(Some(t0), t0 + Duration::from_millis(199), 5), "接近窗口仍丢");
+        assert!(!frame_throttled(Some(t0), t0 + Duration::from_millis(201), 5), "超窗应过");
+        // 60fps 窗口 16ms：快速连发仍受限，但 20ms 间隔应通过
+        assert!(frame_throttled(Some(t0), t0 + Duration::from_millis(10), 60));
+        assert!(!frame_throttled(Some(t0), t0 + Duration::from_millis(20), 60));
+        // 边界 fps：0 clamp→1（窗口 1000ms），999 clamp→60（窗口 16ms），不 panic
+        assert!(frame_throttled(Some(t0), t0 + Duration::from_millis(300), 0));
+        assert!(!frame_throttled(Some(t0), t0 + Duration::from_millis(1100), 0));
+        assert!(!frame_throttled(Some(t0), t0 + Duration::from_millis(300), 999));
     }
 
     #[test]

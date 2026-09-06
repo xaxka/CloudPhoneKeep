@@ -5,8 +5,11 @@
 //!               （每 1s 经 CDP 驱动页面 __CPK_TICK__（stopCheck 1s + actionTick
 //!                 intervalMs 双定时器语义，与 Windows 隐藏态看门狗同一模型）；
 //!                每 5s 采样 __CPK_STATE__ + 取走 __CPK_DRAIN__ 诊断缓冲）
-//!   [HTTP 线程] 回环上报/控制端点；控制请求（截图/触摸/输入）经 channel
-//!               交给引擎线程串行执行（每 tick 周期清空一次，延迟 ≤1s）
+//!   [HTTP 线程] 回环上报/控制端点；控制请求经 channel 交给引擎线程执行：
+//!               快通道（触摸/鼠标/键盘/文本/导航/限帧）fire 即发——在 eval
+//!               等待空窗（200ms 节拍）由 InputPump 即时分发（延迟 ≤200ms，
+//!               真实云机页 eval 常态秒级也不锁死输入）；慢通道（截图/剪贴
+//!               板/流订阅/平台切换）由稳态循环空闲期处理，阻塞等待期间继续泵
 //!
 //! 恢复分级（对齐 Windows 版思路）：
 //!   tick 连续失败 / 状态冻结 / 脚本缺失 → 页面导航回首页
@@ -14,13 +17,14 @@
 //!   → 重连无效 / Chromium 退出 / 心跳超龄 → 重启 Chromium（指数退避 5s→300s）
 
 use crate::cdp::{self, Cdp, FrameBox};
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::keepalive;
 use crate::logger::Logger;
 use crate::util;
 use serde_json::{json, Value};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -78,6 +82,17 @@ pub struct Health {
     /// 页面上报的最近一次状态（alive/retry/enter/…/exited/expired）；
     /// 状态迁移供控制页发通知（对齐 Windows 版系统通知）
     pub last_status: String,
+}
+
+/// 运行时平台全貌（控制面板 /platform 切换后由 SharedState 持有；
+/// 引擎的重启/重注入/导航全部以此为单一事实源，cfg 仅提供初值）
+#[derive(Clone)]
+pub struct PlatformInfo {
+    pub platform: String,
+    pub label: String,
+    pub url: String,
+    pub vw: u32,
+    pub vh: u32,
 }
 
 pub struct SharedState {
@@ -179,6 +194,42 @@ impl SharedState {
     pub fn set_last_error(&self, e: &str) { self.update(|h| h.last_error = e.into()); }
     /// 页面标题更新（采样周期回读；控制页状态显示）
     pub fn set_title(&self, s: &str) { self.update(|h| if h.title != s { h.title = s.into(); }); }
+    /// 当前平台全貌（首页 URL/视口随切换实时生效）
+    pub fn platform(&self) -> PlatformInfo {
+        self.health
+            .lock()
+            .map(|g| PlatformInfo {
+                platform: g.platform.clone(),
+                label: g.platform_label.clone(),
+                url: g.home_uri.clone(),
+                vw: g.vw,
+                vh: g.vh,
+            })
+            .unwrap_or_else(|_| PlatformInfo {
+                platform: "mobile".into(),
+                label: config::PLATFORM_MOBILE_LABEL.into(),
+                url: config::PLATFORM_MOBILE_URI.into(),
+                vw: config::PLATFORM_MOBILE_W,
+                vh: config::PLATFORM_MOBILE_H,
+            })
+    }
+    /// 运行时切换平台（/platform）：更新 Health 平台字段（healthz 即刻可见）。
+    /// 未知平台返回 false（HTTP 层已校验，此处兑底）
+    pub fn set_platform(&self, platform: &str) -> bool {
+        match config::platform_profile(platform) {
+            Some((label, url, vw, vh)) => {
+                self.update(|h| {
+                    h.platform = platform.to_string();
+                    h.platform_label = label.to_string();
+                    h.home_uri = url.to_string();
+                    h.vw = vw;
+                    h.vh = vh;
+                });
+                true
+            }
+            None => false,
+        }
+    }
     /// 页面上报状态记录（/report；控制页据此检测状态迁移并发通知）
     pub fn set_status(&self, s: &str) { self.update(|h| h.last_status = s.into()); }
     pub fn touch_beat(&self) { self.last_beat_ms.store(util::now_ms(), Ordering::Relaxed); }
@@ -264,6 +315,10 @@ pub enum ControlRequest {
     ClipGet { reply: Sender<Result<String, String>> },
     /// 运行时调整实时画面帧率（控制面板「设置 → 帧率」）
     SetFps { fps: u32, reply: Sender<Result<(), String>> },
+    /// 切换平台（/platform）：更新共享状态（healthz 即刻回显）+ 重启云机实例
+    /// （重注入平台对应 CFG 的保活脚本 + 新视口 + 导航新首页——与冷启动同路径，
+    /// 登录态在同一 Profile 里两平台共存，切换后已登过的平台无需重登）
+    SetPlatform { platform: String, reply: Sender<Result<(), String>> },
     TypeText { text: String, reply: Sender<Result<(), String>> },
     Key { key: String, reply: Sender<Result<(), String>> },
     Navigate { url: String, reply: Sender<Result<(), String>> },
@@ -304,6 +359,8 @@ enum SteadyOutcome {
     Reattach,
     /// 升级/进程退出/心跳超龄：重启 Chromium
     Restart,
+    /// 平台切换（/platform）：重启 Chromium 并按新平台重注入/导航/视口
+    PlatformRestart,
     /// 收到停止信号
     Stop,
 }
@@ -326,6 +383,7 @@ fn drain_ctrl_fail(ctrl_rx: &Receiver<ControlRequest>, reason: &str) {
             ControlRequest::KeyEvent { reply, .. } => { let _ = reply.send(Err(r)); }
             ControlRequest::ClipGet { reply } => { let _ = reply.send(Err(r)); }
             ControlRequest::SetFps { reply, .. } => { let _ = reply.send(Err(r)); }
+            ControlRequest::SetPlatform { reply, .. } => { let _ = reply.send(Err(r)); }
             ControlRequest::TypeText { reply, .. } => { let _ = reply.send(Err(r)); }
             ControlRequest::Key { reply, .. } => { let _ = reply.send(Err(r)); }
             ControlRequest::Navigate { reply, .. } => { let _ = reply.send(Err(r)); }
@@ -351,7 +409,6 @@ fn sleep_drain(dur: Duration, ctrl_rx: &Receiver<ControlRequest>, reason: &str) 
 }
 
 fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<SharedState>, ctrl_rx: Receiver<ControlRequest>) {
-    let script = keepalive::build_init_script(cfg, report_port);
     let mut backoff: u64 = 5;
     let mut restarts: u32 = 0;
     let mut child: Option<Child> = None;
@@ -364,11 +421,15 @@ fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<
             kill_child(&mut child, &logger);
             return;
         }
+        // 每轮取当前平台全貌：/platform 切换后重启路径据此换视口/脚本/首页
+        // （cfg 仅提供启动初值；SharedState 为运行时单一事实源）
+        let cur = shared.platform();
+        let script = keepalive::build_init_script_for(&cur.platform, &cur.url, cfg, report_port);
 
         // —— 1. Chromium 进程 ——
         if child.is_none() {
             shared.set_browser("starting");
-            match launch_chrome(cfg, &logger) {
+            match launch_chrome(cfg, cur.vw, cur.vh, &logger) {
                 Ok(c) => {
                     child = Some(c);
                 }
@@ -399,7 +460,7 @@ fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<
                 }
             };
             cdp_port = port;
-            match attach_all(cfg, port, &script, &shared, &logger, true) {
+            match attach_all(cfg, port, &script, &cur.url, &shared, &logger, true) {
                 Ok((c, s)) => {
                     shared.set_chrome_version(&c.browser);
                     cdp = Some(c);
@@ -437,6 +498,20 @@ fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<
                 kill_child(&mut child, &logger);
                 return;
             }
+            SteadyOutcome::PlatformRestart => {
+                // /platform 切换：重启 Chromium（新视口）+ 新平台脚本重注入 +
+                // 导航新首页（外层循环顶部重读 shared.platform() 全部生效）。
+                // 不退避：用户主动操作，立即重启；不给 backoff 累加
+                if let Some(mut c) = cdp.take() {
+                    c.close();
+                }
+                kill_child(&mut child, &logger);
+                shared.set_browser("stopped");
+                shared.set_page("loading");
+                shared.set_last_error("");
+                sleep_drain(Duration::from_millis(300), &ctrl_rx, "平台切换中，云机实例重启");
+                continue 'outer;
+            }
             SteadyOutcome::Reattach => {
                 logger.log(0, "sys", "CDP 传输断裂，重建会话（Chromium 进程保留，页面不重载）");
                 // 立刻清空积压：触摸/导航/订阅请求全部快速失败（毫秒级反馈），
@@ -457,7 +532,7 @@ fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<
                             break;
                         }
                     }
-                    match attach_all(cfg, cdp_port, &script, &shared, &logger, false) {
+                    match attach_all(cfg, cdp_port, &script, &cur.url, &shared, &logger, false) {
                         Ok((mut c, s)) => {
                             // 探测当前文档是否已有脚本：无则导航（新文档经 addScript 自动注入）
                             let has = cdp::eval_string(&mut c, &s, PROBE_EXPR, 5000)
@@ -465,8 +540,8 @@ fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<
                                 .unwrap_or(false);
                             if !has {
                                 logger.log(1, "nav", "重连后当前文档无保活脚本，导航回首页");
-                                // 发后即忘：不给引擎线程排 20s 阻塞调用，恢复由采样回看
-                                c.fire("Page.navigate", json!({ "url": cfg.url }), Some(&s));
+                                // 发后即忘：不给引擎线程挂 20s 阻塞调用，恢复由采样回看
+                                c.fire("Page.navigate", json!({ "url": cur.url }), Some(&s));
                             }
                             cdp = Some(c);
                             session = s;
@@ -541,6 +616,17 @@ fn steady_loop(
         nav_backoff: Duration::from_secs(5),
         nav_next_retry: None,
     };
+    // 输入泵：慢 eval（tick 5s 超时/采样 8s 超时）的等待空窗里即时分发
+    // 快通道请求（触摸/鼠标/键盘/导航/限帧），慢通道暂存由下方循环顶处理。
+    // 真实云机页（WebRTC/重 JS）eval 常态秒级——没有这个泵，点击/限帧
+    // 请求要等 eval 结束才被看一眼（最长 ~13s），用户侧即「点击没用」
+    let mut pump = InputPump {
+        ctrl_rx,
+        shared,
+        logger,
+        session,
+        pending: VecDeque::new(),
+    };
     let mut next_tick = Instant::now();
     let mut next_sample = Instant::now() + Duration::from_secs(5);
     let mut last_progress = Instant::now();
@@ -563,14 +649,32 @@ fn steady_loop(
                 return SteadyOutcome::Restart;
             }
         }
-        // 控制请求（每个监督周期清空一次；单请求超时上限 15s）
-        while let Ok(req) = ctrl_rx.try_recv() {
-            if let Err(e) = handle_control(cdp, session, shared, req, logger) {
-                logger.log(0, "error", &format!("控制请求处理失败：{e}"));
-                if e.starts_with("WS:") {
-                    return SteadyOutcome::Reattach;
+        // 控制请求（每个监督周期清空一次）：先处理 eval 等待期间暂存的慢请求，
+        // 再捞新请求。快请求也走 handle_control（快通道 arm 是 fire 即发，
+        // 不阻塞）；返回 true = 平台切换 → 重启实例生效
+        let mut platform_switched = false;
+        loop {
+            let req = if let Some(r) = pump.pending.pop_front() {
+                r
+            } else {
+                match ctrl_rx.try_recv() {
+                    Ok(r) => r,
+                    Err(_) => break,
+                }
+            };
+            match handle_control(cdp, session, shared, req, logger, &mut pump) {
+                Ok(true) => platform_switched = true,
+                Ok(false) => {}
+                Err(e) => {
+                    logger.log(0, "error", &format!("控制请求处理失败：{e}"));
+                    if e.starts_with("WS:") {
+                        return SteadyOutcome::Reattach;
+                    }
                 }
             }
+        }
+        if platform_switched {
+            return SteadyOutcome::PlatformRestart;
         }
 
         let now = Instant::now();
@@ -578,7 +682,7 @@ fn steady_loop(
         if now >= next_tick {
             next_tick = now + Duration::from_secs(1);
             let t0 = Instant::now();
-            let r = cdp::eval_string(cdp, session, TICK_EXPR, 5000);
+            let r = eval_string_pumped(cdp, session, TICK_EXPR, 5000, &mut pump);
             let dt = t0.elapsed();
             if dt > Duration::from_millis(300) {
                 logger.log(0, "sys", &format!("慢调用诊断: tick eval {dt:?}"));
@@ -643,7 +747,7 @@ fn steady_loop(
         if now >= next_sample {
             next_sample = now + Duration::from_secs(5);
             let t1 = Instant::now();
-            let r2 = cdp::eval_string(cdp, session, SNAPSHOT_EXPR, 8000);
+            let r2 = eval_string_pumped(cdp, session, SNAPSHOT_EXPR, 8000, &mut pump);
             let dt2 = t1.elapsed();
             if dt2 > Duration::from_millis(300) {
                 logger.log(0, "sys", &format!("慢调用诊断: sample eval {dt2:?}"));
@@ -787,11 +891,12 @@ fn steady_loop(
 fn nav_error_step(
     cdp: &mut Cdp,
     session: &str,
-    cfg: &Config,
+    _cfg: &Config,
     shared: &Arc<SharedState>,
     stats: &mut Stats,
     logger: &Arc<Logger>,
 ) -> Result<(), String> {
+    let url = shared.platform().url;
     shared.set_page("nav-error");
     if !stats.nav_err_active {
         stats.nav_err_active = true;
@@ -808,12 +913,12 @@ fn nav_error_step(
         logger.log(
             1,
             "nav",
-            &format!("导航重试（退避 {}s）：{}", stats.nav_backoff.as_secs(), cfg.url),
+            &format!("导航重试（退避 {}s）：{}", stats.nav_backoff.as_secs(), url),
         );
-        spawn_nav_probe(cfg, shared, logger);
+        spawn_nav_probe(&url, shared, logger);
         // 发后即忘：导航命令已投递；失败与否由下轮采样看 URL 判定（同步等应答
         // 会在 DNS 不通时占住引擎线程最长 15s，把实时流订阅/触摸全部压在队尾）
-        cdp.fire("Page.navigate", json!({ "url": cfg.url }), Some(session));
+        cdp.fire("Page.navigate", json!({ "url": url }), Some(session));
         Ok(())
     } else {
         Ok(())
@@ -822,8 +927,8 @@ fn nav_error_step(
 
 /// 网络层探测（独立线程）：区分容器 DNS 不通 / TCP 不通 / 均正常但站点层拒绝。
 /// 探测期间页面已恢复（page_is_error=false）则丢弃结论，不覆盖恢复态。
-fn spawn_nav_probe(cfg: &Config, shared: &Arc<SharedState>, logger: &Arc<Logger>) {
-    let url = cfg.url.clone();
+fn spawn_nav_probe(url: &str, shared: &Arc<SharedState>, logger: &Arc<Logger>) {
+    let url = url.to_string();
     let shared = shared.clone();
     let logger = logger.clone();
     let _ = thread::Builder::new()
@@ -843,38 +948,124 @@ fn spawn_nav_probe(cfg: &Config, shared: &Arc<SharedState>, logger: &Arc<Logger>
 fn nav_home(
     cdp: &mut Cdp,
     session: &str,
-    cfg: &Config,
+    _cfg: &Config,
     shared: &Arc<SharedState>,
     stats: &mut Stats,
     logger: &Arc<Logger>,
 ) -> Result<(), String> {
+    let url = shared.platform().url;
     stats.reloads_window += 1;
     shared.bump_reloads();
     shared.set_page("reloading");
-    logger.log(1, "nav", &format!("恢复性导航 {}", cfg.url));
+    logger.log(1, "nav", &format!("恢复性导航 {url}"));
     // 发后即忘：不等应答（理由同 nav_error_step），成败由采样周期回看 URL
-    cdp.fire("Page.navigate", json!({ "url": cfg.url }), Some(session));
+    cdp.fire("Page.navigate", json!({ "url": url }), Some(session));
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// 控制请求执行（CDP Input 域 = 内核级触摸/输入模拟）
+// 控制请求执行：快通道（fire 即发）与慢通道（需等 CDP 应答）分离。
+// 真实云机页（WebRTC 视频/重 JS）上 tick/采样 eval 常态秒级——旧结构在
+// eval 等待期间完全不服务控制通道，点击/限帧请求最长 ~13s 无人应答
+// （点击「没用」、/fps 超时的共同根因）。现在 eval 等待空窗（200ms 节拍）
+// 由 InputPump 即时分发快通道请求；慢通道暂存待稳态循环空闲期处理，
+// 其自身的阻塞等待也经 call_pumped 继续泵入新到的快通道请求。
 // ---------------------------------------------------------------------------
 
+/// 快通道判别：fire 即发（不等 CDP 应答，占用 <0.1ms）的请求类型。
+/// 在 Cdp::call_pumped 等待空窗里穿插发送不影响应答 id 配对。
+fn is_fast(req: &ControlRequest) -> bool {
+    matches!(
+        req,
+        ControlRequest::Touch { .. }
+            | ControlRequest::Mouse { .. }
+            | ControlRequest::KeyEvent { .. }
+            | ControlRequest::SetFps { .. }
+            | ControlRequest::TypeText { .. }
+            | ControlRequest::Key { .. }
+            | ControlRequest::Navigate { .. }
+            | ControlRequest::Reload { .. }
+            | ControlRequest::ScreencastDetach { .. }
+    )
+}
+
+/// eval 等待期间的输入泵：快通道即时分发（延迟 ≤200ms），慢通道暂存
+struct InputPump<'a> {
+    ctrl_rx: &'a Receiver<ControlRequest>,
+    shared: &'a Arc<SharedState>,
+    logger: &'a Arc<Logger>,
+    session: &'a str,
+    pending: VecDeque<ControlRequest>,
+}
+
+impl<'a> InputPump<'a> {
+    /// 排空控制通道：快通道即时经 fire 分发，慢通道入暂存队列。
+    /// 只在 Cdp::call_pumped 的等待空窗内被调用（此时 WS 无消息在途读取，
+    /// 穿插发送 fire 类消息不影响应答 id 配对）。WS 断裂仅记日志——
+    /// 外层 eval 的读循环会撞到同一断连并统一走重建路径。
+    fn drain(&mut self, cdp: &mut Cdp) {
+        while let Ok(req) = self.ctrl_rx.try_recv() {
+            if !is_fast(&req) {
+                self.pending.push_back(req);
+                continue;
+            }
+            if let Err(e) = dispatch_input(cdp, self.session, self.shared, req, self.logger) {
+                self.logger.log(0, "error", &format!("输入泵分发失败：{e}"));
+            }
+        }
+    }
+}
+
+/// 可泵 eval（与 cdp::eval_string 同语义，但等待应答的空窗期持续泵入
+/// 快通道控制请求——输入延迟 ≤200ms 而非最长 13s）
+fn eval_string_pumped(
+    cdp: &mut Cdp,
+    session: &str,
+    expr: &str,
+    timeout_ms: u64,
+    pump: &mut InputPump,
+) -> Result<String, String> {
+    let v = cdp.call_pumped(
+        "Runtime.evaluate",
+        json!({ "expression": expr, "returnByValue": true, "awaitPromise": false }),
+        Some(session),
+        timeout_ms,
+        &mut |c| pump.drain(c),
+    )?;
+    if let Some(d) = v.get("exceptionDetails") {
+        return Err(format!("evaluate 异常: {d}"));
+    }
+    Ok(v
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string())
+}
+
+/// 慢通道请求处理（需等 CDP 应答）：阻塞等待期间经 call_pumped 继续
+/// 服务快通道请求。返回 true = 平台已切换，引擎需重启实例生效。
 fn handle_control(
     cdp: &mut Cdp,
     session: &str,
     shared: &Arc<SharedState>,
     req: ControlRequest,
     logger: &Arc<Logger>,
-) -> Result<(), String> {
+    pump: &mut InputPump,
+) -> Result<bool, String> {
+    // 快通道分流：fire 即发（稳态循环直接调用与 eval 等待空窗泵入共用本入口）
+    if is_fast(&req) {
+        dispatch_input(cdp, session, shared, req, logger)?;
+        return Ok(false);
+    }
     match req {
         ControlRequest::Screenshot { reply } => {
-            let v = cdp.call(
+            let v = cdp.call_pumped(
                 "Page.captureScreenshot",
                 json!({ "format": "jpeg", "quality": 70 }),
                 Some(session),
                 15000,
+                &mut |c| pump.drain(c),
             )?;
             let b64 = v.get("data").and_then(|x| x.as_str()).ok_or("截图无 data")?;
             let bytes = util::base64_decode(b64);
@@ -890,6 +1081,97 @@ fn handle_control(
             swipe(cdp, session, x1, y1, x2, y2)?;
             let _ = reply.send(Ok(()));
         }
+        ControlRequest::ClipGet { reply } => {
+            // 云机选区 → 控制页（控制页写入本机剪贴板）：页面普通选区 +
+            // 输入框内选区，最多 64KB（防异常超大选区拖垮 HTTP 层）
+            let r = eval_string_pumped(cdp, session, CLIP_EXPR, 5000, pump);
+            let out = match r {
+                Ok(s) => serde_json::from_str::<Value>(&s)
+                    .ok()
+                    .and_then(|v| v.get("t").and_then(|x| x.as_str()).map(|t| t.to_string()))
+                    .unwrap_or_default(),
+                Err(e) => {
+                    if e.starts_with("WS:") {
+                        return Err(e);
+                    }
+                    String::new()
+                }
+            };
+            let cut: String = out.chars().take(65536).collect();
+            let _ = reply.send(Ok(cut));
+        }
+        ControlRequest::ScreencastAttach { reply } => {
+            match cdp.screencast_subscribe(session) {
+                Ok(sub) => {
+                    // 先应答后补帧：HTTP 层零等待；弱机/引擎忙时截图再慢也只影响首帧
+                    // 到达时刻，不影响连接建立（TTFB）
+                    let _ = reply.send(Ok(sub));
+                    // 首帧兑底：静态页/错误页合成器无更新，screencast 可能长期不发帧 →
+                    // 立即截一帧推给所有订阅者，保证流打开就有画面（也盖住重连空窗）。
+                    // 阻塞等待期间继续泵入快通道输入请求
+                    match cdp.call_pumped(
+                        "Page.captureScreenshot",
+                        json!({ "format": "jpeg", "quality": 60 }),
+                        Some(session),
+                        8000,
+                        &mut |c| pump.drain(c),
+                    ) {
+                        Ok(v) => {
+                            if let Some(b64) = v.get("data").and_then(|x| x.as_str()) {
+                                cdp.push_frame(util::base64_decode(b64));
+                            }
+                        }
+                        Err(e) => {
+                            if e.starts_with("WS:") {
+                                return Err(e);
+                            }
+                            // 命令级失败（页面忙等）：screencast 事件帧照常会到，仅记日志
+                            logger.log(1, "sys", &format!("实时流首帧兑底截图未成：{e}"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    logger.log(0, "error", &format!("实时画面流开启失败：{e}"));
+                    let _ = reply.send(Err(e));
+                }
+            }
+        }
+        ControlRequest::SetPlatform { platform, reply } => {
+            // 平台切换：共享状态即刻更新（healthz 马上回显新平台/视口/首页），
+            // 引擎重启实例后按新平台重注入脚本 + 新视口 + 导航新首页。
+            // Profile 不变：两平台登录态共存，已登过的平台切换后无需重登
+            if shared.set_platform(&platform) {
+                logger.log(0, "sys", &format!("平台切换 → {platform}，重启云机实例"));
+                let _ = reply.send(Ok(()));
+                return Ok(true);
+            }
+            let _ = reply.send(Err(format!("未知平台：{platform}")));
+        }
+        // 快通道由 dispatch_input 处理（稳态循环直接调用时也先经 is_fast 分流）
+        ControlRequest::Touch { .. }
+        | ControlRequest::Mouse { .. }
+        | ControlRequest::KeyEvent { .. }
+        | ControlRequest::SetFps { .. }
+        | ControlRequest::TypeText { .. }
+        | ControlRequest::Key { .. }
+        | ControlRequest::Navigate { .. }
+        | ControlRequest::Reload { .. }
+        | ControlRequest::ScreencastDetach { .. } => {
+            unreachable!("快通道请求不应进入慢通道处理")
+        }
+    }
+    Ok(false)
+}
+
+/// 快通道分发（fire 即发，无等待；eval 等待空窗里可安全穿插）
+fn dispatch_input(
+    cdp: &mut Cdp,
+    session: &str,
+    shared: &Arc<SharedState>,
+    req: ControlRequest,
+    logger: &Arc<Logger>,
+) -> Result<(), String> {
+    match req {
         ControlRequest::Touch { phase, points, reply } => {
             // fire 即发即答：Input.dispatchTouchEvent 的应答无信息量，同步等 CDP
             // 应答曾在弱机上占 1-5s（tap 手势窗口 ~300ms 早过了，轻点直接失效；
@@ -972,27 +1254,8 @@ fn handle_control(
             cdp.fire_checked("Input.dispatchKeyEvent", params, Some(session))?;
             let _ = reply.send(Ok(()));
         }
-        ControlRequest::ClipGet { reply } => {
-            // 云机选区 → 控制页（控制页写入本机剪贴板）：页面普通选区 +
-            // 输入框内选区，最多 64KB（防异常超大选区拖垮 HTTP 层）
-            let r = cdp::eval_string(cdp, session, CLIP_EXPR, 5000);
-            let out = match r {
-                Ok(s) => serde_json::from_str::<Value>(&s)
-                    .ok()
-                    .and_then(|v| v.get("t").and_then(|x| x.as_str()).map(|t| t.to_string()))
-                    .unwrap_or_default(),
-                Err(e) => {
-                    if e.starts_with("WS:") {
-                        return Err(e);
-                    }
-                    String::new()
-                }
-            };
-            let cut: String = out.chars().take(65536).collect();
-            let _ = reply.send(Ok(cut));
-        }
         ControlRequest::SetFps { fps, reply } => {
-            // 流在跑则 stop+start 重建（maxFrameRate 只在 start 时生效）；
+            // 软件限帧（Chrome 152 maxFrameRate 无效）：只记目标值即刻生效；
             // 值存 SharedState——CDP 重建后沿用（用户设置不因重连丢失）
             shared.set_fps(fps);
             cdp.set_screencast_fps(fps, session);
@@ -1024,43 +1287,18 @@ fn handle_control(
             cdp.fire_checked("Page.reload", json!({ "ignoreCache": true }), Some(session))?;
             let _ = reply.send(Ok(()));
         }
-        ControlRequest::ScreencastAttach { reply } => {
-            match cdp.screencast_subscribe(session) {
-                Ok(sub) => {
-                    // 先应答后补帧：HTTP 层零等待；弱机/引擎忙时截图再慢也只影响首帧
-                    // 到达时刻，不影响连接建立（TTFB）
-                    let _ = reply.send(Ok(sub));
-                    // 首帧兑底：静态页/错误页合成器无更新，screencast 可能长期不发帧 →
-                    // 立即截一帧推给所有订阅者，保证流打开就有画面（也盖住重连空窗）
-                    match cdp.call(
-                        "Page.captureScreenshot",
-                        json!({ "format": "jpeg", "quality": 60 }),
-                        Some(session),
-                        8000,
-                    ) {
-                        Ok(v) => {
-                            if let Some(b64) = v.get("data").and_then(|x| x.as_str()) {
-                                cdp.push_frame(util::base64_decode(b64));
-                            }
-                        }
-                        Err(e) => {
-                            if e.starts_with("WS:") {
-                                return Err(e);
-                            }
-                            // 命令级失败（页面忙等）：screencast 事件帧照常会到，仅记日志
-                            logger.log(1, "sys", &format!("实时流首帧兑底截图未成：{e}"));
-                        }
-                    }
-                }
-                Err(e) => {
-                    logger.log(0, "error", &format!("实时画面流开启失败：{e}"));
-                    let _ = reply.send(Err(e));
-                }
-            }
-        }
         ControlRequest::ScreencastDetach { id, reply } => {
             cdp.screencast_unsubscribe(id, session);
             let _ = reply.send(Ok(()));
+        }
+        // 慢通道由 handle_control 处理
+        ControlRequest::Screenshot { .. }
+        | ControlRequest::Tap { .. }
+        | ControlRequest::Swipe { .. }
+        | ControlRequest::ClipGet { .. }
+        | ControlRequest::ScreencastAttach { .. }
+        | ControlRequest::SetPlatform { .. } => {
+            unreachable!("慢通道请求不应进入快通道分发")
         }
     }
     Ok(())
@@ -1150,12 +1388,18 @@ fn key_event(cdp: &mut Cdp, session: &str, key: &str) -> Result<(), String> {
 /// 构造 Chromium 启动参数（低内存 + 保活语义 + WebRTC 可用；
 /// 与 Node 版 buildArgs 逐项一致）
 pub fn build_args(cfg: &Config) -> Vec<String> {
+    build_args_with(cfg, cfg.width, cfg.height)
+}
+
+/// 平台运行时切换（/platform）需要按 SharedState 当前视口重建参数：
+/// cfg.width/height 只是启动初值，切换后以本变体传入实时值
+pub fn build_args_with(cfg: &Config, vw: u32, vh: u32) -> Vec<String> {
     let mut a: Vec<String> = vec![
         format!("--user-data-dir={}", cfg.profile_dir.display()),
         format!("--remote-debugging-port={}", cfg.cdp_port), // 0 = 自动分配（读 DevToolsActivePort）
         "--remote-debugging-address=127.0.0.1".into(),       // DevTools 只在回环暴露
         "--remote-allow-origins=*".into(), // 允许外部 DevTools 一次性登录（仅回环暴露）
-        format!("--window-size={},{}", cfg.width, cfg.height),
+        format!("--window-size={},{}", vw, vh),
         "--force-device-scale-factor=1".into(),
         "--hide-scrollbars".into(), // 截图/实时画面无滚动条，视口与触摸坐标严格对齐
         "--no-first-run".into(),
@@ -1192,8 +1436,8 @@ pub fn build_args(cfg: &Config) -> Vec<String> {
     a
 }
 
-fn launch_chrome(cfg: &Config, logger: &Arc<Logger>) -> Result<Child, String> {
-    let args = build_args(cfg);
+fn launch_chrome(cfg: &Config, vw: u32, vh: u32, logger: &Arc<Logger>) -> Result<Child, String> {
+    let args = build_args_with(cfg, vw, vh);
     logger.log(
         0,
         "sys",
@@ -1265,6 +1509,7 @@ fn attach_all(
     cfg: &Config,
     port: u16,
     script: &str,
+    url: &str,
     shared: &Arc<SharedState>,
     logger: &Arc<Logger>,
     navigate: bool,
@@ -1324,7 +1569,7 @@ fn attach_all(
         10000,
     )?;
     if navigate {
-        let r = cdp.call("Page.navigate", json!({ "url": cfg.url }), Some(&session), 20000)?;
+        let r = cdp.call("Page.navigate", json!({ "url": url }), Some(&session), 20000)?;
         // 同步期失败（DNS/连接/TLS）以 errorText 回报：留在结果字段而非协议错误。
         // 留痕 + 写 lastError；错误页停留由稳态采样的 chrome-error 检测接管重试
         match r.get("errorText").and_then(|x| x.as_str()) {
@@ -1332,7 +1577,7 @@ fn attach_all(
                 logger.log(0, "nav", &format!("初始导航失败：{et}"));
                 shared.set_last_error(&format!("导航失败：{et}"));
             }
-            _ => logger.log(1, "nav", &format!("导航 {}", cfg.url)),
+            _ => logger.log(1, "nav", &format!("导航 {url}")),
         }
     }
     Ok((cdp, session))
@@ -1444,6 +1689,67 @@ mod tests {
         // 标题未变时不重复写入（set_title 幂等判断分支回归）
         shared.set_title("移动云手机");
         assert_eq!(health_json(&shared.snapshot())["title"].as_str(), Some("移动云手机"));
+    }
+
+    #[test]
+    fn platform_runtime_switch_updates_health() {
+        // /platform 运行时切换：healthz 平台/标签/首页/视口即刻切换；未知平台拒
+        let cfg = crate::config::Config {
+            account: "t".into(),
+            platform: "mobile".into(),
+            platform_label: "移动云手机".into(),
+            url: "https://x".into(),
+            width: 414,
+            height: 896,
+            data_dir: "/data".into(),
+            profile_dir: "/data/profile-t".into(),
+            log_dir: "/data/logs".into(),
+            keep_alive: true,
+            interval_ms: 5000,
+            simulate_activity: true,
+            block_context_menu: true,
+            page_timer: false,
+            report_port: 8088,
+            bind: "0.0.0.0".into(),
+            control_token: String::new(),
+            cdp_port: 0,
+            chrome_bin: "chrome-headless-shell".into(),
+            headless: false,
+            no_sandbox: true,
+            ua_mode: "windows".into(),
+            lang: "zh-CN".into(),
+            tz: "Asia/Shanghai".into(),
+            extra_chrome_args: String::new(),
+            tick_fail_reload: 10,
+            frozen_reload: 3,
+            beat_stale_sec: 180,
+            fps: 25,
+            selftest: false,
+            smoke: false,
+            smoke_seconds: 60,
+        };
+        let shared = SharedState::new(&cfg);
+        // 初始：mobile 414x896
+        let j = health_json(&shared.snapshot());
+        assert_eq!(j["platform"].as_str(), Some("mobile"));
+        assert_eq!(j["platformLabel"].as_str(), Some("移动云手机"));
+        assert_eq!(j["vw"].as_u64(), Some(414));
+        assert_eq!(j["vh"].as_u64(), Some(896));
+        // 切联通：label/url/视口全切换
+        assert!(shared.set_platform("unicom"));
+        let j = health_json(&shared.snapshot());
+        assert_eq!(j["platform"].as_str(), Some("unicom"));
+        assert_eq!(j["platformLabel"].as_str(), Some("联通云手机"));
+        assert_eq!(j["homeUri"].as_str(), Some(crate::config::PLATFORM_UNICOM_URI));
+        assert_eq!(j["vw"].as_u64(), Some(405));
+        assert_eq!(j["vh"].as_u64(), Some(720));
+        // 未知平台：拒绝且状态不变
+        assert!(!shared.set_platform("telecom"));
+        let j = health_json(&shared.snapshot());
+        assert_eq!(j["platform"].as_str(), Some("unicom"));
+        // 切回移动
+        assert!(shared.set_platform("mobile"));
+        assert_eq!(health_json(&shared.snapshot())["vw"].as_u64(), Some(414));
     }
 
     #[test]

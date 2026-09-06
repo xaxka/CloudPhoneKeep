@@ -9,6 +9,24 @@ use std::path::PathBuf;
 pub const PLATFORM_MOBILE_URI: &str = "https://cloudphoneh5.buy.139.com";
 pub const PLATFORM_UNICOM_URI: &str = "https://uphone.wo-adv.cn/cloudphone/#/home";
 
+/// 平台运行时描述（控制面板 /platform 切换的目标全貌）：
+/// 切平台 = 换首页 URL + 换视口 + 重注入保活脚本（选择器按平台走）
+pub const PLATFORM_UNICOM_LABEL: &str = "联通云手机";
+pub const PLATFORM_MOBILE_LABEL: &str = "移动云手机";
+pub const PLATFORM_UNICOM_W: u32 = 405;
+pub const PLATFORM_UNICOM_H: u32 = 720;
+pub const PLATFORM_MOBILE_W: u32 = 414;
+pub const PLATFORM_MOBILE_H: u32 = 896;
+
+/// 平台名 → (label, url, w, h)；未知平台 None
+pub fn platform_profile(platform: &str) -> Option<(&'static str, &'static str, u32, u32)> {
+    match platform {
+        "mobile" => Some((PLATFORM_MOBILE_LABEL, PLATFORM_MOBILE_URI, PLATFORM_MOBILE_W, PLATFORM_MOBILE_H)),
+        "unicom" => Some((PLATFORM_UNICOM_LABEL, PLATFORM_UNICOM_URI, PLATFORM_UNICOM_W, PLATFORM_UNICOM_H)),
+        _ => None,
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub account: String,

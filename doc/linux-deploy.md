@@ -85,7 +85,8 @@ screencast 生效，弱机/省流量场景建议 5-10；初始值可用环境变
 
 > Linux 版**无页内地址栏**（按需求不提供）：导航走控制页「回首页」/页面内跳转；外部脚本可 `POST /nav`（token 同控制页）。shared 脚本注入的 `#cpk-addr-bar` 在云机页内保持 `display:none` 惰性存在，无任何触发入口，无副作用（Windows 版仍由 Ctrl+U 使用）。
 
-外部脚本直调端点（token 保护同控制页）：`POST /touch`（`phase` +
+外部脚本直调端点（token 保护同控制页）：`POST /platform`（`value=mobile|unicom`
+运行时切换，实例自动重启）、`POST /touch`（`phase` +
 `ps=x,y,id;x,y,id` 多点或 `x/y` 单点）、`POST /mouse`（`action=move/down/up/wheel`
 + `b/n/bb/m/dx/dy`）、`POST /kbd`（`t=down/up` + `key/code/vk/text/m/l/r`）、
 `POST /type`（整段文本）、`GET /clip`（选区文本）、

@@ -10,7 +10,7 @@
 | 宿主引擎 | Rust（Tauri 窗口 + 看门狗） | Rust musl 静态二进制（手写 RFC6455 WebSocket + CDP 客户端 + 看门狗） |
 | 驱动 | 窗口可见时页内定时器；隐藏/最小化时 Rust 看门狗 eval 驱动 | Rust 看门狗每秒经 CDP 调 `__CPK_TICK__()`（同一模型的无头恒定态） |
 | 多账号 | 多窗口多槽位（单进程） | 多容器（一容器一账号） |
-| 首次登录 | 直接在窗口里点 | 浏览器打开控制页：MJPEG 实时画面 + 全量输入（触摸/鼠标/键盘/剪贴板）、退出/到期通知（对齐 Windows 版交互，或外部 DevTools） |
+| 首次登录 | 直接在窗口里点 | 浏览器打开控制页：MJPEG 实时画面 + 全量输入（触摸/鼠标/键盘/剪贴板）、运行时平台切换、退出/到期通知（对齐 Windows 版交互，或外部 DevTools） |
 | 保活脚本 | `shared/keepalive.inject.js`（`include_str!` 内嵌） | 同一本 `shared/keepalive.inject.js`（`include_str!` 内嵌） |
 | 数据位置 | `AppData\LocalLow\CloudPhoneKeep` | `/data`（volume 持久化 Profile + 日志） |
 | 内存 | 单账号 WebView2 300-500MB | Rust 引擎 ~10MB + headless-shell 250-450MB |

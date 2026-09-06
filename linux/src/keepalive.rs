@@ -11,11 +11,17 @@ use crate::config::Config;
 const TEMPLATE: &str = include_str!("../../shared/keepalive.inject.js");
 
 pub fn build_init_script(cfg: &Config, port: u16) -> String {
+    build_init_script_for(&cfg.platform, &cfg.url, cfg, port)
+}
+
+/// 平台运行时可切换（控制面板 /platform）：以 (platform, url) 直建注入脚本，
+/// 其余开关仍取 cfg。保持 build_init_script(cfg) 兼容签名供 selftest/测试用。
+pub fn build_init_script_for(platform: &str, url: &str, cfg: &Config, port: u16) -> String {
     let inject = serde_json::json!({
         "slot": 1,
         "port": port,
-        "platform": cfg.platform,
-        "homeUri": cfg.url,
+        "platform": platform,
+        "homeUri": url,
         "keepAlive": cfg.keep_alive,
         "intervalMs": cfg.interval_ms,
         "simulateActivity": cfg.simulate_activity,
@@ -88,6 +94,15 @@ mod tests {
         assert!(s.contains("\"intervalMs\":5000"));
         assert!(s.contains("\"keepAlive\":true"));
         assert!(s.contains("\"customCursor\":false"));
+    }
+
+    #[test]
+    fn platform_variant_builds_unicom_cfg() {
+        let s = build_init_script_for("unicom", "https://uphone.wo-adv.cn/cloudphone/#/home", &cfg(), 8088);
+        assert!(s.contains("\"platform\":\"unicom\""));
+        assert!(s.contains("\"homeUri\":\"https://uphone.wo-adv.cn/cloudphone/#/home\""));
+        // 联通选择器在脚本本体里（平台分支由 CFG.platform 运行时选择）
+        assert!(s.contains(".try-content"));
     }
 
     #[test]

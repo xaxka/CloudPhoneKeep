@@ -234,6 +234,7 @@ fn selftest(cfg: &config::Config, logger: &Arc<Logger>) -> i32 {
         ("server: 键盘端点参数校验", "/kbd?t=press&key=a"),
         ("server: 帧率端点参数校验", "/fps?value=99"),
         ("server: 多点触控参数校验", "/touch?phase=start&ps=1,2,bad"),
+        ("server: 平台切换端点参数校验", "/platform?value=telecom"),
     ] {
         match util::http_get(p, path, 3000) {
             Ok((st, _)) if st == 400 => checks.push((name, true)),
