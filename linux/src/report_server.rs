@@ -22,7 +22,7 @@ use crate::util::urldecode;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -150,7 +150,8 @@ main{flex-direction:column}
 <script>
 var TK=(new URLSearchParams(location.search)).get('token')||'';
 var VW=414,VH=896,HOME='';
-var live={mode:'none',abort:null,frames:0,last:0,shotTimer:null};
+var live={mode:'none',abort:null,frames:0,last:0,shotTimer:null,shotBusy:false,shotGuard:null};
+var lastFrameAt=0;
 var IMG=document.getElementById('shot');
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){
 return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
@@ -194,18 +195,23 @@ poll();setInterval(poll,3000);
 
 // —— 实时画面：fetch MJPEG 流 → JPEG SOI/EOI 切帧 → Blob 直显 ——
 // 断流（引擎重建/浏览器重启）自动重连；流建立失败 → 截图轮询兜底，8s 后重试实时流
+// 画面新鲜（8s 内有帧）时重连不闪全屏「连接实时画面…」：画面保留，顶栏提示等待
+function staleShot(){return !lastFrameAt||Date.now()-lastFrameAt>8000}
 function stopLive(){
 if(live.abort){try{live.abort.abort()}catch(e){}live.abort=null}
 if(live.shotTimer){clearTimeout(live.shotTimer);live.shotTimer=null}
+if(live.shotGuard){clearInterval(live.shotGuard);live.shotGuard=null}
+live.shotBusy=false;
+IMG.onload=null;IMG.onerror=null;
 }
 function setShot(url){
 if(IMG._url)URL.revokeObjectURL(IMG._url);
-IMG._url=url;IMG.src=url;
+IMG._url=url;IMG.src=url;lastFrameAt=Date.now();
 }
 function startLive(){
 stopLive();live.mode='live';
 var ac=new AbortController();live.abort=ac;
-ov('连接实时画面…');
+if(staleShot())ov('连接实时画面…');
 fetch(U('/stream.mjpg'),{headers:HDR(),signal:ac.signal}).then(function(r){
 if(!r.ok||!r.body)throw new Error('HTTP '+r.status);
 var reader=r.body.getReader(),buf=new Uint8Array(0);
@@ -216,7 +222,7 @@ for(var j=i+2;j<buf.length-1;j++){
 if(buf[j]===255&&buf[j+1]===217){
 var f=buf.slice(i,j+2);buf=buf.slice(j+2);return f}}}}
 return null}
-ov('等待首帧…');
+if(staleShot())ov('等待首帧…');
 function step(){
 reader.read().then(function(x){
 if(x.done)throw new Error('end');
@@ -239,15 +245,26 @@ shotMode();
 });
 }
 function shotMode(){
-live.mode='shot';
-ov('截图模式','实时流暂不可用（引擎忙或重启中），0.6s/帧轮询');
-(function loop(){
+live.mode='shot';live.shotBusy=false;
+if(staleShot())ov('截图模式','实时流暂不可用（引擎忙或重启中），逐帧轮询截图');
+// 链式轮询：上一张完成/失败才发下一张——弱机一张截图可要 1-3s，
+// 盲目 0.6s 定时发会把引擎控制通道灌爆，反过来拖垮实时流订阅
+function loop(){
+if(live.mode!=='shot'||live.shotBusy)return;
+live.shotBusy=true;
+IMG.onload=function(){live.shotBusy=false;
 if(live.mode!=='shot')return;
-IMG.onload=function(){if(live.mode==='shot')ov(null)};
-IMG.onerror=function(){if(live.mode==='shot')ov('画面暂不可用','引擎启动/重启中，自动重试…')};
+lastFrameAt=Date.now();ov(null);live.shotTimer=setTimeout(loop,600)};
+IMG.onerror=function(){live.shotBusy=false;
+if(live.mode!=='shot')return;
+ov('画面暂不可用','引擎启动/重启中，自动重试…');live.shotTimer=setTimeout(loop,2500)};
 IMG.src=U('/shot.jpg?_='+Date.now()).href;
-live.shotTimer=setTimeout(loop,600);
-})();
+}
+loop();
+// 网络层悬挂兑底：图片加载无回调 8s → 强制下一轮
+live.shotGuard=setInterval(function(){
+if(live.mode==='shot'&&live.shotBusy){live.shotBusy=false;loop()}
+},8000);
 setTimeout(function(){if(live.mode==='shot')startLive()},8000);
 }
 document.addEventListener('visibilitychange',function(){
@@ -255,8 +272,10 @@ if(!document.hidden&&live.mode!=='shot')startLive();
 });
 startLive();
 setInterval(function(){
+var el=document.getElementById('fps');
+if(live.mode!=='live'){el.textContent='';return}
 var fps=live.frames-live.last;live.last=live.frames;
-document.getElementById('fps').textContent=live.mode==='live'?(fps+' fps'):'';
+el.textContent=(Date.now()-lastFrameAt>3000)?'重连/等帧…':(fps+' fps');
 },1000);
 
 // —— 触摸坐标映射：帧原始尺寸等比换算（object-fit:contain 居中修正）——
@@ -375,17 +394,20 @@ fn handle_conn(
 }
 
 /// 实时画面流：向引擎订阅 screencast 帧，以 multipart/x-mixed-replace 推送（MJPEG）。
-/// 退出条件：客户端断开（写失败）/ 引擎 10s 无帧（CDP 重建或浏览器重启）——
-/// 关流后页面侧自动重连，无需服务端维持状态。
+/// 退出条件：客户端断开（写失败）/ 引擎侧订阅通道关闭（CDP 重建、浏览器重启时
+/// 订阅者被丢弃）/ 首帧 30s 未至（引擎极端繁忙）。关流后页面侧自动重连。
+/// 静态页面合成器无更新 → screencast 不发新帧：以 2s 心跳重发上一帧维持连接
+/// （路由器/代理不掐空闲连接，页面也不会闪「连接实时画面…」重连循环）。
 fn stream_mjpeg(stream: &mut TcpStream, ctrl: &Sender<ControlRequest>, logger: &Arc<Logger>) {
     const BOUNDARY: &str = "cpkframe";
-    // 1) 订阅引擎实时画面（3s 内未应答 = 引擎忙/浏览器启动中）
+    // 1) 订阅引擎实时画面：引擎线程可能正在慢 eval（弱机 tick/采样可达数秒）/
+    // 启动浏览器，宽限 8s 再判超时；引擎彻底不可用会立刻 500
     let (tx, rx) = std::sync::mpsc::channel();
     if ctrl.send(ControlRequest::ScreencastAttach { reply: tx }).is_err() {
         respond(stream, 500, "text/plain; charset=utf-8", "引擎不可用".as_bytes());
         return;
     }
-    let (sub_id, frame_rx) = match rx.recv_timeout(Duration::from_secs(3)) {
+    let (sub_id, frame_rx) = match rx.recv_timeout(Duration::from_secs(8)) {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
             respond(
@@ -414,33 +436,52 @@ fn stream_mjpeg(stream: &mut TcpStream, ctrl: &Sender<ControlRequest>, logger: &
         screencast_detach(ctrl, sub_id);
         return;
     }
-    let mut last_frame = Instant::now();
+    let mut last: Option<Vec<u8>> = None;
+    let mut last_push = Instant::now();
+    let opened = Instant::now();
     loop {
-        match frame_rx.recv_timeout(Duration::from_millis(500)) {
+        match frame_rx.recv_timeout(Duration::from_secs(2)) {
             Ok(frame) => {
-                let part = format!(
-                    "--{BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
-                    frame.len()
-                );
-                if stream.write_all(part.as_bytes()).is_err()
-                    || stream.write_all(&frame).is_err()
-                    || stream.write_all(b"\r\n").is_err()
-                {
+                if !write_part(stream, BOUNDARY, &frame) {
                     break;
                 }
-                last_frame = Instant::now();
+                last = Some(frame);
+                last_push = Instant::now();
             }
-            Err(_) => {
-                // 500ms 无帧：静态页面属正常（合成器无更新，不推帧）；
-                // >10s 无帧 = 引擎重建/浏览器重启 → 关流，页面侧自动重连
-                if last_frame.elapsed() > Duration::from_secs(10) {
-                    logger.log(1, "sys", "实时画面流 10s 无帧，关流等页面重连（引擎重建/浏览器重启）");
-                    break;
+            Err(RecvTimeoutError::Timeout) => match &last {
+                Some(f) => {
+                    // 静态页心跳：重发上一帧，连接保持活性（局域网开销可忽略）
+                    if last_push.elapsed() >= Duration::from_secs(2) {
+                        if !write_part(stream, BOUNDARY, f) {
+                            break;
+                        }
+                        last_push = Instant::now();
+                    }
                 }
-            }
+                None => {
+                    // 首帧 30s 未至（引擎极端繁忙/浏览器启动中）→ 关流，页面转截图兑底
+                    if opened.elapsed() > Duration::from_secs(30) {
+                        logger.log(1, "sys", "实时画面流首帧 30s 未至，关流（页面自动转截图轮询并重连）");
+                        break;
+                    }
+                }
+            },
+            // 引擎侧订阅通道关闭：CDP 重建/浏览器重启时订阅者被丢弃 → 关流重连
+            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
     screencast_detach(ctrl, sub_id);
+}
+
+/// 写一帧 multipart part；任何写失败 = 客户端已断开。
+fn write_part(stream: &mut TcpStream, boundary: &str, frame: &[u8]) -> bool {
+    let part = format!(
+        "--{boundary}\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+        frame.len()
+    );
+    stream.write_all(part.as_bytes()).is_ok()
+        && stream.write_all(frame).is_ok()
+        && stream.write_all(b"\r\n").is_ok()
 }
 
 /// 发后即忘的取消订阅：应答接收端立即丢弃（引擎应答时发送失败被静默忽略），
@@ -782,6 +823,76 @@ mod tests {
         assert_eq!(st4, 200);
         assert!(body4.contains("stream.mjpg"));
         assert!(body4.contains("CloudPhoneKeep"));
+    }
+
+    #[test]
+    fn stream_mjpeg_frames_keepalive_and_close() {
+        // 自建控制通道（start_server 辅助会丢弃接收端）：模拟引擎应答
+        // ScreencastAttach 并交出帧通道；收到 Detach 后收尾退出
+        let cfg = Config::from_env();
+        let shared = SharedState::new(&cfg);
+        let (tx, engine_rx) = std::sync::mpsc::channel();
+        let rcfg = ReportCfg { bind: "127.0.0.1".into(), port: 0, control_token: String::new() };
+        let port = start(
+            rcfg,
+            Arc::new(Logger::new(cfg.log_dir.clone())),
+            shared,
+            tx.clone(),
+        )
+        .unwrap();
+        let (frame_tx, frame_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        thread::spawn(move || {
+            let mut pending = Some(frame_rx);
+            while let Ok(req) = engine_rx.recv() {
+                match req {
+                    ControlRequest::ScreencastAttach { reply } => {
+                        if let Some(rx) = pending.take() {
+                            let _ = reply.send(Ok((1u32, rx)));
+                        }
+                    }
+                    ControlRequest::ScreencastDetach { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        // 引擎推一帧（5 字节假帧：SOI+EOI+尾部，客户端只看 multipart 语义）
+        frame_tx.send(vec![0xFF, 0xD8, 0xFF, 0xD9, 0x01]).unwrap();
+
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        s.write_all(b"GET /stream.mjpg HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        let t0 = Instant::now();
+        // 读到首个 JPEG 帧为止（订阅应答即时；防抖上限 10s）
+        while !out.windows(2).any(|w| w == [0xFF, 0xD8]) && t0.elapsed() < Duration::from_secs(10) {
+            match s.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(_) => {}
+            }
+        }
+        let text = String::from_utf8_lossy(&out).into_owned();
+        assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+        assert!(text.contains("multipart/x-mixed-replace"), "{text}");
+        assert!(text.contains("Content-Length: 5"), "{text}");
+        // 静态页心跳：无新帧 2s 后重发上一帧 → 字节继续增长（连接不再被 10s 看门狗掐断）
+        let before = out.len();
+        let t1 = Instant::now();
+        while out.len() == before && t1.elapsed() < Duration::from_secs(6) {
+            match s.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(_) => {}
+            }
+        }
+        assert!(out.len() > before, "2s 心跳未重发上一帧");
+        // 客户端断开 → 服务端写失败退出并发 Detach（引擎线程收尾，测试可退出）
+        drop(s);
+        thread::sleep(Duration::from_millis(300));
     }
 
     #[test]

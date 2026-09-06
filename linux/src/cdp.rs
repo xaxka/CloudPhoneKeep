@@ -159,33 +159,41 @@ impl Cdp {
         if let Some(fs) = params.get("sessionId").and_then(|x| x.as_str()) {
             self.fire("Page.screencastFrameAck", json!({ "sessionId": fs }), session);
         }
-        if self.sinks.is_empty() {
-            return;
+        if let Some(b64) = params.get("data").and_then(|x| x.as_str()) {
+            let frame = util::base64_decode(b64);
+            self.push_frame(frame);
         }
-        let frame = match params.get("data").and_then(|x| x.as_str()) {
-            Some(b64) => util::base64_decode(b64),
-            None => return,
-        };
-        self.sinks.retain(|(_, tx)| match tx.try_send(frame.clone()) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => true,
-            Err(TrySendError::Disconnected(_)) => false,
-        });
         if let Some(s) = session {
             self.maybe_stop_screencast(s);
         }
     }
 
-    /// 订阅实时画面帧（/stream.mjpg 用）。首个订阅者自动开启 Page.startScreencast
-    /// （jpeg 60%，逐合成器帧；帧尺寸 = 视口像素，与触摸坐标同坐标系）。
+    /// 向所有订阅者推送一帧（screencast 事件与首帧兜底共用）：
+    /// 通道满 → 丢帧保实时；接收端已断开 → 移除该订阅者（下次 stopScreencast 机会触发）
+    pub fn push_frame(&mut self, frame: Vec<u8>) {
+        if self.sinks.is_empty() {
+            return;
+        }
+        self.sinks.retain(|(_, tx)| match tx.try_send(frame.clone()) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => true,
+            Err(TrySendError::Disconnected(_)) => false,
+        });
+    }
+
+    /// 订阅实时画面帧（/stream.mjpg 用）。
+    /// Page.startScreencast 发后即忘（fire）：同步等待应答曾在引擎忙/弱机场景
+    /// 占满 10s 超时——把 ScreencastAttach 应答压在队尾，表现为「连接实时画面…」
+    /// 10 秒。首帧由调用方补一帧 captureScreenshot 兜底（静态页/错误页合成器
+    /// 无更新时 screencast 可能长期不发帧）。
+    /// jpeg 60% 逐合成器帧；帧尺寸 = 视口像素，与触摸坐标同坐标系。
     pub fn screencast_subscribe(&mut self, session: &str) -> Result<(u32, Receiver<Vec<u8>>), String> {
         if !self.screencast_active {
-            self.call(
+            self.fire(
                 "Page.startScreencast",
                 json!({ "format": "jpeg", "quality": 60, "everyNthFrame": 1 }),
                 Some(session),
-                10000,
-            )?;
+            );
             self.screencast_active = true;
         }
         let (tx, rx) = std::sync::mpsc::sync_channel(2);

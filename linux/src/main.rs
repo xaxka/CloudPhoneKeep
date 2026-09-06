@@ -199,8 +199,9 @@ fn selftest(cfg: &config::Config, logger: &Arc<Logger>) -> i32 {
             checks.push(("server: healthz JSON", false));
         }
     }
-    // 实时画面流端点：自检无引擎 → 3s 订阅超时 504（证明端点与控制通道已接线）
-    match util::http_get(p, "/stream.mjpg", 6000) {
+    // 实时画面流端点：自检无引擎 → 订阅 8s 宽限后 504（证明端点与控制通道已接线；
+    // 宽限覆盖引擎线程慢 eval/启动窗口，见 stream_mjpeg 注释）
+    match util::http_get(p, "/stream.mjpg", 12000) {
         Ok((st, body)) if st == 500 || st == 504 => {
             checks.push((
                 "server: 实时画面流端点",

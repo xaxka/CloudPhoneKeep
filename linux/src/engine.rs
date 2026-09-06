@@ -347,7 +347,8 @@ fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<
                                 .unwrap_or(false);
                             if !has {
                                 logger.log(1, "nav", "重连后当前文档无保活脚本，导航回首页");
-                                let _ = c.call("Page.navigate", json!({ "url": cfg.url }), Some(&s), 20000);
+                                // 发后即忘：不给引擎线程排 20s 阻塞调用，恢复由采样回看
+                                c.fire("Page.navigate", json!({ "url": cfg.url }), Some(&s));
                             }
                             cdp = Some(c);
                             session = s;
@@ -683,7 +684,10 @@ fn nav_error_step(
             &format!("导航重试（退避 {}s）：{}", stats.nav_backoff.as_secs(), cfg.url),
         );
         spawn_nav_probe(cfg, shared, logger);
-        cdp.call("Page.navigate", json!({ "url": cfg.url }), Some(session), 15000).map(|_| ())
+        // 发后即忘：导航命令已投递；失败与否由下轮采样看 URL 判定（同步等应答
+        // 会在 DNS 不通时占住引擎线程最长 15s，把实时流订阅/触摸全部压在队尾）
+        cdp.fire("Page.navigate", json!({ "url": cfg.url }), Some(session));
+        Ok(())
     } else {
         Ok(())
     }
@@ -721,8 +725,9 @@ fn nav_home(
     shared.bump_reloads();
     shared.set_page("reloading");
     logger.log(1, "nav", &format!("恢复性导航 {}", cfg.url));
-    cdp.call("Page.navigate", json!({ "url": cfg.url }), Some(session), 15000)
-        .map(|_| ())
+    // 发后即忘：不等应答（理由同 nav_error_step），成败由采样周期回看 URL
+    cdp.fire("Page.navigate", json!({ "url": cfg.url }), Some(session));
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -764,18 +769,51 @@ fn handle_control(cdp: &mut Cdp, session: &str, req: ControlRequest, logger: &Ar
         }
         ControlRequest::Navigate { url, reply } => {
             logger.log(1, "nav", &format!("控制页导航 {url}"));
-            cdp.call("Page.navigate", json!({ "url": url }), Some(session), 20000)?;
-            let _ = reply.send(Ok(()));
+            // 命令已发出即视为受理：导航本身可费时数十秒（弱网/慢站），同步等完
+            // 会把引擎线程占住 20s——结果由实时画面流里直接看到；传输断裂仍如实报错
+            match cdp.call("Page.navigate", json!({ "url": url }), Some(session), 5000) {
+                Ok(_) => { let _ = reply.send(Ok(())); }
+                Err(e) if e.starts_with("WS:") => return Err(e),
+                Err(e) if e.contains("命令超时") => { let _ = reply.send(Ok(())); }
+                Err(e) => { let _ = reply.send(Err(e)); }
+            }
         }
         ControlRequest::Reload { reply } => {
             logger.log(1, "nav", "控制页重载");
-            cdp.call("Page.reload", json!({ "ignoreCache": true }), Some(session), 20000)?;
-            let _ = reply.send(Ok(()));
+            match cdp.call("Page.reload", json!({ "ignoreCache": true }), Some(session), 5000) {
+                Ok(_) => { let _ = reply.send(Ok(())); }
+                Err(e) if e.starts_with("WS:") => return Err(e),
+                Err(e) if e.contains("命令超时") => { let _ = reply.send(Ok(())); }
+                Err(e) => { let _ = reply.send(Err(e)); }
+            }
         }
         ControlRequest::ScreencastAttach { reply } => {
             match cdp.screencast_subscribe(session) {
                 Ok(sub) => {
+                    // 先应答后补帧：HTTP 层零等待；弱机/引擎忙时截图再慢也只影响首帧
+                    // 到达时刻，不影响连接建立（TTFB）
                     let _ = reply.send(Ok(sub));
+                    // 首帧兑底：静态页/错误页合成器无更新，screencast 可能长期不发帧 →
+                    // 立即截一帧推给所有订阅者，保证流打开就有画面（也盖住重连空窗）
+                    match cdp.call(
+                        "Page.captureScreenshot",
+                        json!({ "format": "jpeg", "quality": 60 }),
+                        Some(session),
+                        8000,
+                    ) {
+                        Ok(v) => {
+                            if let Some(b64) = v.get("data").and_then(|x| x.as_str()) {
+                                cdp.push_frame(util::base64_decode(b64));
+                            }
+                        }
+                        Err(e) => {
+                            if e.starts_with("WS:") {
+                                return Err(e);
+                            }
+                            // 命令级失败（页面忙等）：screencast 事件帧照常会到，仅记日志
+                            logger.log(1, "sys", &format!("实时流首帧兑底截图未成：{e}"));
+                        }
+                    }
                 }
                 Err(e) => {
                     logger.log(0, "error", &format!("实时画面流开启失败：{e}"));
