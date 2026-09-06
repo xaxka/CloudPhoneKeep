@@ -1,7 +1,7 @@
 # CloudPhoneKeep Linux / Docker 版
 
 > 移动云手机 / 联通云手机保活的 **Linux 无头部署**版本 —— **一个 Docker 容器 = 一个账号**，
-> 用 **Chromium Headless（chrome-headless-shell）+ CDP** 替代 Windows 版的 WebView2，
+> 用 **chrome-headless-shell（Google Chrome for Testing 官方预编译）+ CDP** 替代 Windows 版的 WebView2，
 > 后端为 **纯 Rust 引擎**（musl 静态编译，零 Node / 零 npm 依赖，常驻内存约 10MB），
 > 保活逻辑与 Windows 版**同源共用**（`shared/keepalive.inject.js`，改一处双端生效）。
 
@@ -18,7 +18,7 @@
 | 组件 | 选择 | 理由 |
 | :--- | :--- | :--- |
 | 宿主引擎 | Rust musl 静态二进制（~3MB，仅依赖 serde_json） | 替代 Node/脚本运行时（后者常驻 50-80MB）；单引擎线程 + 手写 RFC6455 WebSocket 客户端，无任何重型框架 |
-| 浏览器 | chrome-headless-shell（Google Chrome for Testing 官方预编译无头内核，amd64）；arm64 用发行版 Chromium | headless-shell 只含渲染内核，无 Chrome UI/标签页/扩展，单页面场景比完整 Chrome 省 100MB+；构建阶段保持 rust:1-alpine musl 静态编译不变 |
+| 浏览器 | chrome-headless-shell（Chrome for Testing 官方预编译：amd64=stable 152，arm64=beta 154——CfT 自 153 起才有 linux-arm64） | 只含渲染内核，无 Chrome UI/标签页/扩展，单页面场景比完整 Chrome 省 100MB+；构建阶段保持 rust:1-alpine musl 静态编译不变 |
 | 镜像 | debian:bookworm-slim + 最小运行时库（headless-shell 为 glibc 构建） | 无 Node、无桌面、无 X11、无 VNC、无 Redis、无 SFU |
 
 单账号容器典型 RSS ≈ **Rust 引擎 ~10MB + headless-shell 250-450MB**（主要由云手机页面与 WebRTC 视频流决定，与 Windows WebView2 同量级）。WebRTC 走软件编解码（容器无 GPU），`--autoplay-policy=no-user-gesture-required` 确保视频流自动播放。
@@ -27,7 +27,7 @@
 
 | | Windows 版 | Linux 版 |
 | :--- | :--- | :--- |
-| 内核 | WebView2（Edge） | chrome-headless-shell（amd64）/ Chromium（arm64） |
+| 内核 | WebView2（Edge） | chrome-headless-shell（CfT 官方预编译，双架构） |
 | 宿主引擎 | Rust（Tauri 窗口 + 看门狗） | Rust（CDP 客户端 + 看门狗） |
 | 驱动 | 窗口可见时页内定时器；隐藏时 Rust 看门狗 eval 驱动 | Rust 看门狗每秒经 CDP 调 `__CPK_TICK__()`（同一模型的无头恒定态） |
 | 多账号 | 多窗口多槽位（单进程） | 多容器（一容器一账号） |

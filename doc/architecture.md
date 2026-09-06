@@ -6,28 +6,36 @@
 
 | | Windows 版 | Linux 版 |
 | :--- | :--- | :--- |
-| 内核 | WebView2（Edge） | Alpine Chromium headless（发行版官方包，`--headless=new`） |
+| 内核 | WebView2（Edge） | chrome-headless-shell（CfT 官方预编译，双架构） |
 | 宿主引擎 | Rust（Tauri 窗口 + 看门狗） | Rust musl 静态二进制（手写 RFC6455 WebSocket + CDP 客户端 + 看门狗） |
 | 驱动 | 窗口可见时页内定时器；隐藏/最小化时 Rust 看门狗 eval 驱动 | Rust 看门狗每秒经 CDP 调 `__CPK_TICK__()`（同一模型的无头恒定态） |
 | 多账号 | 多窗口多槽位（单进程） | 多容器（一容器一账号） |
 | 首次登录 | 直接在窗口里点 | 浏览器打开控制页：截图 + 触摸/输入（或外部 DevTools） |
 | 保活脚本 | `shared/keepalive.inject.js`（`include_str!` 内嵌） | 同一本 `shared/keepalive.inject.js`（`include_str!` 内嵌） |
 | 数据位置 | `AppData\LocalLow\CloudPhoneKeep` | `/data`（volume 持久化 Profile + 日志） |
-| 内存 | 单账号 WebView2 300-500MB | Rust 引擎 ~10MB + Chromium 250-450MB |
+| 内存 | 单账号 WebView2 300-500MB | Rust 引擎 ~10MB + headless-shell 250-450MB |
 
 **保活脚本唯一源文件**：`shared/keepalive.inject.js` 被两个平台的 Rust 构建器
 `include_str!` 进各自二进制——修改保活规则只需改这一份文件，双端重新构建后
 同时生效。平台差异全部收敛为 CFG 开关（见 [keepalive-rules.md](keepalive-rules.md)）。
 
-### 浏览器选型说明（为什么不是 Google 预编译 headless_shell）
+### 浏览器选型说明（chrome-headless-shell）
 
-Google 官方 Chrome for Testing 预编译的 `chrome-headless-shell` 只有
-**linux64（x86_64）** 一种 Linux 架构，且是 glibc 链接——既没有 linux-arm64
-预编译，也无法在 Alpine（musl）上原生运行。Alpine community 仓库的
-`chromium` 包原生支持 x86_64 与 aarch64 双架构、musl 静态打包、与 APK
-依赖一体管理，是多架构镜像（amd64/arm64）唯一顺理成章的选择。
-完整 Chromium 以 `--headless=new` 运行，渲染内核与 WebRTC 栈和
-headless_shell 完全一致。
+Linux 版使用 **Google Chrome for Testing 官方预编译的 `chrome-headless-shell`**
+（无头渲染内核，无 Chrome UI/标签页/扩展，比完整 Chrome 省内存；WebRTC 栈完整
+保留——保活只要求流建立不断开）：
+
+- **架构**：CfT 自 153.0.8001.0 起提供 `linux-arm64` 预编译；镜像双架构
+  （amd64/arm64）都用 CfT headless-shell，运行层为 `debian:bookworm-slim`
+  （CfT 二进制是 glibc 动态链接，不能跑在 musl/Alpine 上；Rust 引擎是 musl
+  静态二进制，与运行层 libc 无耦合）
+- **版本**：amd64 用 stable `152.0.7977.82`（开发环境端到端冒烟验证过的
+  版本）；arm64 用 beta `154.0.8037.0`（stable 渠道尚无 arm64，取 arm64
+  可用的最近渠道），见 `linux/Dockerfile` 的 ARG
+- headless-shell 本身即无头模式，无需 `--headless=new`（`CPK_HEADLESS`
+  仅在换用完整 Chromium 时置 1）
+- 依赖最小化：运行层 apt 包为 `ldd` 实测结果（nss/glib/X11 基础库/alsa/
+  gbm 等，见 Dockerfile 注释），curl/unzip 仅构建期使用后即删除
 
 ## 看门狗驱动模型
 

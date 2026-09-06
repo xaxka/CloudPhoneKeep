@@ -82,7 +82,7 @@ cd linux && docker compose up -d --build
 ├── shared/
 │   └── keepalive.inject.js  # 保活脚本唯一源文件（Windows/Linux 共用，改一处双端生效）
 ├── linux/                   # Linux + Docker 版（一容器一账号，详见 linux/README.md）
-│   ├── Dockerfile           # rust:1-alpine 交叉编译（多架构）→ alpine:3.21 + Chromium
+│   ├── Dockerfile           # rust:1-alpine musl 交叉编译（多架构）→ debian + CfT chrome-headless-shell
 │   ├── docker-compose.yml
 │   ├── src/                 # Rust 保活引擎（手写 WS/CDP 客户端）
 │   └── Cargo.toml           # 仅依赖 serde_json

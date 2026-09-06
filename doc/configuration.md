@@ -35,8 +35,8 @@ C:\Users\<用户名>\AppData\LocalLow\CloudPhoneKeep\
 | `CPK_BIND` | `0.0.0.0` | 上述端口绑定地址（`127.0.0.1` 最保守；默认配合端口映射/防火墙） |
 | `CPK_CONTROL_TOKEN` | 空 | 控制页/截图/触摸端点的访问令牌（强烈建议公网可达时设置） |
 | `CPK_CDP_PORT` | `0` | Chromium DevTools 固定端口（0=自动分配；固定端口可用于外部 DevTools） |
-| `CPK_CHROME_BIN` | `chromium-browser` | Chromium 二进制路径（镜像内为 Alpine chromium；调试时可指向其他 Chrome） |
-| `CPK_HEADLESS` | `1` | 完整 Chromium 需 `--headless=new`（镜像默认开） |
+| `CPK_CHROME_BIN` | `/opt/chrome-headless-shell/chrome-headless-shell` | 浏览器二进制路径（镜像内为 CfT chrome-headless-shell；调试时可指向其他 Chrome） |
+| `CPK_HEADLESS` | `0` | 仅换用完整 Chromium 时置 1（加 `--headless=new`）；镜像内 headless-shell 本身即无头 |
 | `CPK_NO_SANDBOX` | `1` | 容器内通常需关闭 Chromium 沙箱 |
 | `CPK_UA_MODE` | `windows` | UA 策略：`windows` 伪装 Windows Chrome / `auto` 去 Headless 字样 / `none` 原样 |
 | `CPK_LANG` | `zh-CN` | Chromium UI 语言 |
