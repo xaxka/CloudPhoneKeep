@@ -35,10 +35,6 @@ pub const SNAPSHOT_EXPR: &str = "(function(){try{var s=window.__CPK_STATE__;var 
 pub const PROBE_EXPR: &str = "window.__CPK_INSTALLED__===true?'y':'n'";
 /// 剪贴板读取：云机页面当前选中文本（含输入框选区）——/copy（云机 → 本机）数据源
 pub const CLIP_EXPR: &str = "(function(){try{var s='';try{s=String(document.getSelection())}catch(e){}if(!s){var a=document.activeElement;try{if(a&&(/^(INPUT|TEXTAREA)$/.test(a.tagName))&&('value'in a)&&a.selectionStart!=null){s=String(a.value).slice(a.selectionStart,a.selectionEnd)}}catch(e){}}return JSON.stringify({t:s})}catch(e){return JSON.stringify({t:''})}})()";
-/// 页内地址栏切换（对齐 Windows 版 Ctrl+U toggle_address_bar 的同一表达式语义）：
-/// shared 脚本注入 #cpk-addr-bar + __CPK_ADDR__（回车跳转/Esc 关闭在页内处理，
-/// 键盘事件经 /kbd 直通即可），Linux 侧由 /addr 触发本切换
-pub const ADDR_EXPR: &str = "(function(){try{var b=document.getElementById('cpk-addr-bar');if(!window.__CPK_ADDR__)return 'noscript';window.__CPK_ADDR__(b?b.style.display==='none':true);return 'ok'}catch(e){return 'err:'+String(e&&e.message)}})()";
 
 extern "C" {
     #[link_name = "kill"]
@@ -266,10 +262,6 @@ pub enum ControlRequest {
     },
     /// 读取云机选中文本（/clip：云机 → 本机剪贴板的数据源）
     ClipGet { reply: Sender<Result<String, String>> },
-    /// 切换页内地址栏（/addr：对齐 Windows 版 Ctrl+U——shared 脚本已把
-    /// #cpk-addr-bar + __CPK_ADDR__ 注入页面，回车跳转/Esc 关闭由页内
-    /// 自理，键盘事件经 /kbd 直通）
-    AddrBar { reply: Sender<Result<(), String>> },
     /// 运行时调整实时画面帧率（控制面板「设置 → 帧率」）
     SetFps { fps: u32, reply: Sender<Result<(), String>> },
     TypeText { text: String, reply: Sender<Result<(), String>> },
@@ -333,7 +325,6 @@ fn drain_ctrl_fail(ctrl_rx: &Receiver<ControlRequest>, reason: &str) {
             ControlRequest::Mouse { reply, .. } => { let _ = reply.send(Err(r)); }
             ControlRequest::KeyEvent { reply, .. } => { let _ = reply.send(Err(r)); }
             ControlRequest::ClipGet { reply } => { let _ = reply.send(Err(r)); }
-            ControlRequest::AddrBar { reply } => { let _ = reply.send(Err(r)); }
             ControlRequest::SetFps { reply, .. } => { let _ = reply.send(Err(r)); }
             ControlRequest::TypeText { reply, .. } => { let _ = reply.send(Err(r)); }
             ControlRequest::Key { reply, .. } => { let _ = reply.send(Err(r)); }
@@ -999,27 +990,6 @@ fn handle_control(
             };
             let cut: String = out.chars().take(65536).collect();
             let _ = reply.send(Ok(cut));
-        }
-        ControlRequest::AddrBar { reply } => {
-            // 对齐 Windows 版 Ctrl+U：切换 shared 脚本注入的页内地址栏
-            // （#cpk-addr-bar + __CPK_ADDR__）。切换后输入/回车/Esc 全部经
-            // /kbd 直通在页内自理（与 win 版同一交互语义）；同步 eval 与
-            // ClipGet 同模式（用户手动触发、低频，可承受页面忙时等待）
-            match cdp::eval_string(cdp, session, ADDR_EXPR, 5000) {
-                Ok(v) if v == "ok" => {
-                    logger.log(1, "sys", "切换页内地址栏（Ctrl+U，对齐 Windows 版）");
-                    let _ = reply.send(Ok(()));
-                }
-                Ok(v) => {
-                    let _ = reply.send(Err(format!("页内地址栏不可用：{v}")));
-                }
-                Err(e) => {
-                    let _ = reply.send(Err(e.clone()));
-                    if e.starts_with("WS:") {
-                        return Err(e);
-                    }
-                }
-            }
         }
         ControlRequest::SetFps { fps, reply } => {
             // 流在跑则 stop+start 重建（maxFrameRate 只在 start 时生效）；

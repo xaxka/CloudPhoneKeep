@@ -15,8 +15,6 @@
 //!  - POST /kbd               键盘事件全字段直通（t=down/up，key/code/vk/text/mods）
 //!  - POST /type              文本插入（Input.insertText；输入法/粘贴整段发送）
 //!  - GET  /clip              读取云机选中文本（云机 → 本机剪贴板）
-//!  - POST /addr              切换页内地址栏（对齐 Windows 版 Ctrl+U；回车跳
-//!                            转/Esc 关闭在页内自理，输入经 /kbd 直通）
 //!  - POST /fps               运行时帧率上限（Page.startScreencast maxFrameRate）
 //!  - POST /tap /swipe /key /nav /reload  控制端点（token 可选保护；兼容保留）
 //!
@@ -166,7 +164,6 @@ autocapitalize="off" autocorrect="off" spellcheck="false">
 <h2>操作</h2>
 <div class="row">
 <button onclick="doNav()">回首页</button>
-<button onclick="doAddr()">地址</button>
 <button class="acc" onclick="fs()">全屏</button>
 </div>
 <h2>设置</h2>
@@ -619,10 +616,6 @@ if(k==='Enter'){ev.preventDefault();kdown(ev);return}
 }
 if(ev.ctrlKey||ev.metaKey){
 var lk=(k||'').toLowerCase();
-if(lk==='u'&&!ev.shiftKey&&!ev.altKey){
-// Ctrl+U：切换云机页内地址栏（对齐 Windows 版；不触发本页 view-source）
-ev.preventDefault();doAddr();return
-}
 if(lk==='v'&&!ev.shiftKey&&!ev.altKey){
 // 粘贴：本机剪贴板 → 云机（insertText）。键本身不转发（远端剪贴板为空）。
 if(navigator.clipboard&&navigator.clipboard.readText){ev.preventDefault();doPaste()}
@@ -702,10 +695,6 @@ ping('无剪贴板权限：已弹出输入框，Ctrl+V 或长按粘贴')});
 function doReload(){post('/reload','').then(function(){ping('已刷新页面')})}
 function doNav(){if(!HOME){ping('未知首页地址');return}
 post('/nav','url='+encodeURIComponent(HOME)).then(function(){ping('已回首页')})}
-// 页内地址栏（对齐 Windows 版 Ctrl+U）：呼出后输入/回车跳转/Esc 关闭
-// 全在云机页内自理（键盘事件经 /kbd 直通），此处只负责切换
-function doAddr(){post('/addr','').then(function(){ping('地址栏已切换（回车跳转，Esc 关闭）')})
-.catch(function(){ping('地址栏切换失败（引擎忙/重启中）')})}
 function fs(){var el=document.documentElement;
 if(document.fullscreenElement){document.exitFullscreen()}
 else if(el.requestFullscreen){el.requestFullscreen()}}
@@ -1165,11 +1154,6 @@ fn route(
                 Err(_) => (504, "text/plain".into(), b"engine busy / timeout".to_vec()),
             }
         }
-        "/addr" => {
-            // 页内地址栏切换（对齐 Windows 版 Ctrl+U）：引擎 eval __CPK_ADDR__；
-            // 呼出后输入/回车跳转/Esc 关闭全在页内自理（键盘经 /kbd 直通）
-            control_void(ctrl, |reply| ControlRequest::AddrBar { reply })
-        }
         "/fps" => {
             // 帧率上限：1..=60；引擎侧 stop+start 重建 screencast 生效
             let fps = unum(&req.query, &req.form, "value");
@@ -1573,22 +1557,18 @@ mod tests {
     }
 
     #[test]
-    fn addr_endpoint_and_status_notify_wiring() {
-        // /addr：无参数校验，引擎不可用（控制通道无接收者）→ 500（已进入控制通道）
+    fn status_notify_wiring_and_no_addr_bar() {
+        // 地址栏已按需求移除（Linux 版不需要）：端点下线 → 404
         let (port, _shared, _tx) = start_server("");
-        let (st, body) = http(port, "POST /addr HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-        assert_eq!(st, 500);
-        assert!(body.contains("engine unavailable"), "{body}");
-        // token 保护与其它控制端点同策略
+        let (st, _) = http(port, "POST /addr HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        assert_eq!(st, 404);
+        // 控制页不再有地址栏接线（防回归）；状态转换通知/页面标题保留
         let (port2, _shared2, _tx2) = start_server("s3cret");
-        let (st2, _) = http(port2, "POST /addr HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-        assert_eq!(st2, 403);
-        // 控制页接线：地址按钮/Ctrl+U 拦截 + 状态转换通知（对齐 Windows 版）
         let (st3, body3) = http(port2, "GET /?token=s3cret HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
         assert_eq!(st3, 200);
-        assert!(body3.contains("doAddr()"), "控制页缺地址栏切换接线");
-        assert!(body3.contains(">地址</button>"), "控制页缺地址按钮");
-        assert!(body3.contains("lk==='u'"), "控制页缺 Ctrl+U 拦截");
+        assert!(!body3.contains("doAddr()"), "地址栏接线应已移除");
+        assert!(!body3.contains(">地址</button>"), "地址按钮应已移除");
+        assert!(!body3.contains("lk==='u'"), "Ctrl+U 拦截应已移除");
         assert!(body3.contains("statNotify"), "控制页缺状态转换通知");
         assert!(body3.contains("Notification.permission"), "控制页缺系统通知权限申请");
         assert!(body3.contains("lastStatus"), "控制页未消费 lastStatus");

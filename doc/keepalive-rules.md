@@ -88,6 +88,7 @@ Chromium 后台节流）。Linux 无头恒由 CDP 看门狗驱动。
   （对齐 Windows 版环境）；`auto` 只去掉 Headless 字样；`none` 原样
 - CDP `Input.dispatchTouchEvent` 内核级触摸（控制页远程点击/滑动）
 - 页内地址栏 `__CPK_ADDR__`（脚本注入 `#cpk-addr-bar`，双端同源代码）：
-  Windows 版由 Ctrl+U 全局热键切换；Linux 版由控制页 Ctrl+U /「地址」按钮
-  经 `/addr` 端点让引擎 eval 同一切换表达式——回车跳转、Esc 关闭都在页内
-  自理，双端交互语义一致
+  Windows 版由 Ctrl+U 全局热键切换（回车跳转、Esc 关闭在页内自理）；
+  Linux 版**不提供地址栏**（无触发入口）：`#cpk-addr-bar` 在云机页内
+  恒 `display:none` 惰性存在、`__CPK_ADDR__` 从未被调用，无任何副作用；
+  导航走控制页「回首页」/`/nav` 端点

@@ -143,8 +143,8 @@ function U(p){var u=new URL(p,location.origin);if(TK)u.searchParams.set('token',
 function HDR(){return TK?{'x-cpk-token':TK}:{}}
 function post(p,body){return fetch(U(p),{method:'POST',
 headers:Object.assign({'content-type':'application/x-www-form-urlencoded'},HDR()),body:body})}
-function ping(t){var el=document.getElementById('toast');el.textContent=t;el.style.opacity=1;
-setTimeout(function(){el.style.opacity=0},1500)}
+function ping(t,dur){var el=document.getElementById('toast');el.textContent=t;el.style.opacity=1;
+setTimeout(function(){el.style.opacity=0},dur||1500)}
 function ov(t,s){var o=document.getElementById('overlay');
 document.getElementById('ovt').textContent=t||'';
 document.getElementById('ovs').textContent=s||'';
@@ -170,7 +170,8 @@ if(document.hidden)return;   // 切后台不轮询（省唤醒）
 fetch(U('/healthz')).then(function(r){return r.json()}).then(function(j){
 VW=j.vw||414;VH=j.vh||896;
 WRAP.style.aspectRatio=VW+'/'+VH;
-HLTH={ok:!!j.ok,page:j.page||''};
+HLTH={ok:!!j.ok,page:j.page||'',exited:!!j.exited};
+statNotify(j);
 document.getElementById('pdot').className=
 j.ok?(j.page==='nav-error'?'warn':'ok'):'bad';
 if(j.homeUri)HOME=j.homeUri;
@@ -182,6 +183,7 @@ document.getElementById('stats').innerHTML=
 '<b>'+esc(j.account||'')+' · '+esc(j.platformLabel||'')+' · '+pt(j.page)+
 (j.exited?' · 已退出云机!':'')+'</b>'+
 '<br><b>浏览器</b> '+esc(j.browser)+
+(j.title?'<br><b>页面</b> '+esc(String(j.title).slice(0,40)):'')+
 '<br><b>ticks</b> '+j.ticks+' · <b>clicks</b> '+j.clicks+' · <b>弹窗</b> '+j.dialogs+
 '<br><b>重启</b> '+j.restarts+' · <b>重载</b> '+j.reloads+
 ' · <b>心跳</b> '+(j.lastBeatAge==null?'—':j.lastBeatAge+'s')+
@@ -633,4 +635,31 @@ post('/nav','url='+encodeURIComponent(HOME)).then(function(){ping('已回首页'
 function fs(){var el=document.documentElement;
 if(document.fullscreenElement){document.exitFullscreen()}
 else if(el.requestFullscreen){el.requestFullscreen()}}
+
+// —— 状态转换通知（对齐 Windows 版系统通知：退出云机/到期）——
+// 双通道：① /report 状态迁移（与 Windows 版 on_report 同语义，页面重载后
+// 可再次触发）；② /report 被网络策略拦截时，引擎采样标志的上升沿兜底
+// （标志单调为真，仅首次触发）。两通道同轮去重。通知权限需用户手势：
+// 首次触摸页面时 best-effort 申请，被拒/不支持降级为 toast
+var LASTST='',PREVEXIT=false;
+document.addEventListener('pointerdown',function askNotif(){
+if(!('Notification'in window)||Notification.permission!=='default')return;
+try{var p=Notification.requestPermission();if(p&&p.then)p.then(function(){},function(){})}catch(e){}
+},{once:true});
+function sysNotify(title,body){
+ping(title+'：'+body,5000);
+if('Notification'in window&&Notification.permission==='granted'){
+try{new Notification(title,{body:body,tag:'cpk-status'})}catch(e){}}
+}
+function statNotify(j){
+var st=j.lastStatus||'',noted=false;
+if(LASTST&&st&&st!==LASTST){
+if(st==='exited'){sysNotify('已退出云手机','帐号已退回云手机首页，请检查会话');noted=true}
+else if(st==='expired'){sysNotify('时间已到期','云手机使用时间已到期，到期弹窗已自动确认')}
+}
+if(st)LASTST=st;
+// 兜底通道：exited 标志上升沿（/report 不通时引擎采样仍能触发一次）
+if(j.exited&&!PREVEXIT&&!noted){sysNotify('已退出云手机','帐号已退回云手机首页，请检查会话')}
+PREVEXIT=!!j.exited;
+}
 </script></body></html>

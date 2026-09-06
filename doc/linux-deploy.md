@@ -82,12 +82,13 @@ screencast 生效，弱机/省流量场景建议 5-10；初始值可用环境变
 | 物理键盘全键位 | CDP `Input.dispatchKeyEvent` | keyDown/keyUp 逐键直通（含修饰键/功能键/方向键）；Ctrl+C/X 同步云机选区到本机剪贴板，Ctrl+V 把本机剪贴板粘贴到云机，Ctrl+A 远程全选，F5 远程刷新 |
 | 手机输入法（拼音） | 键盘开关 → `Input.insertText` | 控制台「键盘」按钮弹出输入框，IME 组合/输入/粘贴内容即发即转发（清空重打）；桌面端也可直接用 |
 | 剪贴板复制/粘贴 | `/clip` + `insertText` | 「复制」读云机选中文本（含输入框选区）写入本机剪贴板；「粘贴」读本机剪贴板插入云机焦点处 |
-| 页内地址栏 | `/addr` → eval `__CPK_ADDR__` | **对齐 Windows 版 Ctrl+U**：控制页按 Ctrl+U（或操作栏「地址」按钮）呼出云机页内地址栏，输入/回车跳转/Esc 关闭全在页内自理（键盘经 `/kbd` 直通，与 Windows 版同一交互） |
+
+> Linux 版**无页内地址栏**（按需求不提供）：导航走控制页「回首页」/页面内跳转；外部脚本可 `POST /nav`（token 同控制页）。shared 脚本注入的 `#cpk-addr-bar` 在云机页内保持 `display:none` 惰性存在，无任何触发入口，无副作用（Windows 版仍由 Ctrl+U 使用）。
 
 外部脚本直调端点（token 保护同控制页）：`POST /touch`（`phase` +
 `ps=x,y,id;x,y,id` 多点或 `x/y` 单点）、`POST /mouse`（`action=move/down/up/wheel`
 + `b/n/bb/m/dx/dy`）、`POST /kbd`（`t=down/up` + `key/code/vk/text/m/l/r`）、
-`POST /type`（整段文本）、`GET /clip`（选区文本）、`POST /addr`（切换页内地址栏）、
+`POST /type`（整段文本）、`GET /clip`（选区文本）、
 `POST /fps`（1-60）；
 `/tap /swipe /key /nav /reload` 兼容保留。所有输入事件 fire 即发，引擎线程
 占用 <0.1ms——导航/重连期间输入不再卡死；引擎重建期间请求毫秒级快速失败
