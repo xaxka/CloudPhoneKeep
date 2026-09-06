@@ -357,24 +357,41 @@ impl Cdp {
     /// ⚠️ ack 的 sessionId 必须原样透传事件 params 里的值：Chromium 各版本
     /// 类型不一（实测 152 为 int，协议文档写 string）——as_str() 会静默丢 ack，
     /// Chrome 发完首批帧后无限等待 → 实时画面掉到 ~1fps（曾长期误判为弱机性能）
+    ///
+    /// 丢帧先于解码（弱机 CPU 优化的关键一环）：软件限帧窗口内的帧在
+    /// base64 解码前直接丢弃——每帧几十 KB 的解码在被丢弃的帧上是纯浪费
+    /// （低配 ARM64 盒子曾表现为「帧数一高 CPU 就高」）。ack 已先行，
+    /// Chromium 照常合成下一帧不受影响。
     fn on_screencast_frame(&mut self, params: Value, session: Option<&str>) {
         if let Some(fs) = params.get("sessionId").cloned() {
             self.fire("Page.screencastFrameAck", json!({ "sessionId": fs }), session);
         }
+        if self.sinks.is_empty() {
+            if let Some(s) = session {
+                self.maybe_stop_screencast(s);
+            }
+            return;
+        }
+        if frame_throttled(self.last_frame_push, Instant::now(), self.screencast_fps) {
+            return;
+        }
         if let Some(b64) = params.get("data").and_then(|x| x.as_str()) {
+            self.last_frame_push = Some(Instant::now());
             let frame = util::base64_decode(b64);
-            self.push_frame(frame);
+            for (_, box_) in &self.sinks {
+                box_.post(frame.clone());
+            }
         }
         if let Some(s) = session {
             self.maybe_stop_screencast(s);
         }
     }
 
-    /// 向所有订阅者推送一帧（screencast 事件与首帧兜底共用）：
+    /// 向所有订阅者推送一帧（首帧兜底 captureScreenshot 路径专用；screencast
+    /// 事件路径已在 on_screencast_frame 里先判限帧再解码，不经此入口）：
     /// 覆盖写入信箱（丢旧保新）：观看端永远拿到最新画面，旧帧作废不排队。
     /// 软件限帧（Chrome 152 maxFrameRate 无效，实测设 5 仍 ~30fps 发帧）：
-    /// 距上次推送不足 1000/fps ms 的帧直接丢弃——ack 已先行（Chromium 不受
-    /// 影响，合成器照常出帧），观看端帧率精确受限；无人观看不记账。
+    /// 距上次推送不足 1000/fps ms 的帧直接丢弃；无人观看不记账。
     pub fn push_frame(&mut self, frame: Vec<u8>) {
         if self.sinks.is_empty() {
             return;
@@ -418,12 +435,7 @@ impl Cdp {
             for (i, b) in backoffs.iter().enumerate() {
                 match self.call_pumped(
                     "Page.startScreencast",
-                    json!({
-                        "format": "jpeg",
-                        "quality": 50,
-                        "everyNthFrame": 1,
-                        "maxFrameRate": self.screencast_fps
-                    }),
+                    screencast_params(self.screencast_fps),
                     Some(session),
                     3000,
                     &mut *pump, // 重借用：循环多轮传递（按值 move 会耗尽 &mut）
@@ -488,11 +500,26 @@ impl Cdp {
     }
 
     /// 运行时调整实时画面帧率（控制面板「设置 → 帧率」）。
-    /// 软件限帧（见 push_frame）：只更新目标值即刻生效，无需重启 cast
-    /// （实测 Chrome 152 stop+start 重建也不改变发帧频率——maxFrameRate
-    /// 参数本身无效，重启反而白白造成一次流空窗）。
-    pub fn set_screencast_fps(&mut self, fps: u32, _session: &str) {
-        self.screencast_fps = fps.clamp(1, 60);
+    /// everyNthFrame 只在 startScreencast 时生效：目标帧率跨档（60/fps 取整
+    /// 变化）时先 stop 再 start 重建 cast 让 Chrome 端编码节流同步更新——
+    /// 直接重发会撞 Chrome「Screencast is already active」拒绝（用户日志
+    /// 实证，重发失败等于没调）。同档内的微调只改软件限帧值，不重建
+    /// （重建有毫秒级空窗，无谓）。旧注释「stop+start 重建也不改变发帧
+    /// 频率」针对的是无效的 maxFrameRate，与 everyNthFrame 机制无关。
+    pub fn set_screencast_fps(&mut self, fps: u32, session: &str) {
+        let fps = fps.clamp(1, 60);
+        if fps == self.screencast_fps {
+            return;
+        }
+        let nth_changed = every_nth_for_fps(fps) != every_nth_for_fps(self.screencast_fps);
+        self.screencast_fps = fps;
+        if self.screencast_active && nth_changed && !self.sinks.is_empty() {
+            self.fire("Page.stopScreencast", json!({}), Some(session));
+            let _ = self
+                .fire_checked("Page.startScreencast", screencast_params(fps), Some(session));
+            // 续期防 rescue 误判重建瞬间的无帧窗口
+            self.last_cast_frame = Some(Instant::now());
+        }
     }
 
     /// 触摸事件统一分发（引擎侧触点跟踪）。所有 /touch 输入与 tap/swipe
@@ -570,8 +597,10 @@ impl Cdp {
     /// （startScreencast 的订阅不跨 renderer 存活，实测「选平台后卡等待
     /// 需手动刷新」「回首页后画面冻结拖不动」的根因）。此前只在【新订阅】
     /// 时才重发 startScreencast：已建立的死流只能等消费侧超时关流重连。
-    /// 现在引擎侧主动重发拉活：fire 即发（错误走 error_replies 留痕，导航
-    /// 窗口的瞬态拒拒下周期自动再试；last_cast_frame 预置续期限流重试风暴）。
+    /// 现在引擎侧主动重发拉活。
+    /// 重发前先 stopScreencast：直接重发会撞「Screencast is already active」
+    /// 被拒（用户日志实证：自愈本身失败，死流依旧死）；stop+start 双 fire
+    /// 无需等应答，毫秒级空窗由信箱心跳掩盖。
     /// 返回 true = 本次发出了重发（供上层落日志）。
     pub fn cast_rescue(&mut self, session: &str) -> bool {
         if !self.screencast_active || self.sinks.is_empty() {
@@ -587,17 +616,10 @@ impl Cdp {
         // 先续期再重发：若重发被拒（Not attached），下个监督周期（~秒级）
         // 再试——每 6s 最多一次，不会打搭 CDP 通道
         self.last_cast_frame = Some(Instant::now());
-        self.fire_checked(
-            "Page.startScreencast",
-            json!({
-                "format": "jpeg",
-                "quality": 50,
-                "everyNthFrame": 1,
-                "maxFrameRate": self.screencast_fps
-            }),
-            Some(session),
-        )
-        .is_ok()
+        self.fire("Page.stopScreencast", json!({}), Some(session));
+        self
+            .fire_checked("Page.startScreencast", screencast_params(self.screencast_fps), Some(session))
+            .is_ok()
     }
 }
 
@@ -636,6 +658,37 @@ fn frame_throttled(last: Option<Instant>, now: Instant, fps: u32) -> bool {
         Some(t) => now.duration_since(t) < min_gap,
         None => false,
     }
+}
+
+/// Chrome 端编码节流（Page.startScreencast 的 everyNthFrame）：合成器基准
+/// 60fps，取 floor(60/fps)——floor 保证 Chrome 端出帧率不低于目标（页面
+/// 动画只有 30fps 时按 30fps 出帧不受影响）；fps=10 → N=6，Chrome 的 JPEG
+/// 编码量降为 1/6。此前 everyNthFrame 恒为 1：合成器每一帧都编码，而软件
+/// 限帧丢帧发生在【编码完成之后】——被丢弃的帧白耗了编码 CPU，低配
+/// ARM64 盒子表现为「帧数一高 CPU 就高」。
+/// （maxFrameRate 实测 Chrome 152 无视，与 everyNthFrame 是两回事：前者
+/// 不传、后者才真正生效；帧率精确性仍由软件限帧兑底。pub 供单测与引擎。）
+pub fn every_nth_for_fps(fps: u32) -> u32 {
+    (60 / fps.clamp(1, 60)).max(1)
+}
+
+/// startScreencast 参数（订阅/自愈/SetFps 重建三路径统一）：
+/// quality 随帧率联动——低帧率时编码次数少，把画质补回来；高帧率时
+/// 降画质换编码速度（弱机 CPU 与带宽双省）。
+fn screencast_params(fps: u32) -> Value {
+    let q = if fps <= 15 {
+        55
+    } else if fps <= 30 {
+        45
+    } else {
+        35
+    };
+    json!({
+        "format": "jpeg",
+        "quality": q,
+        "everyNthFrame": every_nth_for_fps(fps),
+        "maxFrameRate": fps
+    })
 }
 
 /// startScreencast/captureScreenshot 的瞬态错误判定（纯函数，可单测；引擎
@@ -687,7 +740,7 @@ fn track_touch_points(
 
 #[cfg(test)]
 mod tests {
-    use super::{frame_throttled, is_transient_cast_error, track_touch_points, FramePoll, FrameSlot, Cdp};
+    use super::{every_nth_for_fps, frame_throttled, is_transient_cast_error, track_touch_points, FramePoll, FrameSlot, Cdp};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
@@ -777,6 +830,24 @@ mod tests {
         assert!(frame_throttled(Some(t0), t0 + Duration::from_millis(300), 0));
         assert!(!frame_throttled(Some(t0), t0 + Duration::from_millis(1100), 0));
         assert!(!frame_throttled(Some(t0), t0 + Duration::from_millis(300), 999));
+    }
+
+    /// everyNthFrame 节流映射：floor(60/fps) 保证 Chrome 端出帧率
+    /// （60/nth）不低于目标 fps（nth*fps ≤ 60，全枚举验证）；
+    /// 典型档位：10fps→6（编码量降为 1/6）、25fps→2、60fps→1。
+    #[test]
+    fn every_nth_mapping_covers_target() {
+        for fps in 1..=60u32 {
+            let nth = every_nth_for_fps(fps);
+            assert!(nth >= 1 && nth <= 60, "fps={fps} nth={nth} 越界");
+            assert!(60 / nth >= fps, "fps={fps} nth={nth}：Chrome 端帧率低于目标");
+        }
+        assert_eq!(every_nth_for_fps(10), 6);
+        assert_eq!(every_nth_for_fps(25), 2);
+        assert_eq!(every_nth_for_fps(60), 1);
+        // 乱序值 clamp 不 panic
+        assert_eq!(every_nth_for_fps(0), 60);
+        assert_eq!(every_nth_for_fps(999), 1);
     }
 
     /// 触点跟踪语义（协议规定 touchEnd/touchCancel 不得携带触点）：

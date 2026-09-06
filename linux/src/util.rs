@@ -174,6 +174,20 @@ pub fn sha1(msg: &[u8]) -> [u8; 20] {
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/// 反查表（ASCII → 6bit 值；0xFF = 非法）：const 构建零运行时开销。
+/// 解码从旧版 O(64n)（逐字符线性扫字母表）降为 O(n)：screencast 每帧
+/// 几十 KB base64，旧实现在低配 ARM64 上是帧数升高时 CPU 飙升的固定
+/// 热点之一（6MB/s 流量 = 每秒近 4 亿次字符比较）。
+const B64_REV: [u8; 256] = {
+    let mut t = [0xFFu8; 256];
+    let mut i = 0;
+    while i < 64 {
+        t[B64[i] as usize] = i as u8;
+        i += 1;
+    }
+    t
+};
+
 pub fn base64_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
     for chunk in data.chunks(3) {
@@ -188,36 +202,26 @@ pub fn base64_encode(data: &[u8]) -> String {
 }
 
 pub fn base64_decode(s: &str) -> Vec<u8> {
-    let mut vals: Vec<u8> = Vec::new();
-    'outer: for c in s.bytes() {
+    // 流式位累积：每字符 6bit，攒满 8bit 就输出一个字节。
+    // 与旧实现语义一致：'=' 终止、宽容空白/非法字符（忽略）；
+    // 尾部不足 8bit 的残余位自然丢弃（与旧实现的补齐位移等价）。
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    let mut acc: u32 = 0;
+    let mut nbits: u32 = 0;
+    for &c in bytes {
         if c == b'=' {
             break;
         }
-        if c.is_ascii_whitespace() {
-            continue;
+        let v = B64_REV[c as usize];
+        if v == 0xFF {
+            continue; // 空白/非法字符忽略（保持旧版宽容行为）
         }
-        for (i, &x) in B64.iter().enumerate() {
-            if x == c {
-                vals.push(i as u8);
-                continue 'outer;
-            }
-        }
-        // 非法字符忽略
-    }
-    let mut out = Vec::with_capacity(vals.len() * 3 / 4);
-    for chunk in vals.chunks(4) {
-        let cnt = chunk.len();
-        let mut n: u32 = 0;
-        for &v in chunk {
-            n = (n << 6) | v as u32;
-        }
-        n <<= 6 * (4 - cnt) as u32;
-        out.push((n >> 16) as u8);
-        if cnt >= 3 {
-            out.push((n >> 8) as u8);
-        }
-        if cnt >= 4 {
-            out.push(n as u8);
+        acc = (acc << 6) | v as u32;
+        nbits += 6;
+        if nbits >= 8 {
+            nbits -= 8;
+            out.push((acc >> nbits) as u8);
         }
     }
     out

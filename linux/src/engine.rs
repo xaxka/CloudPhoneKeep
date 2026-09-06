@@ -721,7 +721,7 @@ fn steady_loop(
                 .unwrap_or(false);
             if !quiet {
                 rescue_log_at = Some(Instant::now());
-                logger.log(1, "sys", "实时流 6s 无帧，已重发 startScreencast 自愈（静态页无帧属正常）");
+                logger.log(1, "sys", "实时流 6s 无帧，已 stop+start 重发 screencast 自愈（静态页无帧属正常）");
             }
         }
         // Chromium 进程退出

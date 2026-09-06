@@ -186,11 +186,15 @@ autocapitalize="off" autocorrect="off" spellcheck="false">
 <select id="fpsel">
 <option value="25">25 流畅</option>
 <option value="15">15</option>
-<option value="10">10</option>
+<option value="10">10 低配推荐</option>
 <option value="5">5 省流</option>
 <option value="2">2</option>
 <option value="1">1 最省</option>
 </select>
+</div>
+<div class="row" style="color:#8aa;font-size:11px;line-height:1.5">
+<span class="lb" style="color:#8aa">提示</span>
+<span>帧率越高 CPU 越高；低配盒子建议 8~12。10fps 时引擎端自动降低编码量（Chrome 端每 6 合成器帧取 1），CPU 约降为 1/6。</span>
 </div>
 </aside>
 <div id="mask"></div>
