@@ -694,6 +694,7 @@ fn steady_loop(
     let mut next_sample = Instant::now() + Duration::from_secs(5);
     let mut last_progress = Instant::now();
     let mut last_dialog_count = 0u32;
+    let mut rescue_log_at: Option<Instant> = None; // 自愈日志限流（静态页无帧属正常）
     shared.set_page("loading");
 
     loop {
@@ -707,6 +708,21 @@ fn steady_loop(
         // startScreencast 导航窗口被拒、dispatchTouchEvent 点列表违规被拒等）
         for e in cdp.take_error_replies() {
             logger.log(0, "error", &e);
+        }
+        // 实时流自愈：cast 在播且有订阅者但 6s 无帧（导航换档/渲染器切换
+        // 后 Chromium 单方面停发帧）→ 主动重发 startScreencast 拉活。
+        // 此前死流只能等消费侧 30s 超时关流重连（「选平台后卡等待」「回
+        // 首页后画面冻结拖不动」）——现在引擎侧秒级自愈，无需用户刷新
+        if cdp.cast_rescue(session) {
+            // 静态页正常不发帧：重发本身无害（重订阅），但每 6s 一条日志会刷屏
+            // ——限流 60s 一条
+            let quiet = rescue_log_at
+                .map(|t| t.elapsed() < Duration::from_secs(60))
+                .unwrap_or(false);
+            if !quiet {
+                rescue_log_at = Some(Instant::now());
+                logger.log(1, "sys", "实时流 6s 无帧，已重发 startScreencast 自愈（静态页无帧属正常）");
+            }
         }
         // Chromium 进程退出
         match child.try_wait() {
@@ -1198,28 +1214,60 @@ fn handle_control(
                     // 先应答后补帧：HTTP 层零等待；弱机/引擎忙时截图再慢也只影响首帧
                     // 到达时刻，不影响连接建立（TTFB）
                     let _ = reply.send(Ok(sub));
-                    // 首帧兑底：静态页/错误页合成器无更新，screencast 可能长期不发帧 →
+                    // 首帧兜底：静态页/错误页合成器无更新，screencast 可能长期不发帧 →
                     // 立即截一帧推给所有订阅者，保证流打开就有画面（也盖住重连空窗）。
-                    // 阻塞等待期间继续泵入快通道输入请求
-                    match cdp.call_pumped(
-                        "Page.captureScreenshot",
-                        json!({ "format": "jpeg", "quality": 60 }),
-                        Some(session),
-                        8000,
-                        &mut |c| pump.drain(c),
-                    ) {
-                        Ok(v) => {
-                            if let Some(b64) = v.get("data").and_then(|x| x.as_str()) {
-                                cdp.push_frame(util::base64_decode(b64));
+                    // 「Not attached to an active page」（导航换档的瞬态拒）退避重试
+                    // 跨过导航窗口——此前只试一次即弃，选平台后流长期无首帧的成因
+                    // 之一；重试期间持续泵入快通道输入请求
+                    let mut first_frame_sent = false;
+                    let mut last_err = String::new();
+                    for attempt in 0..3u32 {
+                        match cdp.call_pumped(
+                            "Page.captureScreenshot",
+                            json!({ "format": "jpeg", "quality": 60 }),
+                            Some(session),
+                            8000,
+                            &mut |c| pump.drain(c),
+                        ) {
+                            Ok(v) => {
+                                if let Some(b64) = v.get("data").and_then(|x| x.as_str()) {
+                                    cdp.push_frame(util::base64_decode(b64));
+                                    first_frame_sent = true;
+                                }
+                                break;
+                            }
+                            Err(e) => {
+                                if e.starts_with("WS:") {
+                                    return Err(e);
+                                }
+                                last_err = e;
+                                if !cdp::is_transient_cast_error(&last_err) {
+                                    break; // 非瞬态（页面忙等）：screencast 事件帧照常会到
+                                }
+                                if attempt + 1 < 3 {
+                                    // 退避切片：期间泵事件（新帧照常分发；WS 断裂上抛）
+                                    let deadline =
+                                        Instant::now() + Duration::from_millis(300 * (attempt as u64 + 1));
+                                    loop {
+                                        let left = deadline.saturating_duration_since(Instant::now());
+                                        if left.is_zero() {
+                                            break;
+                                        }
+                                        if let Err(e2) = cdp.pump_events(left.min(Duration::from_millis(100))) {
+                                            if e2.starts_with("WS:") {
+                                                return Err(e2);
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                         }
-                        Err(e) => {
-                            if e.starts_with("WS:") {
-                                return Err(e);
-                            }
-                            // 命令级失败（页面忙等）：screencast 事件帧照常会到，仅记日志
-                            logger.log(1, "sys", &format!("实时流首帧兜底截图未成：{e}"));
-                        }
+                    }
+                    if !first_frame_sent {
+                        // 命令级失败仅记日志（screencast 事件帧照常会到；稳态循环
+                        // 的 cast_rescue 6s 自愈也会拉活）
+                        logger.log(1, "sys", &format!("实时流首帧兜底截图未成：{last_err}"));
                     }
                 }
                 Err(e) => {
@@ -1274,6 +1322,13 @@ fn dispatch_input(
                 // 诊断探针：记下按下坐标，稳态循环用 elementFromPoint
                 // 探落点元素（点击无反应时日志直接给出命中目标）
                 *tap_probe = Some((points[0].x, points[0].y));
+            }
+            // 抬起/取消同样留痕：此前 end 无日志，「点击没反应」时无法区分
+            // 「end 未到达引擎」与「页面收到但不响应」——观测盲区消除
+            if phase == "end" {
+                logger.log(1, "click", "触摸抬起（整组释放）");
+            } else if phase == "cancel" {
+                logger.log(1, "click", "触摸取消（整组释放）");
             }
             let pts: Vec<(f64, f64, i64)> = points.iter().map(|p| (p.x, p.y, p.id)).collect();
             cdp.dispatch_touch(&phase, &pts, session)?;
@@ -1486,6 +1541,7 @@ pub fn build_args_with(cfg: &Config, vw: u32, vh: u32) -> Vec<String> {
         "--disable-features=Translate,MediaRouter,OptimizationHints".into(),
         "--mute-audio".into(),
         "--autoplay-policy=no-user-gesture-required".into(), // 云机视频流自动播放
+        "--disable-pinch".into(), // 禁页面捏合缩放：云机画面 1:1（拖动误触缩放/缩放后坐标错位的根治）
         format!("--lang={}", cfg.lang),
     ];
     if cfg.no_sandbox {
@@ -1623,6 +1679,9 @@ fn attach_all(
     let mut ua_params = json!({ "userAgent": ua });
     if cfg.ua_mode == "windows" {
         ua_params["platform"] = Value::String("Windows".into());
+    } else if cfg.ua_mode == "mobile" {
+        // navigator.platform 同步 Android（部分 H5 以此判分支）
+        ua_params["platform"] = Value::String("Linux armv8l".into());
     }
     if cdp.call("Emulation.setUserAgentOverride", ua_params, Some(&session), 5000).is_err() {
         logger.log(1, "sys", "UA 覆盖未生效（不影响保活，仅环境指纹差异）");
@@ -1651,7 +1710,12 @@ fn attach_all(
 }
 
 /// UA 规范化（与 Node 版 normalizeUserAgent 一致）：
-/// windows=重建为 Windows Chrome UA；auto=仅去 Headless 字样；none=原样
+/// mobile=重建为 Android Chrome 移动 UA（默认）：云机 H5 按 UA 分手机/桌面
+/// 分支，桌面 UA 下页面渲染 no-phone-layout 桌面布局（首见采样类名实证），
+/// 414 视口与桌面布局错位 → 点击坐标命错目标（「去登陆/秒开点了没反应」
+/// 的根因）。正常用户 100% 移动 UA——移动 UA 才是与真实云机用户一致的
+/// 环境指纹；windows=重建为 Windows Chrome UA；auto=仅去 Headless 字样；
+/// none=原样
 pub fn normalize_user_agent(raw: &str, mode: &str) -> String {
     if mode == "none" {
         return raw.to_string();
@@ -1659,8 +1723,13 @@ pub fn normalize_user_agent(raw: &str, mode: &str) -> String {
     if mode == "auto" {
         return raw.replace("HeadlessChrome", "Chrome");
     }
-    // windows（默认）：提取 Chrome 版本号重建
     let ver = regex_chrome_version(raw).unwrap_or_else(|| "138.0.0.0".into());
+    if mode == "mobile" {
+        return format!(
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{ver} Mobile Safari/537.36"
+        );
+    }
+    // windows：提取 Chrome 版本号重建
     format!(
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{ver} Safari/537.36"
     )
@@ -1900,9 +1969,16 @@ mod tests {
         assert!(auto.contains("X11; Linux x86_64"));
         let none = normalize_user_agent(raw, "none");
         assert_eq!(none, raw);
+        // mobile：Android 移动 UA（云机 H5 手机布局的正确环境）
+        let mb = normalize_user_agent(raw, "mobile");
+        assert!(mb.starts_with("Mozilla/5.0 (Linux; Android 13; Pixel 7)"));
+        assert!(mb.contains("Chrome/152.0.7977.82 Mobile Safari"));
+        assert!(!mb.contains("HeadlessChrome"));
         // 无版本号兜底
         let win2 = normalize_user_agent("Mozilla/5.0 HeadlessChrome", "windows");
         assert!(win2.contains("Chrome/138.0.0.0"));
+        let mb2 = normalize_user_agent("Mozilla/5.0 HeadlessChrome", "mobile");
+        assert!(mb2.contains("Chrome/138.0.0.0 Mobile"));
     }
 
     #[test]
@@ -1955,6 +2031,8 @@ mod tests {
         assert!(args.contains(&"--js-flags=--max-old-space-size=512".to_string()));
         // 触摸事件需要 autoplay 策略放开
         assert!(args.contains(&"--autoplay-policy=no-user-gesture-required".to_string()));
+        // 禁页面捏合缩放（拖动误触缩放/缩放后坐标错位的根治）
+        assert!(args.contains(&"--disable-pinch".to_string()));
         // 恒无头：镜像固定 chrome-headless-shell，不添加 --headless=new
         assert!(!args.contains(&"--headless=new".to_string()));
     }

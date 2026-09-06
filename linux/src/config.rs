@@ -147,8 +147,8 @@ impl Config {
             chrome_bin: envs("CPK_CHROME_BIN").unwrap_or_else(|| "chrome-headless-shell".into()),
             no_sandbox: bool_env("CPK_NO_SANDBOX", true), // Docker 默认无 user-namespace 特权
             ua_mode: envs("CPK_UA_MODE")
-                .filter(|m| ["windows", "auto", "none"].contains(&m.as_str()))
-                .unwrap_or_else(|| "windows".into()),
+                .filter(|m| ["mobile", "windows", "auto", "none"].contains(&m.as_str()))
+                .unwrap_or_else(|| "mobile".into()),
             lang: envs("CPK_LANG").unwrap_or_else(|| "zh-CN".into()),
             tz: envs("TZ").unwrap_or_else(|| "Asia/Shanghai".into()),
             extra_chrome_args: envs("CPK_EXTRA_CHROME_ARGS").unwrap_or_default(),
@@ -184,7 +184,7 @@ mod tests {
         assert_eq!(cfg.interval_ms, 5000);
         assert_eq!(cfg.report_port, 8088);
         assert_eq!(cfg.bind, "0.0.0.0");
-        assert_eq!(cfg.ua_mode, "windows");
+        assert_eq!(cfg.ua_mode, "mobile", "默认 UA 应为移动（云机 H5 手机布局）");
         assert_eq!(cfg.page_timer, false);
         assert_eq!(cfg.chrome_bin, "chrome-headless-shell");
         assert!(cfg.profile_dir.to_string_lossy().contains("profile-account1"));
@@ -220,6 +220,10 @@ mod tests {
         let cfg = Config::from_env();
         assert_eq!(cfg.interval_ms, 5000);
         assert_eq!(cfg.tick_fail_reload, 600);
+        assert_eq!(cfg.ua_mode, "mobile", "非法 UA 模式应回退默认 mobile");
+        // 合法覆盘：windows 仍可选（旧部署兼容）
+        std::env::set_var("CPK_UA_MODE", "windows");
+        let cfg = Config::from_env();
         assert_eq!(cfg.ua_mode, "windows");
 
         // 去掉 CPK_URL 后回到待机默认（防回归：URL 不残留影响留空判定）

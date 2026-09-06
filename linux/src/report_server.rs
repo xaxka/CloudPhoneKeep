@@ -292,8 +292,16 @@ FPSEL.value=String(fps);
 }
 FPSEL.addEventListener('change',function(){
 var v=parseInt(this.value,10)||25;this._t=1;this.blur();
-post('/fps','value='+v).then(function(){ping('帧率上限已设为 '+v+' fps（画面静止时按页面更新推送）')})
-.catch(function(e){ping('帧率设置失败：'+e.message)});
+// 回读验证：post 成功 ≠ 生效——healthz.fps 应等于设置值，不一致即
+// 引擎/服务侧未落地，如实报错并解锁下拉（syncFpsSel 恢复显示真值），
+// 绝不「已设为 N」的谎报（用户实测「设 10 显示上限 25」的教训）
+post('/fps','value='+v).then(function(r){
+if(!r.ok)throw new Error('HTTP '+r.status);
+return fetch(U('/healthz')).then(function(r2){return r2.json()});
+}).then(function(j){
+if(j&&j.fps===v){ping('帧率上限已设为 '+v+' fps（画面静止时按页面更新推送）')}
+else{FPSEL._t=0;ping('帧率设置未生效（引擎侧仍为 '+(j&&j.fps!=null?j.fps:'?')+' fps），请重试',4000)}
+}).catch(function(e){FPSEL._t=0;ping('帧率设置失败：'+e.message)});
 });
 
 // —— 平台选择（启动无弹窗：平台留空待选，此处选好后引擎加载页面）——
@@ -823,7 +831,7 @@ fn handle_conn(
 
 /// 实时画面流：向引擎订阅 screencast 帧信箱（只存最新帧），以 multipart/x-mixed-replace
 /// 推送（MJPEG）。退出条件：客户端断开（写失败）/ 生产侧心跳丢失（CDP 重建、
-/// 浏览器重启：连续两个窗口无引擎泵心跳）/ 首帧 30s 未至（引擎极端繁忙）。
+/// 浏览器重启：连续两个窗口无引擎泵心跳）/ 首帧 12s 未至（引擎极端繁忙）。
 /// 关流后页面侧自动重连。静态页面合成器无更新 → screencast 不发新帧：以 2s
 /// 心跳重发上一帧维持连接。
 fn stream_mjpeg(stream: &mut TcpStream, ctrl: &Sender<ControlRequest>, logger: &Arc<Logger>) {
@@ -889,9 +897,12 @@ fn stream_mjpeg(stream: &mut TcpStream, ctrl: &Sender<ControlRequest>, logger: &
                         }
                         last_push = Instant::now();
                     }
-                } else if opened.elapsed() > Duration::from_secs(30) {
-                    // 首帧 30s 未至（引擎极端繁忙/浏览器启动中）→ 关流，页面转截图兜底
-                    logger.log(1, "sys", "实时画面流首帧 30s 未至，关流（页面自动转截图轮询并重连）");
+                } else if opened.elapsed() > Duration::from_secs(12) {
+                    // 首帧 12s 未至（引擎极端繁忙/浏览器启动中）→ 关流，页面转截图兜底
+                    // （30s→12s：死流期间引擎侧 cast_rescue 已在 6s 级重发拉活，
+                    // 12s 仍无帧说明流路彻底不可用——早转截图让用户见到画面，
+                    // 不再干等需手动刷新）
+                    logger.log(1, "sys", "实时画面流首帧 12s 未至，关流（页面自动转截图轮询并重连）");
                     break;
                 }
             }
@@ -1618,6 +1629,8 @@ mod tests {
         // fps 状态行实测+上限双指标（静止页实测远低于上限不再误读为设置失效）
         assert!(body4.contains("实测 "), "状态行缺实测帧率");
         assert!(body4.contains("上限 "), "状态行缺帧率上限");
+        // fps 回读验证（绝不谎报：设 N 后 healthz.fps≠N 如实报错并解锁下拉）
+        assert!(body4.contains("帧率设置未生效"), "fps 设置缺回读验证接线");
         // 触摸整组释放恒空点（CDP 协议规定 touchEnd/touchCancel 不得携带触点，
         // 带点形态会被 Chrome 拒绝——页面收不到 tap 收尾，「点击没反应」
         // 的直接根源）——控制页与引擎双保险

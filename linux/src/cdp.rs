@@ -564,6 +564,41 @@ impl Cdp {
     pub fn close(&mut self) {
         let _ = self.ws.send_close();
     }
+
+    /// 实时流自愈（稳态循环每周期调用）：cast 标记在播且有订阅者，但距最近
+    /// 一帧已超 6s——导航换档/渲染器切换后 Chromium 会单方面停止发帧
+    /// （startScreencast 的订阅不跨 renderer 存活，实测「选平台后卡等待
+    /// 需手动刷新」「回首页后画面冻结拖不动」的根因）。此前只在【新订阅】
+    /// 时才重发 startScreencast：已建立的死流只能等消费侧超时关流重连。
+    /// 现在引擎侧主动重发拉活：fire 即发（错误走 error_replies 留痕，导航
+    /// 窗口的瞬态拒拒下周期自动再试；last_cast_frame 预置续期限流重试风暴）。
+    /// 返回 true = 本次发出了重发（供上层落日志）。
+    pub fn cast_rescue(&mut self, session: &str) -> bool {
+        if !self.screencast_active || self.sinks.is_empty() {
+            return false;
+        }
+        let stale = self
+            .last_cast_frame
+            .map(|t| t.elapsed() > Duration::from_secs(6))
+            .unwrap_or(true);
+        if !stale {
+            return false;
+        }
+        // 先续期再重发：若重发被拒（Not attached），下个监督周期（~秒级）
+        // 再试——每 6s 最多一次，不会打搭 CDP 通道
+        self.last_cast_frame = Some(Instant::now());
+        self.fire_checked(
+            "Page.startScreencast",
+            json!({
+                "format": "jpeg",
+                "quality": 50,
+                "everyNthFrame": 1,
+                "maxFrameRate": self.screencast_fps
+            }),
+            Some(session),
+        )
+        .is_ok()
+    }
 }
 
 /// 在页面上执行 JS 表达式并取回返回值（returnByValue）。
@@ -603,11 +638,12 @@ fn frame_throttled(last: Option<Instant>, now: Instant, fps: u32) -> bool {
     }
 }
 
-/// startScreencast/captureScreenshot 的瞬态错误判定（纯函数，可单测）：
-/// 页面导航换档期（渲染器切换，目标暂无活动页面）Chrome 会拒绝这类
-/// 页面级命令（实测 chrome-headless-shell："Not attached to an active
-/// page"，导航完成后重试即成）——这类错误值得退避重试而非放弃。
-fn is_transient_cast_error(e: &str) -> bool {
+/// startScreencast/captureScreenshot 的瞬态错误判定（纯函数，可单测；引擎
+/// 侧的兜底截图重试也用它）：页面导航换档期（渲染器切换，目标暂无活动
+/// 页面）Chrome 会拒绝这类页面级命令（实测 chrome-headless-shell：
+/// "Not attached to an active page"，导航完成后重试即成）——这类错误
+/// 值得退避重试而非放弃。
+pub fn is_transient_cast_error(e: &str) -> bool {
     e.contains("Not attached to an active page")
 }
 

@@ -166,6 +166,53 @@
     function tsFromTouchSynth(){
       return tsLastRealEnd && (Date.now() - tsLastRealEnd) < 80;
     }
+    // —— 触摸轻点 → 合成 click 兜底（对齐 Windows 完整 Chrome 行为）——
+    // Windows 完整 Chrome：CDP 触摸轻点后 Chrome 自动合成 mousedown/mouseup/
+    // click（监听 click 的 H5 按钮由此响应；「去登陆/秒开」即此类）。chrome-
+    // headless-shell 没有这条 touch→mouse 合成链：页面只收到 touchstart/
+    // touchend，监听 click 的按钮全部无反应（轻点无反馈的成因）。这里补齐：
+    // 真实轻点的 touchend 后 90ms 内没有 mousedown 到达（= 无合成链）→ 对
+    // 落点元素派发合成 mousedown/mouseup/click；有合成链的环境自动跳过
+    // （天然防双发）。移动浏览器每个 tap 本就 touch+mouse 双套事件，页面
+    // （Vue @click 与手势库并存）必须且已处理好双流，与真实手机一致。
+    var tkStart = null, tkMouseSeen = false, tkSynthing = false;
+    window.addEventListener('mousedown', function(ev){
+      if (ev.isTrusted) tkMouseSeen = true;  // Chrome 自己合成的 mouse（若存在）
+    }, true);
+    window.addEventListener('touchstart', function(ev){
+      if (!ev.isTrusted) return;
+      if (ev.touches.length > 1) { tkStart = null; return; }  // 多指手势不合成
+      var t = ev.touches[0];
+      tkStart = { x: t.clientX, y: t.clientY, at: Date.now() };
+    }, true);
+    window.addEventListener('touchend', function(ev){
+      if (!ev.isTrusted || !tkStart) return;
+      var st = tkStart; tkStart = null;
+      var t = ev.changedTouches && ev.changedTouches[0];
+      if (!t) return;
+      var dt = Date.now() - st.at;
+      var dist = Math.abs(t.clientX - st.x) + Math.abs(t.clientY - st.y);
+      if (dt > 600 || dist > 30) return;  // 拖动/长按不是轻点
+      tkMouseSeen = false;  // touchend 之后到达的 mousedown 才算合成链
+      setTimeout(function(){
+        try {
+          if (tkMouseSeen || tkSynthing) return;  // 合成链在（或正在补）→ 跳过
+          var el = document.elementFromPoint(st.x, st.y);
+          if (!el || tsSkip(el)) return;
+          function mk(type, buttons){
+            return new MouseEvent(type, { bubbles: true, cancelable: true, view: window,
+              clientX: st.x, clientY: st.y, screenX: st.x, screenY: st.y,
+              button: 0, buttons: buttons, detail: type === 'click' ? 1 : 0 });
+          }
+          tkSynthing = true;
+          try {
+            el.dispatchEvent(mk('mousedown', 1));
+            el.dispatchEvent(mk('mouseup', 0));
+            el.dispatchEvent(mk('click', 0));
+          } finally { tkSynthing = false; }
+        } catch(e) {}
+      }, 90);
+    }, true);
     // 豁免区保持原生鼠标行为：页面约定的 [data-no-touch-simulate] +
     // 表单/可编辑元素（输入框需要原生焦点与选字）
     function tsSkip(el){
@@ -212,6 +259,8 @@
         try {
           // 触摸轻点合成的鼠标事件：不再转回触摸（防双发，见上方说明）
           if (tsFromTouchSynth()) return;
+          // 本脚本合成 click 兜底的派发中：不转触摸（否则双套 touchstart）
+          if (tkSynthing) return;
           if (me.button !== undefined && me.button !== 0) return; // 只处理左键
           if (me.type === 'mousedown') tsDown = true;
           if (me.type === 'mouseup') tsDown = false;

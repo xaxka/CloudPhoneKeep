@@ -116,6 +116,20 @@ mod tests {
     }
 
     #[test]
+    fn tap_click_synth_fallback_present() {
+        // 触摸轻点 → 合成 click 兜底（chrome-headless-shell 无 touch→mouse
+        // 合成链，监听 click 的 H5 按钮轻点无反应的修复）：90ms 无 mousedown
+        // 即补合成 mousedown/mouseup/click；有合成链的环境自动跳过
+        let s = build_init_script(&cfg(), 8088);
+        assert!(s.contains("tkSynthing"), "缺合成 click 兜底（防再转触摸标记）");
+        assert!(s.contains("tkMouseSeen"), "缺 Chrome 合成链探测（防双发）");
+        assert!(s.contains("document.elementFromPoint(st.x, st.y)"), "缺落点元素解析");
+        assert!(s.contains("el.dispatchEvent(mk('click', 0))"), "缺合成 click 派发");
+        // 兜底派发不得被 mousedown→touchstart 转换器再转一轮触摸
+        assert!(s.contains("if (tkSynthing) return;"), "缺转换器跳过守卫");
+    }
+
+    #[test]
     fn port_injected() {
         let s = build_init_script(&cfg(), 1234);
         assert!(s.contains("\"port\":1234"));
