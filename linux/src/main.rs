@@ -162,7 +162,8 @@ fn selftest(cfg: &config::Config, logger: &Arc<Logger>) -> i32 {
             script.contains(&format!("\"platform\":\"{}\"", cfg.platform))
                 && script.contains(&format!("\"port\":{}", cfg.report_port)),
         ),
-        ("script: 占位符已替换", !script.contains("__CPK_CFG__") && !script.contains("__CPK_CURSOR__")),
+        // 注：脚本头部文档注释会提及占位符名，断言只针对实际代码行
+        ("script: 占位符已替换", !script.contains("var CFG = __CPK_CFG__;") && !script.contains("base64,__CPK_CURSOR__")),
         ("script: tick 暴露", script.contains("__CPK_TICK__")),
         ("script: 状态暴露", script.contains("__CPK_STATE__")),
         ("script: 诊断缓冲", script.contains("__CPK_DRAIN__")),
