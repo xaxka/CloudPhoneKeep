@@ -68,7 +68,7 @@ header{display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(
 border-bottom:1px solid var(--line);flex:none}
 header h1{font-size:15px;margin:0;font-weight:600}
 #dot{width:9px;height:9px;border-radius:50%;background:#64748b;flex:none}
-#dot.ok{background:#22c55e}#dot.bad{background:#ef4444}
+#dot.ok{background:#22c55e}#dot.bad{background:#ef4444}#dot.warn{background:#f59e0b}
 #fps{color:var(--dim);font-size:12px}
 #meta{color:var(--dim);font-size:12px;margin-left:auto;text-align:right;line-height:1.35;
 max-width:46vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -83,6 +83,10 @@ touch-action:none;user-select:none;-webkit-user-select:none}
 justify-content:center;background:#020617e6;color:var(--dim);font-size:13px;text-align:center;padding:0 24px}
 #overlay.hidden{display:none}
 #ovt{color:var(--txt);font-size:15px}
+/* 导航失败徽标：不挡触摸（pointer-events:none），仅提示「白屏=网络/DNS」 */
+#pbadge{position:absolute;top:10px;left:10px;background:#dc2626e6;color:#fff;font-size:12px;
+font-weight:600;padding:4px 11px;border-radius:999px;display:none;z-index:5;pointer-events:none;
+max-width:92%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #panel{flex:none;width:300px;background:var(--panel);border-left:1px solid var(--line);
 padding:12px 14px;overflow-y:auto;display:flex;flex-direction:column;gap:9px}
 #panel h2{font-size:11px;margin:4px 0 0;color:var(--dim);font-weight:600;
@@ -113,6 +117,7 @@ main{flex-direction:column}
 <section id="stage"><div id="wrap">
 <img id="shot" alt="云手机实时画面" draggable="false">
 <div id="overlay"><div id="ovt">等待画面…</div><div id="ovs"></div></div>
+<div id="pbadge"></div>
 </div></section>
 <aside id="panel">
 <h2>状态</h2>
@@ -137,7 +142,8 @@ main{flex-direction:column}
 <h2>说明</h2>
 <div class="note">左侧为云手机实时画面：单击＝触摸，按住拖动＝滑动（返回/切后台等手势）。
 首次登录：画面中点「登录」→ 点手机号输入框 → 右侧输入手机号回车 → 收到验证码后输入 →
-登录态自动持久化，之后免登录。画面不更新或空白时，看上方「状态」诊断（页面/lastError）。</div>
+登录态自动持久化，之后免登录。画面全白且出现红色「导航失败」徽标＝首页打不开
+（网络/DNS 问题，引擎在自动重试，看「状态」里的错误行定位），与画面链路无关。</div>
 </aside>
 </main>
 <div id="toast"></div>
@@ -160,16 +166,21 @@ document.getElementById('ovs').textContent=s||'';
 if(t){o.classList.remove('hidden')}else{o.classList.add('hidden')}}
 
 // —— 状态轮询（3s）：状态灯 + 面板 + 视口尺寸（触摸坐标映射基准）——
+var PAGEMAP={loading:'加载中',ok:'页面正常',reloading:'重载中','nav-error':'导航失败·重试中'};
+function pt(s){return PAGEMAP[s]||s||'—'}
 function poll(){
 fetch(U('/healthz')).then(function(r){return r.json()}).then(function(j){
 VW=j.vw||414;VH=j.vh||896;
 document.getElementById('wrap').style.aspectRatio=VW+'/'+VH;
-document.getElementById('dot').className=j.ok?'ok':'bad';
+document.getElementById('dot').className=j.ok?(j.page==='nav-error'?'warn':'ok'):'bad';
 document.getElementById('meta').textContent=(j.account||'')+' · '+(j.platformLabel||'')+
-' · '+(j.page||'')+(j.exited?' · 已退出云机!':'');
+' · '+pt(j.page)+(j.exited?' · 已退出云机!':'');
 if(j.homeUri)HOME=j.homeUri;
+var PB=document.getElementById('pbadge');
+if(j.page==='nav-error'){PB.style.display='block';
+PB.textContent='首页导航失败·引擎自动重试中'}else{PB.style.display='none'}
 document.getElementById('stats').innerHTML=
-'<b>浏览器</b> '+esc(j.browser)+' · <b>页面</b> '+esc(j.page)+
+'<b>浏览器</b> '+esc(j.browser)+' · <b>页面</b> '+esc(pt(j.page))+
 '<br><b>ticks</b> '+j.ticks+' · <b>clicks</b> '+j.clicks+' · <b>弹窗</b> '+j.dialogs+
 '<br><b>重启</b> '+j.restarts+' · <b>重载</b> '+j.reloads+
 ' · <b>心跳</b> '+(j.lastBeatAge==null?'—':j.lastBeatAge+'s')+

@@ -47,6 +47,12 @@ curl http://127.0.0.1:8088/healthz
 
 - `ticks` 持续增长 = 保活看门狗在跑；`clicks` = 已执行的保活点击数
 - `restarts` / `reloads` = 分级恢复次数（偶发正常；频繁增长说明站点改版，看日志）
+- `page=nav-error` 且 `pageUrl=chrome-error://chromewebdata/` = **首页导航失败**
+  （网络/DNS/站点不可达）：注入脚本在错误页上照常 tick，所以 `ticks` 正常、
+  心跳新鲜——看 `lastError` 里的 DNS/TCP 探测结论；引擎在退避自动重试
+  （5s→60s），网络恢复后自动回到首页。路由器上最常见根因是容器 DNS 不通，
+  `docker run` 加 `--dns 223.5.5.5`。控制页对应现象：画面全白 + 红色
+  「导航失败」徽标（与实时画面链路无关，`/stream.mjpg` 本身正常）
 - 镜像内置 `HEALTHCHECK`（60s 一次）：浏览器存活 + 心跳不超龄 + 未退出云机，
   任一不满足 → 503 → unhealthy
 

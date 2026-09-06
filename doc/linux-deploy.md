@@ -71,6 +71,12 @@ VLC 等标准播放器也可直接打开 `http://<host>:<port>/stream.mjpg` 观�
 
 ## 自动恢复分级（与 Windows 版同思路）
 
+0. **首页导航失败**（页面停在 `chrome-error://` 网络错误页）→ **退避重导航**
+   5s→10s→…→60s 封顶。注入脚本在错误页上照常 tick、`readyState=complete`，
+   常规监督项看不见这种故障——引擎靠采样 URL 显式识别（`status` 里
+   `page=nav-error`），并异步 DNS/TCP 探测把结论写进 `lastError`
+   （区分「容器 DNS 不通 / TCP 不通 / 站点层拒绝」）。此类故障**不升级**重启
+   浏览器：重启修不了网络。网络恢复后首个重试即回到首页，状态自动转回正常。
 1. tick 失败 / 状态冻结 / 脚本缺失 → **页面导航回首页**（站点自身重定向兜底）
 2. 传输断裂 / 页面级恢复 10 分钟 3 次无效 → **重建 CDP 会话**（Chromium 进程
    保留、页面状态不丢）
@@ -94,6 +100,21 @@ Profile 持久化 + 上述分级，容器层面再叠 `restart: unless-stopped`�
 > 改 Public，或 pull 前 `docker login ghcr.io`。
 
 ## FAQ
+
+**Q: 控制页画面全白，`/status` 里 `pageUrl` 是 `chrome-error://chromewebdata/`？**
+首页导航失败（DNS/网络/站点不可达）。旧版本引擎会把错误页误报为
+`page: "ok"` 且不恢复；新版本会显示红色「导航失败」徽标、`page=nav-error`，
+退避自动重试，并把 DNS/TCP 探测结论写进 `lastError`。路由器上最常见的根因是
+**容器 DNS 不通**（宿主 resolv.conf 指向本机 dnsmasq，桥接网络里不可达），加
+`--dns 223.5.5.5`（compose 里 `dns: [223.5.5.5]`）即可：
+
+```bash
+docker run -d --name cpk-138xxxx1234 --dns 223.5.5.5 \
+  -v $PWD/data/138xxxx1234:/data -p 127.0.0.1:8088:8088 \
+  -e CPK_PLATFORM=mobile -e CPK_ACCOUNT=138xxxx1234 \
+  --shm-size 128m --init --restart unless-stopped \
+  ghcr.io/xaxka/cloudphonekeep:latest
+```
 
 **Q: 首次登录后重启容器还要登录吗？**
 不用。Cookie/LocalStorage 都在 `/data` volume 的 Profile 里，跨重启持久。

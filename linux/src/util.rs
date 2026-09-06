@@ -248,6 +248,63 @@ pub fn rand_bytes(n: usize) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// 导航失败诊断（chrome-error 错误页 → DNS/TCP 分层探测）
+// ---------------------------------------------------------------------------
+
+/// 从 URL 提取主机与端口（https→443 / http→80，显式 :port 优先）。
+/// 仅服务 net_probe 诊断，不做完整 URL 解析；畸形输入返回 None。
+pub fn host_port_of(url: &str) -> Option<(String, u16)> {
+    let (rest, default_port) = match url.strip_prefix("https://") {
+        Some(r) => (r, 443u16),
+        None => match url.strip_prefix("http://") {
+            Some(r) => (r, 80u16),
+            None => return None,
+        },
+    };
+    // authority = host[:port]，截掉 path/query/fragment 与 userinfo
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or("");
+    if authority.is_empty() {
+        return None;
+    }
+    match authority.rsplit_once(':') {
+        Some((h, p)) => {
+            if h.is_empty() || p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) {
+                return None; // 缺主机/裸 IPv6/非数字端口
+            }
+            Some((h.to_string(), p.parse().ok()?))
+        }
+        None => Some((authority.to_string(), default_port)),
+    }
+}
+
+/// 导航失败后的网络层探测：区分「容器 DNS 不通 / TCP 不通 / 均正常但站点层拒绝」。
+/// 阻塞上限 ≈ DNS 超时(getaddrinfo 可达 ~20s) + 3×1.5s TCP——
+/// 调用方必须放独立线程，绝不能挡引擎监督循环。
+pub fn net_probe(host: &str, port: u16) -> String {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<std::net::SocketAddr> = match (host, port).to_socket_addrs() {
+        Ok(it) => it.collect(),
+        Err(e) => {
+            return format!("DNS 解析失败（{e}）——容器 DNS 或外网不可达（路由器 dnsmasq/防火墙？）")
+        }
+    };
+    if addrs.is_empty() {
+        return "DNS 返回空结果——域名无解析记录".into();
+    }
+    let mut last_err = String::new();
+    for sa in addrs.iter().take(3) {
+        match std::net::TcpStream::connect_timeout(sa, Duration::from_millis(1500)) {
+            Ok(_) => {
+                return format!("DNS/TCP 均正常——疑似 TLS 证书或站点侧拒绝（风控/维护），持续自动重试")
+            }
+            Err(e) => last_err = format!("{e}"),
+        }
+    }
+    format!("DNS 正常但 TCP {port} 连不通（{last_err}）——路由/防火墙拦截或站点不可达")
+}
+
+// ---------------------------------------------------------------------------
 // URL 解码（对齐 Windows 版 report_server.rs 的宽容实现）
 // ---------------------------------------------------------------------------
 
@@ -391,5 +448,23 @@ mod tests {
         }
         assert_eq!(day_str(0), "19700101");
         assert_eq!(day_str(20680), "20260815");
+    }
+
+    #[test]
+    fn host_port_of_forms() {
+        // 常规形态：scheme 默认端口、显式端口、路径/query 截断
+        assert_eq!(host_port_of("https://cloudphoneh5.buy.139.com"), Some(("cloudphoneh5.buy.139.com".into(), 443)));
+        assert_eq!(host_port_of("https://cloudphoneh5.buy.139.com/"), Some(("cloudphoneh5.buy.139.com".into(), 443)));
+        assert_eq!(host_port_of("http://a.com/x?y=1#z"), Some(("a.com".into(), 80)));
+        assert_eq!(host_port_of("https://h.io:8443/path"), Some(("h.io".into(), 8443)));
+        assert_eq!(host_port_of("http://127.0.0.1:8088"), Some(("127.0.0.1".into(), 8088)));
+        // userinfo 剥离
+        assert_eq!(host_port_of("https://u:p@h.io:9/"), Some(("h.io".into(), 9)));
+        // 畸形：非 http(s) scheme / 空 / 缺主机 / 非数字端口
+        assert_eq!(host_port_of("ftp://x/"), None);
+        assert_eq!(host_port_of(""), None);
+        assert_eq!(host_port_of("https://"), None);
+        assert_eq!(host_port_of("https://:443/"), None);
+        assert_eq!(host_port_of("https://h.io:abc/"), None);
     }
 }

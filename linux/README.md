@@ -59,6 +59,9 @@ docker run -d --name cpk \
 # 3. 观察健康状态
 curl http://127.0.0.1:8088/healthz
 docker logs -f cpk     # 诊断日志实时镜像
+#    page=nav-error / pageUrl=chrome-error:// = 首页打不开（网络/DNS），
+#    引擎退避自动重试并探测根因写 lastError；路由器常见容器 DNS 不通
+#    （宿主 resolv.conf 指向本机 dnsmasq），加 --dns 223.5.5.5 即可
 ```
 
 多账号：`docker run` 换容器名/`-v` 目录/`-p` 宿主端口（8089、8090…），或用本目录

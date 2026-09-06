@@ -145,6 +145,15 @@ impl SharedState {
             h.page_url = url.into();
         });
     }
+
+    /// 当前文档是否为 Chrome 网络错误页（chrome-error://）——
+    /// 导航失败探测线程据此丢弃过期结论（探测期间页面已恢复则不覆盖 lastError）
+    pub fn page_is_error(&self) -> bool {
+        self.health
+            .lock()
+            .map(|g| g.page_url.starts_with("chrome-error://"))
+            .unwrap_or(false)
+    }
     pub fn set_restarts(&self, n: u32) { self.update(|h| h.restarts = n); }
     pub fn bump_reloads(&self) { self.update(|h| h.reloads += 1); }
     pub fn set_dialogs(&self, n: u32) { self.update(|h| h.dialogs = n); }
@@ -275,7 +284,7 @@ fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<
                 }
             };
             cdp_port = port;
-            match attach_all(cfg, port, &script, &logger, true) {
+            match attach_all(cfg, port, &script, &shared, &logger, true) {
                 Ok((c, s)) => {
                     shared.set_chrome_version(&c.browser);
                     cdp = Some(c);
@@ -330,7 +339,7 @@ fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<
                             break;
                         }
                     }
-                    match attach_all(cfg, cdp_port, &script, &logger, false) {
+                    match attach_all(cfg, cdp_port, &script, &shared, &logger, false) {
                         Ok((mut c, s)) => {
                             // 探测当前文档是否已有脚本：无则导航（新文档经 addScript 自动注入）
                             let has = cdp::eval_string(&mut c, &s, PROBE_EXPR, 5000)
@@ -386,6 +395,11 @@ struct Stats {
     last_ticks: i64,
     reloads_window: u32,
     reload_window_start: Instant,
+    /// chrome-error 错误页（首页导航失败）退避重试状态。
+    /// 生命周期独立于 reloads 恢复窗口：重启浏览器修不了网络，绝不升级重启
+    nav_err_active: bool,
+    nav_backoff: Duration,
+    nav_next_retry: Option<Instant>,
 }
 
 fn steady_loop(
@@ -404,6 +418,9 @@ fn steady_loop(
         last_ticks: -1,
         reloads_window: 0,
         reload_window_start: Instant::now(),
+        nav_err_active: false,
+        nav_backoff: Duration::from_secs(5),
+        nav_next_retry: None,
     };
     let mut next_tick = Instant::now();
     let mut next_sample = Instant::now() + Duration::from_secs(5);
@@ -538,16 +555,35 @@ fn steady_loop(
                             if snap.get("wasExited").and_then(|x| x.as_bool()) == Some(true) {
                                 shared.mark_exited();
                             }
+                            // —— chrome-error 错误页识别：注入脚本在错误页上照常 tick 且
+                            //    readyState=complete，常规监督项全部「正常」——不显式
+                            //    识别则 page 恒报 ok，导航失败被白屏掩盖 ——
+                            let on_err_page = url.starts_with("chrome-error://");
+                            if on_err_page {
+                                if let Err(e) = nav_error_step(cdp, session, cfg, shared, &mut stats, logger) {
+                                    if e.starts_with("WS:") {
+                                        return SteadyOutcome::Reattach;
+                                    }
+                                }
+                            } else if stats.nav_err_active {
+                                stats.nav_err_active = false;
+                                stats.nav_backoff = Duration::from_secs(5);
+                                stats.nav_next_retry = None;
+                                shared.set_last_error("");
+                                logger.log(1, "nav", "导航恢复：页面已离开 chrome-error 错误页");
+                            }
+                            // tick 前进即渲染进程存活（错误页上脚本照常 tick）：
+                            // 心跳/进度照续——导航失败≠进程死亡，不许误触发硬重启
                             if ticks != stats.last_ticks && ticks >= 0 {
                                 stats.last_ticks = ticks;
                                 stats.frozen = 0;
                                 stats.not_installed = 0;
                                 shared.touch_beat();
                                 last_progress = Instant::now();
-                                if snap.get("ready").and_then(|x| x.as_str()) == Some("complete") {
+                                if !on_err_page && snap.get("ready").and_then(|x| x.as_str()) == Some("complete") {
                                     shared.set_page("ok");
                                 }
-                            } else {
+                            } else if !on_err_page {
                                 stats.frozen += 1;
                                 if stats.frozen >= cfg.frozen_reload {
                                     stats.frozen = 0;
@@ -612,6 +648,65 @@ fn steady_loop(
             return SteadyOutcome::Reattach;
         }
     }
+}
+
+/// chrome-error 错误页处理（首页导航失败的自动恢复）：
+///  - page 状态如实报 nav-error（错误页上脚本照常 tick，常规监督项不可见故障）
+///  - 独立退避重导航 5s→10s→…→60s 封顶（不进 reloads 恢复窗口：
+///    重启浏览器修不了网络，升级只会白白重建会话）
+///  - 每次重试顺带异步 DNS/TCP 探测（独立线程，getaddrinfo 可阻塞 ~20s，
+///    绝不挡引擎监督循环），结论写 lastError 供控制页/healthz 直接可见
+fn nav_error_step(
+    cdp: &mut Cdp,
+    session: &str,
+    cfg: &Config,
+    shared: &Arc<SharedState>,
+    stats: &mut Stats,
+    logger: &Arc<Logger>,
+) -> Result<(), String> {
+    shared.set_page("nav-error");
+    if !stats.nav_err_active {
+        stats.nav_err_active = true;
+        logger.log(
+            1,
+            "nav",
+            "页面停在 chrome-error 错误页：首页导航失败（网络/DNS），进入退避自动重试",
+        );
+    }
+    let now = Instant::now();
+    if stats.nav_next_retry.map(|t| now >= t).unwrap_or(true) {
+        stats.nav_next_retry = Some(now + stats.nav_backoff);
+        stats.nav_backoff = (stats.nav_backoff * 2).min(Duration::from_secs(60));
+        logger.log(
+            1,
+            "nav",
+            &format!("导航重试（退避 {}s）：{}", stats.nav_backoff.as_secs(), cfg.url),
+        );
+        spawn_nav_probe(cfg, shared, logger);
+        cdp.call("Page.navigate", json!({ "url": cfg.url }), Some(session), 15000).map(|_| ())
+    } else {
+        Ok(())
+    }
+}
+
+/// 网络层探测（独立线程）：区分容器 DNS 不通 / TCP 不通 / 均正常但站点层拒绝。
+/// 探测期间页面已恢复（page_is_error=false）则丢弃结论，不覆盖恢复态。
+fn spawn_nav_probe(cfg: &Config, shared: &Arc<SharedState>, logger: &Arc<Logger>) {
+    let url = cfg.url.clone();
+    let shared = shared.clone();
+    let logger = logger.clone();
+    let _ = thread::Builder::new()
+        .name("cpk-net-probe".into())
+        .spawn(move || {
+            let msg = match util::host_port_of(&url) {
+                Some((host, port)) => util::net_probe(&host, port),
+                None => "CPK_URL 无法解析出主机（非法 URL？）".into(),
+            };
+            if shared.page_is_error() {
+                shared.set_last_error(&format!("导航失败：{msg}"));
+                logger.log(1, "probe", &format!("导航失败网络探测：{msg}"));
+            }
+        });
 }
 
 fn nav_home(
@@ -875,7 +970,14 @@ fn wait_devtools(child: &mut Child, cfg: &Config, timeout_ms: u64) -> Result<u16
 
 /// CDP 装配：复用/新建页面目标 → attach → enable → UA 对齐 → 注入保活脚本
 /// （navigate=true 时导航到云手机首页；重连场景 navigate=false）
-fn attach_all(cfg: &Config, port: u16, script: &str, logger: &Arc<Logger>, navigate: bool) -> Result<(Cdp, String), String> {
+fn attach_all(
+    cfg: &Config,
+    port: u16,
+    script: &str,
+    shared: &Arc<SharedState>,
+    logger: &Arc<Logger>,
+    navigate: bool,
+) -> Result<(Cdp, String), String> {
     let mut cdp = Cdp::connect(port)?;
     // 复用已有 page 目标（chrome-headless-shell 启动自带一个 about:blank）
     let targets = cdp.call("Target.getTargets", json!({}), None, 10000)?;
@@ -929,8 +1031,16 @@ fn attach_all(cfg: &Config, port: u16, script: &str, logger: &Arc<Logger>, navig
         10000,
     )?;
     if navigate {
-        cdp.call("Page.navigate", json!({ "url": cfg.url }), Some(&session), 20000)?;
-        logger.log(1, "nav", &format!("导航 {}", cfg.url));
+        let r = cdp.call("Page.navigate", json!({ "url": cfg.url }), Some(&session), 20000)?;
+        // 同步期失败（DNS/连接/TLS）以 errorText 回报：留在结果字段而非协议错误。
+        // 留痕 + 写 lastError；错误页停留由稳态采样的 chrome-error 检测接管重试
+        match r.get("errorText").and_then(|x| x.as_str()) {
+            Some(et) if !et.is_empty() => {
+                logger.log(0, "nav", &format!("初始导航失败：{et}"));
+                shared.set_last_error(&format!("导航失败：{et}"));
+            }
+            _ => logger.log(1, "nav", &format!("导航 {}", cfg.url)),
+        }
     }
     Ok((cdp, session))
 }
