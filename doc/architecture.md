@@ -10,7 +10,7 @@
 | 宿主引擎 | Rust（Tauri 窗口 + 看门狗） | Rust musl 静态二进制（手写 RFC6455 WebSocket + CDP 客户端 + 看门狗） |
 | 驱动 | 窗口可见时页内定时器；隐藏/最小化时 Rust 看门狗 eval 驱动 | Rust 看门狗每秒经 CDP 调 `__CPK_TICK__()`（同一模型的无头恒定态） |
 | 多账号 | 多窗口多槽位（单进程） | 多容器（一容器一账号） |
-| 首次登录 | 直接在窗口里点 | 浏览器打开控制页：截图 + 触摸/输入（或外部 DevTools） |
+| 首次登录 | 直接在窗口里点 | 浏览器打开控制页：MJPEG 实时画面 + 全量输入（触摸/鼠标/键盘/剪贴板）、Ctrl+U 页内地址栏、退出/到期通知（对齐 Windows 版交互，或外部 DevTools） |
 | 保活脚本 | `shared/keepalive.inject.js`（`include_str!` 内嵌） | 同一本 `shared/keepalive.inject.js`（`include_str!` 内嵌） |
 | 数据位置 | `AppData\LocalLow\CloudPhoneKeep` | `/data`（volume 持久化 Profile + 日志） |
 | 内存 | 单账号 WebView2 300-500MB | Rust 引擎 ~10MB + headless-shell 250-450MB |
@@ -72,7 +72,7 @@ Profile 持久化 + 分级恢复 + 容器层 `restart: unless-stopped`，形成�
 | 「旋转」交换 userInfo 宽高 + `go(location)` 刷新，不落盘 | **已移除**（随菜单栏一起删除；横竖屏需求可在设置窗口直接改窗口分辨率） |
 | `win.util.tray(webForm)` 每窗口一托盘，菜单 显示(●)/隐藏/退出 | 每槽位独立托盘，左键单击/双击呼出窗口（不再设显示/隐藏菜单项），退出=退出程序 |
 | `reghotkey Ctrl+N` 显隐 + 置前 | 同；注册失败仅告警不阻塞（原版亦不检查返回值） |
-| `reghotkey Ctrl+U` 地址栏，回车 `go(url)` | 同；Esc 关闭为附加便利 |
+| `reghotkey Ctrl+U` 地址栏，回车 `go(url)` | 同（Windows 全局热键；Linux 控制页 Ctrl+U → `/addr` 端点 eval `__CPK_ADDR__`，同一页内地址栏同一交互）；Esc 关闭为附加便利 |
 | `runTimer 5000ms`：重连/进入/确认弹窗 + 解锁区 + 进入云机 | `actionTick` 每 5 秒，文字**包含匹配**（还原 `string.keywords`） |
 | `stopTimer 1000ms`：#tabbar 退出检测 + 「知道了」到期确认，触发后停用 | `stopCheck` 每 1 秒，`stopDone` 标志触发一次后停用 |
 | CDP `Network.setCookies` domain=`.139.com` 导航前生效 | **已移除**（登录态由各帐号独立数据目录保持，无需手动指定 Cookie） |

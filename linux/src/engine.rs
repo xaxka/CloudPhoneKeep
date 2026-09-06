@@ -35,6 +35,10 @@ pub const SNAPSHOT_EXPR: &str = "(function(){try{var s=window.__CPK_STATE__;var 
 pub const PROBE_EXPR: &str = "window.__CPK_INSTALLED__===true?'y':'n'";
 /// 剪贴板读取：云机页面当前选中文本（含输入框选区）——/copy（云机 → 本机）数据源
 pub const CLIP_EXPR: &str = "(function(){try{var s='';try{s=String(document.getSelection())}catch(e){}if(!s){var a=document.activeElement;try{if(a&&(/^(INPUT|TEXTAREA)$/.test(a.tagName))&&('value'in a)&&a.selectionStart!=null){s=String(a.value).slice(a.selectionStart,a.selectionEnd)}}catch(e){}}return JSON.stringify({t:s})}catch(e){return JSON.stringify({t:''})}})()";
+/// 页内地址栏切换（对齐 Windows 版 Ctrl+U toggle_address_bar 的同一表达式语义）：
+/// shared 脚本注入 #cpk-addr-bar + __CPK_ADDR__（回车跳转/Esc 关闭在页内处理，
+/// 键盘事件经 /kbd 直通即可），Linux 侧由 /addr 触发本切换
+pub const ADDR_EXPR: &str = "(function(){try{var b=document.getElementById('cpk-addr-bar');if(!window.__CPK_ADDR__)return 'noscript';window.__CPK_ADDR__(b?b.style.display==='none':true);return 'ok'}catch(e){return 'err:'+String(e&&e.message)}})()";
 
 extern "C" {
     #[link_name = "kill"]
@@ -73,6 +77,11 @@ pub struct Health {
     pub started_at_ms: i64,
     /// 当前实时画面帧率（控制面板 /fps 运行时可调）
     pub fps: u32,
+    /// 页面标题（采样周期回读；对齐 Windows 版窗口标题/标题变化日志的可见性）
+    pub title: String,
+    /// 页面上报的最近一次状态（alive/retry/enter/…/exited/expired）；
+    /// 状态迁移供控制页发通知（对齐 Windows 版系统通知）
+    pub last_status: String,
 }
 
 pub struct SharedState {
@@ -111,6 +120,8 @@ impl SharedState {
             last_error: String::new(),
             started_at_ms: util::now_ms(),
             fps: cfg.fps.clamp(1, 60),
+            title: String::new(),
+            last_status: String::new(),
         };
         Arc::new(SharedState {
             health: Mutex::new(health),
@@ -170,6 +181,10 @@ impl SharedState {
     pub fn set_dialogs(&self, n: u32) { self.update(|h| h.dialogs = n); }
     pub fn set_chrome_version(&self, v: &str) { self.update(|h| h.chrome_version = v.into()); }
     pub fn set_last_error(&self, e: &str) { self.update(|h| h.last_error = e.into()); }
+    /// 页面标题更新（采样周期回读；控制页状态显示）
+    pub fn set_title(&self, s: &str) { self.update(|h| if h.title != s { h.title = s.into(); }); }
+    /// 页面上报状态记录（/report；控制页据此检测状态迁移并发通知）
+    pub fn set_status(&self, s: &str) { self.update(|h| h.last_status = s.into()); }
     pub fn touch_beat(&self) { self.last_beat_ms.store(util::now_ms(), Ordering::Relaxed); }
     pub fn mark_exited(&self) { self.exited.store(true, Ordering::Relaxed); }
     pub fn request_stop(&self) { self.stop.store(true, Ordering::Relaxed); }
@@ -200,6 +215,8 @@ pub fn health_json(h: &Health) -> Value {
         "chromeVersion": h.chrome_version,
         "lastError": h.last_error,
         "fps": h.fps,
+        "title": h.title,
+        "lastStatus": h.last_status,
     })
 }
 
@@ -249,6 +266,10 @@ pub enum ControlRequest {
     },
     /// 读取云机选中文本（/clip：云机 → 本机剪贴板的数据源）
     ClipGet { reply: Sender<Result<String, String>> },
+    /// 切换页内地址栏（/addr：对齐 Windows 版 Ctrl+U——shared 脚本已把
+    /// #cpk-addr-bar + __CPK_ADDR__ 注入页面，回车跳转/Esc 关闭由页内
+    /// 自理，键盘事件经 /kbd 直通）
+    AddrBar { reply: Sender<Result<(), String>> },
     /// 运行时调整实时画面帧率（控制面板「设置 → 帧率」）
     SetFps { fps: u32, reply: Sender<Result<(), String>> },
     TypeText { text: String, reply: Sender<Result<(), String>> },
@@ -312,6 +333,7 @@ fn drain_ctrl_fail(ctrl_rx: &Receiver<ControlRequest>, reason: &str) {
             ControlRequest::Mouse { reply, .. } => { let _ = reply.send(Err(r)); }
             ControlRequest::KeyEvent { reply, .. } => { let _ = reply.send(Err(r)); }
             ControlRequest::ClipGet { reply } => { let _ = reply.send(Err(r)); }
+            ControlRequest::AddrBar { reply } => { let _ = reply.send(Err(r)); }
             ControlRequest::SetFps { reply, .. } => { let _ = reply.send(Err(r)); }
             ControlRequest::TypeText { reply, .. } => { let _ = reply.send(Err(r)); }
             ControlRequest::Key { reply, .. } => { let _ = reply.send(Err(r)); }
@@ -658,6 +680,8 @@ fn steady_loop(
                             let last = snap.get("last").and_then(|x| x.as_str()).unwrap_or("");
                             let url = snap.get("url").and_then(|x| x.as_str()).unwrap_or("");
                             shared.set_page_stats(ticks.max(0) as u64, clicks.max(0) as u64, last, url);
+                            // 页面标题回读（控制页显示；对齐 Windows 版标题可见性）
+                            shared.set_title(snap.get("title").and_then(|x| x.as_str()).unwrap_or(""));
                             if snap.get("wasExited").and_then(|x| x.as_bool()) == Some(true) {
                                 shared.mark_exited();
                             }
@@ -975,6 +999,27 @@ fn handle_control(
             };
             let cut: String = out.chars().take(65536).collect();
             let _ = reply.send(Ok(cut));
+        }
+        ControlRequest::AddrBar { reply } => {
+            // 对齐 Windows 版 Ctrl+U：切换 shared 脚本注入的页内地址栏
+            // （#cpk-addr-bar + __CPK_ADDR__）。切换后输入/回车/Esc 全部经
+            // /kbd 直通在页内自理（与 win 版同一交互语义）；同步 eval 与
+            // ClipGet 同模式（用户手动触发、低频，可承受页面忙时等待）
+            match cdp::eval_string(cdp, session, ADDR_EXPR, 5000) {
+                Ok(v) if v == "ok" => {
+                    logger.log(1, "sys", "切换页内地址栏（Ctrl+U，对齐 Windows 版）");
+                    let _ = reply.send(Ok(()));
+                }
+                Ok(v) => {
+                    let _ = reply.send(Err(format!("页内地址栏不可用：{v}")));
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e.clone()));
+                    if e.starts_with("WS:") {
+                        return Err(e);
+                    }
+                }
+            }
         }
         ControlRequest::SetFps { fps, reply } => {
             // 流在跑则 stop+start 重建（maxFrameRate 只在 start 时生效）；
@@ -1380,6 +1425,56 @@ fn kill_child(child: &mut Option<Child>, logger: &Arc<Logger>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_json_exposes_title_and_last_status() {
+        // 对齐 Windows 版：页面标题 + 上报状态暴露给控制页（标题显示/状态迁移通知）
+        let cfg = crate::config::Config {
+            account: "t".into(),
+            platform: "mobile".into(),
+            platform_label: "移动云手机".into(),
+            url: "https://x".into(),
+            width: 414,
+            height: 896,
+            data_dir: "/data".into(),
+            profile_dir: "/data/profile-t".into(),
+            log_dir: "/data/logs".into(),
+            keep_alive: true,
+            interval_ms: 5000,
+            simulate_activity: true,
+            block_context_menu: true,
+            page_timer: false,
+            report_port: 8088,
+            bind: "0.0.0.0".into(),
+            control_token: String::new(),
+            cdp_port: 0,
+            chrome_bin: "chrome-headless-shell".into(),
+            headless: false,
+            no_sandbox: true,
+            ua_mode: "windows".into(),
+            lang: "zh-CN".into(),
+            tz: "Asia/Shanghai".into(),
+            extra_chrome_args: String::new(),
+            tick_fail_reload: 10,
+            frozen_reload: 3,
+            beat_stale_sec: 180,
+            fps: 25,
+            selftest: false,
+            smoke: false,
+            smoke_seconds: 60,
+        };
+        let shared = SharedState::new(&cfg);
+        assert!(shared.snapshot().title.is_empty());
+        assert!(shared.snapshot().last_status.is_empty());
+        shared.set_title("移动云手机");
+        shared.set_status("exited");
+        let j = health_json(&shared.snapshot());
+        assert_eq!(j["title"].as_str(), Some("移动云手机"));
+        assert_eq!(j["lastStatus"].as_str(), Some("exited"));
+        // 标题未变时不重复写入（set_title 幂等判断分支回归）
+        shared.set_title("移动云手机");
+        assert_eq!(health_json(&shared.snapshot())["title"].as_str(), Some("移动云手机"));
+    }
 
     #[test]
     fn ua_normalization() {

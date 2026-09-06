@@ -82,11 +82,13 @@ screencast 生效，弱机/省流量场景建议 5-10；初始值可用环境变
 | 物理键盘全键位 | CDP `Input.dispatchKeyEvent` | keyDown/keyUp 逐键直通（含修饰键/功能键/方向键）；Ctrl+C/X 同步云机选区到本机剪贴板，Ctrl+V 把本机剪贴板粘贴到云机，Ctrl+A 远程全选，F5 远程刷新 |
 | 手机输入法（拼音） | 键盘开关 → `Input.insertText` | 控制台「键盘」按钮弹出输入框，IME 组合/输入/粘贴内容即发即转发（清空重打）；桌面端也可直接用 |
 | 剪贴板复制/粘贴 | `/clip` + `insertText` | 「复制」读云机选中文本（含输入框选区）写入本机剪贴板；「粘贴」读本机剪贴板插入云机焦点处 |
+| 页内地址栏 | `/addr` → eval `__CPK_ADDR__` | **对齐 Windows 版 Ctrl+U**：控制页按 Ctrl+U（或操作栏「地址」按钮）呼出云机页内地址栏，输入/回车跳转/Esc 关闭全在页内自理（键盘经 `/kbd` 直通，与 Windows 版同一交互） |
 
 外部脚本直调端点（token 保护同控制页）：`POST /touch`（`phase` +
 `ps=x,y,id;x,y,id` 多点或 `x/y` 单点）、`POST /mouse`（`action=move/down/up/wheel`
 + `b/n/bb/m/dx/dy`）、`POST /kbd`（`t=down/up` + `key/code/vk/text/m/l/r`）、
-`POST /type`（整段文本）、`GET /clip`（选区文本）、`POST /fps`（1-60）；
+`POST /type`（整段文本）、`GET /clip`（选区文本）、`POST /addr`（切换页内地址栏）、
+`POST /fps`（1-60）；
 `/tap /swipe /key /nav /reload` 兼容保留。所有输入事件 fire 即发，引擎线程
 占用 <0.1ms——导航/重连期间输入不再卡死；引擎重建期间请求毫秒级快速失败
 （控制页提示「输入通道异常」而非无响应）。
@@ -94,6 +96,12 @@ screencast 生效，弱机/省流量场景建议 5-10；初始值可用环境变
 **切后台/锁屏自动省 CPU**：控制页不可见即断流，引擎最后一个订阅者离开后
 自动 `Page.stopScreencast`——无人观看＝零 JPEG 编码开销，CPU 即降（云机页面
 本身的运行开销仍在，那是保活语义）；回前台自动重连。关闭标签页同理。
+
+**状态转换通知（对齐 Windows 版系统通知）**：云机「退出/到期」是一次性
+事件，控制页轮询 healthz 的 `lastStatus`/`exited` 检测状态迁移，先弹 5 秒
+toast，浏览器通知权限已授予时同时发系统通知（权限需用户手势——首次
+触摸页面时自动申请一次，被拒/不支持则只用 toast，不影响使用）。控制台
+状态面板同时显示当前页面标题（`title`，对齐 Windows 版窗口标题可见性）。
 
 流的连接语义（弱机/慢网络均按此设计，控制台状态行显示 `N fps`）：
 

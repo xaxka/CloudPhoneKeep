@@ -193,10 +193,17 @@ fn selftest(cfg: &config::Config, logger: &Arc<Logger>) -> i32 {
                 "server: healthz JSON",
                 v.get("platform").and_then(|x| x.as_str()) == Some(cfg.platform.as_str()),
             ));
+            // 对齐 Windows 版的字段暴露：页面标题（标题可见性）+ 上报状态
+            // （控制页状态迁移通知）——缺字段即 FAIL，防止后续重构静默丢失
+            checks.push((
+                "server: healthz title/lastStatus 字段",
+                v.get("title").is_some() && v.get("lastStatus").is_some(),
+            ));
         }
         other => {
             logger.log(0, "error", &format!("selftest healthz 异常：{other:?}"));
             checks.push(("server: healthz JSON", false));
+            checks.push(("server: healthz title/lastStatus 字段", false));
         }
     }
     // 实时画面流端点：自检无引擎 → 订阅 8s 宽限后 504（证明端点与控制通道已接线；

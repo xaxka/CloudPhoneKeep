@@ -33,7 +33,7 @@
 | 宿主引擎 | Rust（Tauri 窗口 + 看门狗） | Rust（CDP 客户端 + 看门狗） |
 | 驱动 | 窗口可见时页内定时器；隐藏时 Rust 看门狗 eval 驱动 | Rust 看门狗每秒经 CDP 调 `__CPK_TICK__()`（同一模型的无头恒定态） |
 | 多账号 | 多窗口多槽位（单进程） | 多容器（一容器一账号） |
-| 首次登录 | 直接在窗口里点 | 浏览器打开控制页：全屏实时画面（手机端点底部 iOS 圆点弹抽屉控制台），输入全覆盖：触摸跟手（多点/长按/双指缩放）、鼠标真实点击/滚轮/悬停、物理键盘全键位、输入法与剪贴板双向复制粘贴、运行时帧率限制（或外部 DevTools） |
+| 首次登录 | 直接在窗口里点 | 浏览器打开控制页：全屏实时画面（手机端点底部 iOS 圆点弹抽屉控制台），输入全覆盖：触摸跟手（多点/长按/双指缩放）、鼠标真实点击/滚轮/悬停、物理键盘全键位、输入法与剪贴板双向复制粘贴、运行时帧率限制（或外部 DevTools）；**Ctrl+U 页内地址栏**（回车跳转/Esc 关闭，与 Windows 版同一交互）；退出/到期状态转换时控制页发系统通知（对齐 Windows 版托盘通知语义） |
 | 保活脚本 | `shared/keepalive.inject.js`（`include_str!` 内嵌） | 同一本 `shared/keepalive.inject.js`（`include_str!` 内嵌） |
 | 数据位置 | `AppData\LocalLow\CloudPhoneKeep` | `/data`（volume 持久化 Profile + 日志） |
 
@@ -52,7 +52,8 @@ docker run -d --name cpk \
   ghcr.io/xaxka/cloudphonekeep:latest
 
 # 2. 首次登录（浏览器打开控制页：全屏实时画面 + 圆点抽屉/侧栏，
-#    触摸跟手、鼠标真实点击、键盘/剪贴板、帧率限制）
+#    触摸跟手、鼠标真实点击、键盘/剪贴板、帧率限制、Ctrl+U 页内地址栏、
+#    退出/到期系统通知）
 #    http://127.0.0.1:8088/
 #    登录一次后 Cookie/LocalStorage 持久化在 volume，之后自动保活
 

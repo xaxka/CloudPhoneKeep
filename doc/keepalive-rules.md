@@ -87,3 +87,7 @@ Chromium 后台节流）。Linux 无头恒由 CDP 看门狗驱动。
 - UA 规范化：`CPK_UA_MODE=windows` 时把 Headless UA 伪装成 Windows Chrome
   （对齐 Windows 版环境）；`auto` 只去掉 Headless 字样；`none` 原样
 - CDP `Input.dispatchTouchEvent` 内核级触摸（控制页远程点击/滑动）
+- 页内地址栏 `__CPK_ADDR__`（脚本注入 `#cpk-addr-bar`，双端同源代码）：
+  Windows 版由 Ctrl+U 全局热键切换；Linux 版由控制页 Ctrl+U /「地址」按钮
+  经 `/addr` 端点让引擎 eval 同一切换表达式——回车跳转、Esc 关闭都在页内
+  自理，双端交互语义一致

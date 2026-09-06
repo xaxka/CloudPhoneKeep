@@ -15,6 +15,8 @@
 //!  - POST /kbd               键盘事件全字段直通（t=down/up，key/code/vk/text/mods）
 //!  - POST /type              文本插入（Input.insertText；输入法/粘贴整段发送）
 //!  - GET  /clip              读取云机选中文本（云机 → 本机剪贴板）
+//!  - POST /addr              切换页内地址栏（对齐 Windows 版 Ctrl+U；回车跳
+//!                            转/Esc 关闭在页内自理，输入经 /kbd 直通）
 //!  - POST /fps               运行时帧率上限（Page.startScreencast maxFrameRate）
 //!  - POST /tap /swipe /key /nav /reload  控制端点（token 可选保护；兼容保留）
 //!
@@ -164,6 +166,7 @@ autocapitalize="off" autocorrect="off" spellcheck="false">
 <h2>操作</h2>
 <div class="row">
 <button onclick="doNav()">回首页</button>
+<button onclick="doAddr()">地址</button>
 <button class="acc" onclick="fs()">全屏</button>
 </div>
 <h2>设置</h2>
@@ -206,8 +209,8 @@ function U(p){var u=new URL(p,location.origin);if(TK)u.searchParams.set('token',
 function HDR(){return TK?{'x-cpk-token':TK}:{}}
 function post(p,body){return fetch(U(p),{method:'POST',
 headers:Object.assign({'content-type':'application/x-www-form-urlencoded'},HDR()),body:body})}
-function ping(t){var el=document.getElementById('toast');el.textContent=t;el.style.opacity=1;
-setTimeout(function(){el.style.opacity=0},1500)}
+function ping(t,dur){var el=document.getElementById('toast');el.textContent=t;el.style.opacity=1;
+setTimeout(function(){el.style.opacity=0},dur||1500)}
 function ov(t,s){var o=document.getElementById('overlay');
 document.getElementById('ovt').textContent=t||'';
 document.getElementById('ovs').textContent=s||'';
@@ -233,7 +236,8 @@ if(document.hidden)return;   // 切后台不轮询（省唤醒）
 fetch(U('/healthz')).then(function(r){return r.json()}).then(function(j){
 VW=j.vw||414;VH=j.vh||896;
 WRAP.style.aspectRatio=VW+'/'+VH;
-HLTH={ok:!!j.ok,page:j.page||''};
+HLTH={ok:!!j.ok,page:j.page||'',exited:!!j.exited};
+statNotify(j);
 document.getElementById('pdot').className=
 j.ok?(j.page==='nav-error'?'warn':'ok'):'bad';
 if(j.homeUri)HOME=j.homeUri;
@@ -245,6 +249,7 @@ document.getElementById('stats').innerHTML=
 '<b>'+esc(j.account||'')+' · '+esc(j.platformLabel||'')+' · '+pt(j.page)+
 (j.exited?' · 已退出云机!':'')+'</b>'+
 '<br><b>浏览器</b> '+esc(j.browser)+
+(j.title?'<br><b>页面</b> '+esc(String(j.title).slice(0,40)):'')+
 '<br><b>ticks</b> '+j.ticks+' · <b>clicks</b> '+j.clicks+' · <b>弹窗</b> '+j.dialogs+
 '<br><b>重启</b> '+j.restarts+' · <b>重载</b> '+j.reloads+
 ' · <b>心跳</b> '+(j.lastBeatAge==null?'—':j.lastBeatAge+'s')+
@@ -614,6 +619,10 @@ if(k==='Enter'){ev.preventDefault();kdown(ev);return}
 }
 if(ev.ctrlKey||ev.metaKey){
 var lk=(k||'').toLowerCase();
+if(lk==='u'&&!ev.shiftKey&&!ev.altKey){
+// Ctrl+U：切换云机页内地址栏（对齐 Windows 版；不触发本页 view-source）
+ev.preventDefault();doAddr();return
+}
 if(lk==='v'&&!ev.shiftKey&&!ev.altKey){
 // 粘贴：本机剪贴板 → 云机（insertText）。键本身不转发（远端剪贴板为空）。
 if(navigator.clipboard&&navigator.clipboard.readText){ev.preventDefault();doPaste()}
@@ -693,9 +702,40 @@ ping('无剪贴板权限：已弹出输入框，Ctrl+V 或长按粘贴')});
 function doReload(){post('/reload','').then(function(){ping('已刷新页面')})}
 function doNav(){if(!HOME){ping('未知首页地址');return}
 post('/nav','url='+encodeURIComponent(HOME)).then(function(){ping('已回首页')})}
+// 页内地址栏（对齐 Windows 版 Ctrl+U）：呼出后输入/回车跳转/Esc 关闭
+// 全在云机页内自理（键盘事件经 /kbd 直通），此处只负责切换
+function doAddr(){post('/addr','').then(function(){ping('地址栏已切换（回车跳转，Esc 关闭）')})
+.catch(function(){ping('地址栏切换失败（引擎忙/重启中）')})}
 function fs(){var el=document.documentElement;
 if(document.fullscreenElement){document.exitFullscreen()}
 else if(el.requestFullscreen){el.requestFullscreen()}}
+
+// —— 状态转换通知（对齐 Windows 版系统通知：退出云机/到期）——
+// 双通道：① /report 状态迁移（与 Windows 版 on_report 同语义，页面重载后
+// 可再次触发）；② /report 被网络策略拦截时，引擎采样标志的上升沿兜底
+// （标志单调为真，仅首次触发）。两通道同轮去重。通知权限需用户手势：
+// 首次触摸页面时 best-effort 申请，被拒/不支持降级为 toast
+var LASTST='',PREVEXIT=false;
+document.addEventListener('pointerdown',function askNotif(){
+if(!('Notification'in window)||Notification.permission!=='default')return;
+try{var p=Notification.requestPermission();if(p&&p.then)p.then(function(){},function(){})}catch(e){}
+},{once:true});
+function sysNotify(title,body){
+ping(title+'：'+body,5000);
+if('Notification'in window&&Notification.permission==='granted'){
+try{new Notification(title,{body:body,tag:'cpk-status'})}catch(e){}}
+}
+function statNotify(j){
+var st=j.lastStatus||'',noted=false;
+if(LASTST&&st&&st!==LASTST){
+if(st==='exited'){sysNotify('已退出云手机','帐号已退回云手机首页，请检查会话');noted=true}
+else if(st==='expired'){sysNotify('时间已到期','云手机使用时间已到期，到期弹窗已自动确认')}
+}
+if(st)LASTST=st;
+// 兜底通道：exited 标志上升沿（/report 不通时引擎采样仍能触发一次）
+if(j.exited&&!PREVEXIT&&!noted){sysNotify('已退出云手机','帐号已退回云手机首页，请检查会话')}
+PREVEXIT=!!j.exited;
+}
 </script></body></html>"#;
 
 /// 启动服务（端口绑定必须在保活脚本注入前完成——脚本里写死了端口号）
@@ -950,6 +990,9 @@ fn route(
         let status: String = req.query.get("status").cloned().unwrap_or_default().chars().take(40).collect();
         if !status.is_empty() {
             shared.touch_beat();
+            // 状态记录（对齐 Windows 版 on_report 状态迁移语义）：控制页
+            // 据此检测 exited/expired 转换并发通知（Windows 版发系统通知）
+            shared.set_status(&status);
             if status == "exited" {
                 shared.mark_exited();
             }
@@ -1121,6 +1164,11 @@ fn route(
                 Ok(Err(e)) => (500, "text/plain; charset=utf-8".into(), e.into_bytes()),
                 Err(_) => (504, "text/plain".into(), b"engine busy / timeout".to_vec()),
             }
+        }
+        "/addr" => {
+            // 页内地址栏切换（对齐 Windows 版 Ctrl+U）：引擎 eval __CPK_ADDR__；
+            // 呼出后输入/回车跳转/Esc 关闭全在页内自理（键盘经 /kbd 直通）
+            control_void(ctrl, |reply| ControlRequest::AddrBar { reply })
         }
         "/fps" => {
             // 帧率上限：1..=60；引擎侧 stop+start 重建 screencast 生效
@@ -1326,13 +1374,29 @@ mod tests {
         let (st, _) = http(port, "GET /report?status=exited HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
         assert_eq!(st, 204);
         assert!(shared.snapshot().exited);
-        // healthz：未运行浏览器 → 503 + JSON
+        // healthz：未运行浏览器 → 503 + JSON；状态记录（对齐 Windows 版 on_report
+        // 状态迁移语义）：/report 后 lastStatus 如实回显，title 字段在位
         let (st, body) = http(port, "GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
         assert_eq!(st, 503);
         assert!(body.contains("\"platform\""));
+        assert!(body.contains("\"lastStatus\":\"exited\""), "exited 未记录：{body}");
+        assert!(body.contains("\"title\""), "healthz 缺 title 字段：{body}");
         let (st, body) = http(port, "GET /status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
         assert_eq!(st, 503);
         assert!(body.contains("\"homeUri\""));
+    }
+
+    #[test]
+    fn report_status_field_updates() {
+        // lastStatus 随 /report 逐次覆盖：alive → expired → healthz 如实回显
+        let (port, _shared, _tx) = start_server("");
+        http(port, "GET /report?status=alive HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        let (st, body) = http(port, "GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        assert_eq!(st, 503);
+        assert!(body.contains("\"lastStatus\":\"alive\""), "{body}");
+        http(port, "GET /report?status=expired HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        let (_, body) = http(port, "GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        assert!(body.contains("\"lastStatus\":\"expired\""), "{body}");
     }
 
     #[test]
@@ -1506,6 +1570,29 @@ mod tests {
         assert!(!body4.contains("上滑"), "方向滑动按钮应已删除");
         assert!(!body4.contains("sendKey"), "旧按键按钮应已删除");
         assert!(!body4.contains("<header"), "顶栏应已删除");
+    }
+
+    #[test]
+    fn addr_endpoint_and_status_notify_wiring() {
+        // /addr：无参数校验，引擎不可用（控制通道无接收者）→ 500（已进入控制通道）
+        let (port, _shared, _tx) = start_server("");
+        let (st, body) = http(port, "POST /addr HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        assert_eq!(st, 500);
+        assert!(body.contains("engine unavailable"), "{body}");
+        // token 保护与其它控制端点同策略
+        let (port2, _shared2, _tx2) = start_server("s3cret");
+        let (st2, _) = http(port2, "POST /addr HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        assert_eq!(st2, 403);
+        // 控制页接线：地址按钮/Ctrl+U 拦截 + 状态转换通知（对齐 Windows 版）
+        let (st3, body3) = http(port2, "GET /?token=s3cret HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        assert_eq!(st3, 200);
+        assert!(body3.contains("doAddr()"), "控制页缺地址栏切换接线");
+        assert!(body3.contains(">地址</button>"), "控制页缺地址按钮");
+        assert!(body3.contains("lk==='u'"), "控制页缺 Ctrl+U 拦截");
+        assert!(body3.contains("statNotify"), "控制页缺状态转换通知");
+        assert!(body3.contains("Notification.permission"), "控制页缺系统通知权限申请");
+        assert!(body3.contains("lastStatus"), "控制页未消费 lastStatus");
+        assert!(body3.contains("j.title"), "控制页未显示页面标题");
     }
 
     #[test]
