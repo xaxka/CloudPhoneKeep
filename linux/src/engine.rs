@@ -13,7 +13,7 @@
 //!   → 10 分钟窗口 3 次无效 / 传输断裂 → 重建 CDP 会话（进程保留，页面不重载）
 //!   → 重连无效 / Chromium 退出 / 心跳超龄 → 重启 Chromium（指数退避 5s→300s）
 
-use crate::cdp::{self, Cdp};
+use crate::cdp::{self, Cdp, FrameBox};
 use crate::config::Config;
 use crate::keepalive;
 use crate::logger::Logger;
@@ -207,8 +207,8 @@ pub enum ControlRequest {
     Key { key: String, reply: Sender<Result<(), String>> },
     Navigate { url: String, reply: Sender<Result<(), String>> },
     Reload { reply: Sender<Result<(), String>> },
-    /// 实时画面流订阅（/stream.mjpg → 引擎注册帧通道 + 开启 Page.startScreencast）
-    ScreencastAttach { reply: Sender<Result<(u32, Receiver<Vec<u8>>), String>> },
+    /// 实时画面流订阅（/stream.mjpg → 引擎交出帧信箱 + 开启 Page.startScreencast）
+    ScreencastAttach { reply: Sender<Result<(u32, FrameBox), String>> },
     /// 取消订阅（最后一个订阅者离开时引擎自动 Page.stopScreencast）
     ScreencastDetach { id: u32, reply: Sender<Result<(), String>> },
 }
@@ -646,9 +646,16 @@ fn steady_loop(
         }
 
         // —— 空闲期改睡为泵：分发实时画面帧（screencast）/事件，断流走重连 ——
-        // 泵内阻塞读 socket（≤50ms poll），预算 100ms 与原睡眠同节奏；
-        // 帧到达即分发，实时画面延迟 ≤ 监督周期
-        if let Err(e) = cdp.pump_events(Duration::from_millis(100)) {
+        // 泵预算扩到「距下个 tick 的剩余时间」（旧版固定 100ms 是弱机 1fps 瓶颈
+        // 之一：帧读取窗口仅占循环节拍 ~10%）；泵内 poll 50ms 无消息即提前返回
+        // 交还循环顶——控制命令延迟仍 ≤50ms。
+        // 上限 200ms：帧密集（60fps）时每 200ms 强制回循环顶捞控制命令——
+        // 触摸/导航不被帧处理洪流（base64+JSON 解码）挤到秒级延迟
+        let pump_budget = next_tick
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(200))
+            .max(Duration::from_millis(50));
+        if let Err(e) = cdp.pump_events(pump_budget) {
             logger.log(0, "sys", &format!("CDP 事件泵传输失败：{e}"));
             return SteadyOutcome::Reattach;
         }
@@ -762,17 +769,25 @@ fn handle_control(cdp: &mut Cdp, session: &str, req: ControlRequest, logger: &Ar
             let _ = reply.send(Ok(()));
         }
         ControlRequest::Touch { phase, x, y, reply } => {
-            // phase 在 HTTP 层已校验（start/move/end/cancel）；未知值按 cancel 兑底
-            let (typ, points, timeout_ms): (&str, Value, u64) = match phase.as_str() {
-                "start" => ("touchStart", json!([{ "x": x, "y": y, "id": 1 }]), 5000),
-                "move" => ("touchMove", json!([{ "x": x, "y": y, "id": 1 }]), 2000),
-                "end" => ("touchEnd", json!([]), 5000),
-                _ => ("touchCancel", json!([]), 5000),
+            // fire 即发即答：Input.dispatchTouchEvent 的应答无信息量，同步等 CDP
+            // 应答曾在弱机上占 1-5s（tap 手势窗口 ~300ms 早过了，轻点直接失效；
+            // 拖动点大量积压“不跟手”）——发后即忘，事件在 WS 管道保序，Chrome
+            // 按序消化，引擎线程占用 <0.1ms；WS 断裂由下轮 tick 的同步 call 发现
+            // （触摸指令在 HTTP 层已校验 phase）
+            let (typ, points): (&str, Value) = match phase.as_str() {
+                "start" => ("touchStart", json!([{ "x": x, "y": y, "id": 1 }])),
+                "move" => ("touchMove", json!([{ "x": x, "y": y, "id": 1 }])),
+                "end" => ("touchEnd", json!([])),
+                _ => ("touchCancel", json!([])),
             };
             if phase == "start" {
                 logger.log(1, "click", &format!("触摸按下 ({x:.0},{y:.0})"));
             }
-            touch_event(cdp, session, typ, points, timeout_ms)?;
+            cdp.fire(
+                "Input.dispatchTouchEvent",
+                json!({ "type": typ, "touchPoints": points }),
+                Some(session),
+            );
             let _ = reply.send(Ok(()));
         }
         ControlRequest::TypeText { text, reply } => {

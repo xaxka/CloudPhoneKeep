@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>CloudPhoneKeep 控制台</title>
+<style>
+:root{--bg:#0f172a;--panel:#1e293b;--line:#334155;--txt:#e2e8f0;--dim:#94a3b8}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 system-ui,sans-serif;
+display:flex;overflow:hidden}
+main{flex:1;display:flex;min-width:0;min-height:0}
+#stage{flex:1;display:flex;align-items:center;justify-content:center;padding:12px;min-width:0}
+#wrap{position:relative;height:100%;aspect-ratio:414/896;max-height:100%;max-width:100%;background:#020617;
+border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 6px 28px #0009}
+#shot{width:100%;height:100%;display:block;object-fit:contain;cursor:pointer;
+touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+#overlay{position:absolute;inset:0;display:flex;flex-direction:column;gap:8px;align-items:center;
+justify-content:center;background:#020617e6;color:var(--dim);font-size:13px;text-align:center;padding:0 24px}
+#overlay.hidden{display:none}
+#ovt{color:var(--txt);font-size:15px}
+/* 导航失败徽标：不挡触摸（pointer-events:none），仅提示「白屏=网络/DNS」 */
+#pbadge{position:absolute;top:10px;left:10px;background:#dc2626e6;color:#fff;font-size:12px;
+font-weight:600;padding:4px 11px;border-radius:999px;display:none;z-index:7;pointer-events:none;
+max-width:92%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* fps/状态徽标：画面右上角小胶囊，替代原顶栏 */
+#fpsb{position:absolute;top:8px;right:8px;z-index:7;pointer-events:none;display:flex;align-items:center;
+gap:5px;font-size:10px;color:#e2e8f0d9;background:#0f172ab3;padding:3px 9px;border-radius:99px}
+#fpsb i{width:6px;height:6px;border-radius:50%;background:#64748b;flex:none}
+#fpsb i.ok{background:#22c55e}#fpsb i.bad{background:#ef4444}#fpsb i.warn{background:#f59e0b}
+/* 触摸反馈点：按下显示、拖动跟随，操作即时可见 */
+#tdot{position:absolute;width:28px;height:28px;border-radius:50%;border:2px solid #ffffffb3;
+box-shadow:0 0 14px #000c;background:#ffffff1f;pointer-events:none;display:none;
+transform:translate(-50%,-50%);z-index:6}
+/* 桌面：右侧操作栏 */
+#panel{flex:none;width:300px;background:var(--panel);border-left:1px solid var(--line);
+padding:12px 14px;overflow-y:auto;display:flex;flex-direction:column;gap:9px}
+#panel h2{font-size:11px;margin:4px 0 0;color:var(--dim);font-weight:600;
+letter-spacing:.08em;text-transform:uppercase}
+.row{display:flex;gap:6px;flex-wrap:wrap}
+input[type=text]{flex:1;min-width:120px;background:var(--bg);color:var(--txt);
+border:1px solid var(--line);border-radius:6px;padding:7px 9px}
+button{background:var(--line);color:var(--txt);border:0;border-radius:6px;padding:7px 12px;
+cursor:pointer;font-size:13px}
+button:hover{background:#475569}
+button.acc{background:#0369a1}button.acc:hover{background:#0284c7}
+#stats{font-size:12px;color:var(--dim);line-height:1.65;word-break:break-all}
+#stats b{color:var(--txt);font-weight:600}
+#stats .warn{color:#f87171}
+#toast{position:fixed;bottom:70px;left:50%;transform:translateX(-50%);background:var(--line);
+padding:6px 14px;border-radius:8px;opacity:0;transition:opacity .3s;pointer-events:none;font-size:13px}
+/* —— 移动端：iOS 风格圆点（home indicator）呼出底部抽屉 —— */
+#homei{display:none;position:fixed;bottom:calc(2px + env(safe-area-inset-bottom));left:50%;
+transform:translateX(-50%);z-index:40;width:60px;height:36px;align-items:center;justify-content:center;
+background:none;border:0;cursor:pointer;padding:0}
+#homei::after{content:'';width:150px;height:5px;border-radius:3px;background:rgba(255,255,255,.45);
+transition:background .15s}
+#homei:active::after{background:rgba(255,255,255,.9)}
+#mask{display:none;position:fixed;inset:0;background:#000a;z-index:20}
+#mask.on{display:block}
+@media (max-width:820px){
+#stage{padding:6px 6px calc(46px + env(safe-area-inset-bottom))}
+#wrap{height:auto;width:100%;max-height:100%}
+#panel{position:fixed;left:0;right:0;bottom:0;width:auto;max-height:62%;z-index:30;
+border-left:0;border-top:1px solid var(--line);border-radius:16px 16px 0 0;
+transform:translateY(105%);transition:transform .26s ease;box-shadow:0 -10px 40px #000a;
+padding-bottom:calc(14px + env(safe-area-inset-bottom))}
+#panel.open{transform:none}
+#homei{display:flex}
+}
+/* 全屏（整个文档）：画面占满、面板/圆点仍可用（均为 fixed/static 正常层叠） */
+:fullscreen #stage{padding:0}
+:fullscreen #wrap{border-radius:0;border:0;box-shadow:none}
+</style></head><body>
+<main>
+<section id="stage"><div id="wrap">
+<img id="shot" alt="云手机实时画面" draggable="false">
+<div id="overlay"><div id="ovt">等待画面…</div><div id="ovs"></div></div>
+<div id="pbadge"></div>
+<div id="fpsb"><i></i><span id="fpst"></span></div>
+<div id="tdot"></div>
+</div></section>
+</main>
+<aside id="panel">
+<h2>状态</h2>
+<div id="stats">—</div>
+<h2>操作</h2>
+<div class="row"><input type="text" id="text" placeholder="输入文本，回车发送"></div>
+<div class="row">
+<button onclick="sendKey('Enter')">Enter</button>
+<button onclick="sendKey('Backspace')">⌫ 删除</button>
+<button onclick="doReload()">刷新</button>
+</div>
+<div class="row">
+<button onclick="doNav()">回首页</button>
+<button class="acc" onclick="fs()">全屏</button>
+</div>
+</aside>
+<div id="mask"></div>
+<button id="homei" aria-label="控制台菜单"></button>
+<div id="toast"></div>
+<script>
+var TK=(new URLSearchParams(location.search)).get('token')||'';
+var VW=414,VH=896,HOME='';
+var live={mode:'none',abort:null,frames:0,last:0,shotTimer:null,shotBusy:false,shotGuard:null};
+var lastFrameAt=0;
+var IMG=document.getElementById('shot');
+var WRAP=document.getElementById('wrap');
+var TD=document.getElementById('tdot');
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){
+return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+function U(p){var u=new URL(p,location.origin);if(TK)u.searchParams.set('token',TK);return u}
+function HDR(){return TK?{'x-cpk-token':TK}:{}}
+function post(p,body){return fetch(U(p),{method:'POST',
+headers:Object.assign({'content-type':'application/x-www-form-urlencoded'},HDR()),body:body})}
+function ping(t){var el=document.getElementById('toast');el.textContent=t;el.style.opacity=1;
+setTimeout(function(){el.style.opacity=0},1500)}
+function ov(t,s){var o=document.getElementById('overlay');
+document.getElementById('ovt').textContent=t||'';
+document.getElementById('ovs').textContent=s||'';
+if(t){o.classList.remove('hidden')}else{o.classList.add('hidden')}}
+
+// —— 移动端控制台：点 iOS 风格圆点弹出/收起底部抽屉（桌面端固定右侧栏）——
+var PANEL=document.getElementById('panel'),MASK=document.getElementById('mask');
+function sheet(open){
+if(open){PANEL.classList.add('open');MASK.classList.add('on')}
+else{PANEL.classList.remove('open');MASK.classList.remove('on')}}
+document.getElementById('homei').addEventListener('click',function(){
+sheet(!PANEL.classList.contains('open'))});
+MASK.addEventListener('click',function(){sheet(false)});
+
+// —— 状态轮询（3s）：抽屉状态 + 状态色点（fps 徽标内）+ 视口尺寸（触摸坐标映射基准）——
+var PAGEMAP={loading:'加载中',ok:'页面正常',reloading:'重载中','nav-error':'导航失败·重试中'};
+function pt(s){return PAGEMAP[s]||s||'—'}
+function poll(){
+if(document.hidden)return;   // 切后台不轮询（省唤醒）
+fetch(U('/healthz')).then(function(r){return r.json()}).then(function(j){
+VW=j.vw||414;VH=j.vh||896;
+WRAP.style.aspectRatio=VW+'/'+VH;
+document.getElementById('fpsb').firstElementChild.className=
+j.ok?(j.page==='nav-error'?'warn':'ok'):'bad';
+if(j.homeUri)HOME=j.homeUri;
+var PB=document.getElementById('pbadge');
+if(j.page==='nav-error'){PB.style.display='block';
+PB.textContent='首页导航失败·引擎自动重试中'}else{PB.style.display='none'}
+document.getElementById('stats').innerHTML=
+'<b>'+esc(j.account||'')+' · '+esc(j.platformLabel||'')+' · '+pt(j.page)+
+(j.exited?' · 已退出云机!':'')+'</b>'+
+'<br><b>浏览器</b> '+esc(j.browser)+
+'<br><b>ticks</b> '+j.ticks+' · <b>clicks</b> '+j.clicks+' · <b>弹窗</b> '+j.dialogs+
+'<br><b>重启</b> '+j.restarts+' · <b>重载</b> '+j.reloads+
+' · <b>心跳</b> '+(j.lastBeatAge==null?'—':j.lastBeatAge+'s')+
+'<br><b>URL</b> '+esc((j.pageUrl||'').slice(0,80))+
+(j.lastError?'<br><span class="warn"><b>错误</b> '+
+esc(String(j.lastError).slice(0,100))+'</span>':'')+
+(j.exited?'<br><span class="warn">已退出云机！</span>':'');
+}).catch(function(){document.getElementById('fpsb').firstElementChild.className='bad'});
+}
+poll();setInterval(poll,3000);
+
+// —— 实时画面：fetch MJPEG 流 → JPEG SOI/EOI 切帧 → Blob 直显 ——
+// 断流（引擎重建/浏览器重启）自动重连；流建立失败 → 截图轮询兜底，8s 后重试实时流
+// 画面新鲜（8s 内有帧）时重连不闪全屏「连接实时画面…」：画面保留，徽标提示等待
+function staleShot(){return !lastFrameAt||Date.now()-lastFrameAt>8000}
+function stopLive(){
+if(live.abort){try{live.abort.abort()}catch(e){}live.abort=null}
+if(live.shotTimer){clearTimeout(live.shotTimer);live.shotTimer=null}
+if(live.shotGuard){clearInterval(live.shotGuard);live.shotGuard=null}
+live.shotBusy=false;
+IMG.onload=null;IMG.onerror=null;
+}
+function setShot(url){
+if(IMG._url)URL.revokeObjectURL(IMG._url);
+IMG._url=url;IMG.src=url;lastFrameAt=Date.now();
+}
+function startLive(){
+stopLive();live.mode='live';
+var ac=new AbortController();live.abort=ac;
+if(staleShot())ov('连接实时画面…');
+fetch(U('/stream.mjpg'),{headers:HDR(),signal:ac.signal}).then(function(r){
+if(!r.ok||!r.body)throw new Error('HTTP '+r.status);
+var reader=r.body.getReader(),buf=new Uint8Array(0);
+function push(a){var b=new Uint8Array(buf.length+a.length);b.set(buf);b.set(a,buf.length);buf=b}
+function cut(){for(var i=0;i<buf.length-1;i++){
+if(buf[i]===255&&buf[i+1]===216){
+for(var j=i+2;j<buf.length-1;j++){
+if(buf[j]===255&&buf[j+1]===217){
+var f=buf.slice(i,j+2);buf=buf.slice(j+2);return f}}}}
+return null}
+if(staleShot())ov('等待首帧…');
+function step(){
+reader.read().then(function(x){
+if(x.done)throw new Error('end');
+push(x.value);
+var f;
+while((f=cut())!==null){
+setShot(URL.createObjectURL(new Blob([f],{type:'image/jpeg'})));
+live.frames++;ov(null);
+}
+step();
+}).catch(function(){
+if(live.abort!==ac)return;
+setTimeout(startLive,1500);
+});
+}
+step();
+}).catch(function(){
+if(live.abort!==ac)return;
+shotMode();
+});
+}
+function shotMode(){
+live.mode='shot';live.shotBusy=false;
+if(staleShot())ov('截图模式','实时流暂不可用（引擎忙或重启中），逐帧轮询截图');
+// 链式轮询：上一张完成/失败才发下一张——弱机一张截图可要 1-3s，
+// 盲目 0.6s 定时发会把引擎控制通道灌爆，反过来拖垮实时流订阅
+function loop(){
+if(live.mode!=='shot'||live.shotBusy)return;
+live.shotBusy=true;
+IMG.onload=function(){live.shotBusy=false;
+if(live.mode!=='shot')return;
+lastFrameAt=Date.now();ov(null);live.shotTimer=setTimeout(loop,600)};
+IMG.onerror=function(){live.shotBusy=false;
+if(live.mode!=='shot')return;
+ov('画面暂不可用','引擎启动/重启中，自动重试…');live.shotTimer=setTimeout(loop,2500)};
+IMG.src=U('/shot.jpg?_='+Date.now()).href;
+}
+loop();
+// 网络层悬挂兜底：图片加载无回调 8s → 强制下一轮
+live.shotGuard=setInterval(function(){
+if(live.mode==='shot'&&live.shotBusy){live.shotBusy=false;loop()}
+},8000);
+setTimeout(function(){if(live.mode==='shot')startLive()},8000);
+}
+document.addEventListener('visibilitychange',function(){
+// 切后台/锁屏即断流：连接关闭 → 引擎最后一个订阅者离开 → 自动 stopScreencast
+// （无人观看＝零 JPEG 编码开销，CPU 即降）；回前台自动重连（画面新鲜不闪提示）
+if(document.hidden){stopLive();live.mode='paused'}
+else if(live.mode!=='live'){startLive()}
+});
+if(!document.hidden)startLive();  // 后台打开的标签页：回前台再连，落地即省 CPU
+setInterval(function(){
+var t=document.getElementById('fpst');
+if(live.mode==='paused'){t.textContent='已暂停';return}
+if(live.mode!=='live'){t.textContent='';return}
+var fps=live.frames-live.last;live.last=live.frames;
+t.textContent=(Date.now()-lastFrameAt>3000)?'等帧…':(fps+' fps');
+},1000);
+
+// —— 触摸坐标映射：帧原始尺寸等比换算（object-fit:contain 居中修正）——
+function xy(cx,cy){
+var r=IMG.getBoundingClientRect();
+var nw=IMG.naturalWidth||VW,nh=IMG.naturalHeight||VH;
+var s=Math.min(r.width/nw,r.height/nh),dw=nw*s,dh=nh*s;
+var ox=r.left+(r.width-dw)/2,oy=r.top+(r.height-dh)/2;
+return [Math.max(0,Math.min(nw,(cx-ox)/dw*nw)),Math.max(0,Math.min(nh,(cy-oy)/dh*nh))];
+}
+// 触摸反馈点（视口坐标 → wrap 内定位）
+function tdotShow(cx,cy){
+var w=WRAP.getBoundingClientRect();
+TD.style.left=(cx-w.left)+'px';TD.style.top=(cy-w.top)+'px';TD.style.display='block'}
+// —— 实时触摸流：按下/移动/抬起逐点直通引擎（CDP Input.dispatchTouchEvent，fire 即答）——
+// 串行化 + 最新点覆盖：引擎响应慢时自动丢弃中间点（最新位置为准，绝不积压）
+var TCH={pending:null,busy:false,down:false,lastMove:0,downAt:0};
+function tsend(phase,x,y){TCH.pending=[phase,x,y];if(!TCH.busy)tpump()}
+function tpump(){
+if(!TCH.pending)return;
+var e=TCH.pending;TCH.pending=null;TCH.busy=true;
+post('/touch','phase='+e[0]+'&x='+e[1].toFixed(1)+'&y='+e[2].toFixed(1))
+.catch(function(){})
+.then(function(){TCH.busy=false;tpump()});
+}
+IMG.addEventListener('contextmenu',function(ev){ev.preventDefault()});
+IMG.addEventListener('pointerdown',function(ev){
+ev.preventDefault();
+try{this.setPointerCapture(ev.pointerId)}catch(e){}
+// 先冲刷上一轻点延迟中的 end：保证触摸序列合法（双击 zoom 场景 start→end→start→end）
+if(flushEnd)flushEnd();
+var p=xy(ev.clientX,ev.clientY);
+TCH.down=true;TCH.downAt=Date.now();TCH.lastMove=0;
+tsend('start',p[0],p[1]);
+tdotShow(ev.clientX,ev.clientY);
+});
+IMG.addEventListener('pointermove',function(ev){
+if(!TCH.down)return;
+var n=Date.now();if(n-TCH.lastMove<33)return;  // ≤30 点/秒：CDP 从容，弱机不积压
+TCH.lastMove=n;
+var p=xy(ev.clientX,ev.clientY);
+tsend('move',p[0],p[1]);
+tdotShow(ev.clientX,ev.clientY);
+});
+var flushEnd=null;  // 延迟中的轻点 end（新按下前冲刷，防 start 被 end 越过）
+function tUp(ev,phase){
+if(!TCH.down)return;TCH.down=false;TD.style.display='none';
+var p=xy(ev.clientX,ev.clientY),gap=Date.now()-TCH.downAt;
+function fin(){if(flushEnd!==fin)return;flushEnd=null;tsend(phase,p[0],p[1])}
+// 轻点补足 ≥60ms 按下时长：贴近真实触摸节奏，保证 tap 手势识别（合成 click）
+if(gap<60){flushEnd=fin;setTimeout(fin,60-gap)}else{fin()}
+}
+IMG.addEventListener('pointerup',function(ev){tUp(ev,'end')});
+IMG.addEventListener('pointercancel',function(ev){tUp(ev,'cancel')});
+// —— 面板操作 ——
+function sendKey(k){post('/key','key='+encodeURIComponent(k)).then(function(){ping('按键 '+k)})}
+function doReload(){post('/reload','').then(function(){ping('已刷新页面')})}
+function doNav(){if(!HOME){ping('未知首页地址');return}
+post('/nav','url='+encodeURIComponent(HOME)).then(function(){ping('已回首页')})}
+function fs(){var el=document.documentElement;
+if(document.fullscreenElement){document.exitFullscreen()}
+else if(el.requestFullscreen){el.requestFullscreen()}}
+document.getElementById('text').addEventListener('keydown',function(ev){
+if(ev.key!=='Enter')return;
+var v=this.value;this.value='';
+post('/type','text='+encodeURIComponent(v)).then(function(){
+return post('/key','key=Enter');
+}).then(function(){ping('已输入 '+v.slice(0,24))});
+});
+</script></body></html>

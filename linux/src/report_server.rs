@@ -17,13 +17,14 @@
 //!        无需桌面/VNC；/report 与 /log 即使被 Chromium 专用网络访问(PNA)策略
 //!        拦截也不影响保活（诊断另有 CDP __CPK_DRAIN__ 通道兜底，双保险）。
 
+use crate::cdp::FramePoll;
 use crate::engine::{health_json, ControlRequest, SharedState};
 use crate::logger::Logger;
 use crate::util::urldecode;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc::{RecvTimeoutError, Sender};
+use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -57,37 +58,38 @@ impl ReportCfg {
 
 const CONTROL_PAGE_HTML: &str = r#"<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>CloudPhoneKeep 控制台</title>
 <style>
 :root{--bg:#0f172a;--panel:#1e293b;--line:#334155;--txt:#e2e8f0;--dim:#94a3b8}
-*{box-sizing:border-box}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 system-ui,sans-serif;
-display:flex;flex-direction:column}
-header{display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(--panel);
-border-bottom:1px solid var(--line);flex:none}
-header h1{font-size:15px;margin:0;font-weight:600}
-#dot{width:9px;height:9px;border-radius:50%;background:#64748b;flex:none}
-#dot.ok{background:#22c55e}#dot.bad{background:#ef4444}#dot.warn{background:#f59e0b}
-#fps{color:var(--dim);font-size:12px}
-#meta{color:var(--dim);font-size:12px;margin-left:auto;text-align:right;line-height:1.35;
-max-width:46vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-main{flex:1;display:flex;min-height:0}
+display:flex;overflow:hidden}
+main{flex:1;display:flex;min-width:0;min-height:0}
 #stage{flex:1;display:flex;align-items:center;justify-content:center;padding:12px;min-width:0}
 #wrap{position:relative;height:100%;aspect-ratio:414/896;max-height:100%;max-width:100%;background:#020617;
 border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 6px 28px #0009}
-#wrap:fullscreen{border-radius:0;border:0}
 #shot{width:100%;height:100%;display:block;object-fit:contain;cursor:pointer;
-touch-action:none;user-select:none;-webkit-user-select:none}
+touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
 #overlay{position:absolute;inset:0;display:flex;flex-direction:column;gap:8px;align-items:center;
 justify-content:center;background:#020617e6;color:var(--dim);font-size:13px;text-align:center;padding:0 24px}
 #overlay.hidden{display:none}
 #ovt{color:var(--txt);font-size:15px}
 /* 导航失败徽标：不挡触摸（pointer-events:none），仅提示「白屏=网络/DNS」 */
 #pbadge{position:absolute;top:10px;left:10px;background:#dc2626e6;color:#fff;font-size:12px;
-font-weight:600;padding:4px 11px;border-radius:999px;display:none;z-index:5;pointer-events:none;
+font-weight:600;padding:4px 11px;border-radius:999px;display:none;z-index:7;pointer-events:none;
 max-width:92%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* fps/状态徽标：画面右上角小胶囊，替代原顶栏 */
+#fpsb{position:absolute;top:8px;right:8px;z-index:7;pointer-events:none;display:flex;align-items:center;
+gap:5px;font-size:10px;color:#e2e8f0d9;background:#0f172ab3;padding:3px 9px;border-radius:99px}
+#fpsb i{width:6px;height:6px;border-radius:50%;background:#64748b;flex:none}
+#fpsb i.ok{background:#22c55e}#fpsb i.bad{background:#ef4444}#fpsb i.warn{background:#f59e0b}
+/* 触摸反馈点：按下显示、拖动跟随，操作即时可见 */
+#tdot{position:absolute;width:28px;height:28px;border-radius:50%;border:2px solid #ffffffb3;
+box-shadow:0 0 14px #000c;background:#ffffff1f;pointer-events:none;display:none;
+transform:translate(-50%,-50%);z-index:6}
+/* 桌面：右侧操作栏 */
 #panel{flex:none;width:300px;background:var(--panel);border-left:1px solid var(--line);
 padding:12px 14px;overflow-y:auto;display:flex;flex-direction:column;gap:9px}
 #panel h2{font-size:11px;margin:4px 0 0;color:var(--dim);font-weight:600;
@@ -102,24 +104,40 @@ button.acc{background:#0369a1}button.acc:hover{background:#0284c7}
 #stats{font-size:12px;color:var(--dim);line-height:1.65;word-break:break-all}
 #stats b{color:var(--txt);font-weight:600}
 #stats .warn{color:#f87171}
-.note{color:var(--dim);font-size:12px;line-height:1.55}
-#toast{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);background:var(--line);
+#toast{position:fixed;bottom:70px;left:50%;transform:translateX(-50%);background:var(--line);
 padding:6px 14px;border-radius:8px;opacity:0;transition:opacity .3s;pointer-events:none;font-size:13px}
+/* —— 移动端：iOS 风格圆点（home indicator）呼出底部抽屉 —— */
+#homei{display:none;position:fixed;bottom:calc(2px + env(safe-area-inset-bottom));left:50%;
+transform:translateX(-50%);z-index:40;width:60px;height:36px;align-items:center;justify-content:center;
+background:none;border:0;cursor:pointer;padding:0}
+#homei::after{content:'';width:150px;height:5px;border-radius:3px;background:rgba(255,255,255,.45);
+transition:background .15s}
+#homei:active::after{background:rgba(255,255,255,.9)}
+#mask{display:none;position:fixed;inset:0;background:#000a;z-index:20}
+#mask.on{display:block}
 @media (max-width:820px){
-main{flex-direction:column}
-#stage{flex:1;min-height:0;padding:8px}
-#wrap{height:auto;width:100%;aspect-ratio:414/896;max-height:100%}
-#panel{width:auto;border-left:0;border-top:1px solid var(--line);max-height:46%}
+#stage{padding:6px 6px calc(46px + env(safe-area-inset-bottom))}
+#wrap{height:auto;width:100%;max-height:100%}
+#panel{position:fixed;left:0;right:0;bottom:0;width:auto;max-height:62%;z-index:30;
+border-left:0;border-top:1px solid var(--line);border-radius:16px 16px 0 0;
+transform:translateY(105%);transition:transform .26s ease;box-shadow:0 -10px 40px #000a;
+padding-bottom:calc(14px + env(safe-area-inset-bottom))}
+#panel.open{transform:none}
+#homei{display:flex}
 }
+/* 全屏（整个文档）：画面占满、面板/圆点仍可用（均为 fixed/static 正常层叠） */
+:fullscreen #stage{padding:0}
+:fullscreen #wrap{border-radius:0;border:0;box-shadow:none}
 </style></head><body>
-<header><span id="dot"></span><h1>CloudPhoneKeep</h1><span id="fps"></span>
-<div id="meta">连接中…</div></header>
 <main>
 <section id="stage"><div id="wrap">
 <img id="shot" alt="云手机实时画面" draggable="false">
 <div id="overlay"><div id="ovt">等待画面…</div><div id="ovs"></div></div>
 <div id="pbadge"></div>
+<div id="fpsb"><i></i><span id="fpst"></span></div>
+<div id="tdot"></div>
 </div></section>
+</main>
 <aside id="panel">
 <h2>状态</h2>
 <div id="stats">—</div>
@@ -134,20 +152,9 @@ main{flex-direction:column}
 <button onclick="doNav()">回首页</button>
 <button class="acc" onclick="fs()">全屏</button>
 </div>
-<div class="row">
-<button onclick="swipe(0,-1)">↑ 上滑</button>
-<button onclick="swipe(0,1)">↓ 下滑</button>
-<button onclick="swipe(-1,0)">← 左滑</button>
-<button onclick="swipe(1,0)">→ 右滑</button>
-</div>
-<h2>说明</h2>
-<div class="note">左侧为云手机实时画面，触摸完全跟手：按下/移动/抬起实时注入（列表拖动、
-下拉刷新、滑块都跟手），按住不动＝长按。切后台/锁屏自动暂停画面流省 CPU，回来自动恢复。
-首次登录：画面中点「登录」→ 点手机号输入框 → 右侧输入手机号回车 → 收到验证码后输入 →
-登录态自动持久化，之后免登录。画面全白且出现红色「导航失败」徽标＝首页打不开
-（网络/DNS 问题，引擎在自动重试，看「状态」里的错误行定位），与画面链路无关。</div>
 </aside>
-</main>
+<div id="mask"></div>
+<button id="homei" aria-label="控制台菜单"></button>
 <div id="toast"></div>
 <script>
 var TK=(new URLSearchParams(location.search)).get('token')||'';
@@ -155,6 +162,8 @@ var VW=414,VH=896,HOME='';
 var live={mode:'none',abort:null,frames:0,last:0,shotTimer:null,shotBusy:false,shotGuard:null};
 var lastFrameAt=0;
 var IMG=document.getElementById('shot');
+var WRAP=document.getElementById('wrap');
+var TD=document.getElementById('tdot');
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){
 return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function U(p){var u=new URL(p,location.origin);if(TK)u.searchParams.set('token',TK);return u}
@@ -168,23 +177,33 @@ document.getElementById('ovt').textContent=t||'';
 document.getElementById('ovs').textContent=s||'';
 if(t){o.classList.remove('hidden')}else{o.classList.add('hidden')}}
 
-// —— 状态轮询（3s）：状态灯 + 面板 + 视口尺寸（触摸坐标映射基准）——
+// —— 移动端控制台：点 iOS 风格圆点弹出/收起底部抽屉（桌面端固定右侧栏）——
+var PANEL=document.getElementById('panel'),MASK=document.getElementById('mask');
+function sheet(open){
+if(open){PANEL.classList.add('open');MASK.classList.add('on')}
+else{PANEL.classList.remove('open');MASK.classList.remove('on')}}
+document.getElementById('homei').addEventListener('click',function(){
+sheet(!PANEL.classList.contains('open'))});
+MASK.addEventListener('click',function(){sheet(false)});
+
+// —— 状态轮询（3s）：抽屉状态 + 状态色点（fps 徽标内）+ 视口尺寸（触摸坐标映射基准）——
 var PAGEMAP={loading:'加载中',ok:'页面正常',reloading:'重载中','nav-error':'导航失败·重试中'};
 function pt(s){return PAGEMAP[s]||s||'—'}
 function poll(){
 if(document.hidden)return;   // 切后台不轮询（省唤醒）
 fetch(U('/healthz')).then(function(r){return r.json()}).then(function(j){
 VW=j.vw||414;VH=j.vh||896;
-document.getElementById('wrap').style.aspectRatio=VW+'/'+VH;
-document.getElementById('dot').className=j.ok?(j.page==='nav-error'?'warn':'ok'):'bad';
-document.getElementById('meta').textContent=(j.account||'')+' · '+(j.platformLabel||'')+
-' · '+pt(j.page)+(j.exited?' · 已退出云机!':'');
+WRAP.style.aspectRatio=VW+'/'+VH;
+document.getElementById('fpsb').firstElementChild.className=
+j.ok?(j.page==='nav-error'?'warn':'ok'):'bad';
 if(j.homeUri)HOME=j.homeUri;
 var PB=document.getElementById('pbadge');
 if(j.page==='nav-error'){PB.style.display='block';
 PB.textContent='首页导航失败·引擎自动重试中'}else{PB.style.display='none'}
 document.getElementById('stats').innerHTML=
-'<b>浏览器</b> '+esc(j.browser)+' · <b>页面</b> '+esc(pt(j.page))+
+'<b>'+esc(j.account||'')+' · '+esc(j.platformLabel||'')+' · '+pt(j.page)+
+(j.exited?' · 已退出云机!':'')+'</b>'+
+'<br><b>浏览器</b> '+esc(j.browser)+
 '<br><b>ticks</b> '+j.ticks+' · <b>clicks</b> '+j.clicks+' · <b>弹窗</b> '+j.dialogs+
 '<br><b>重启</b> '+j.restarts+' · <b>重载</b> '+j.reloads+
 ' · <b>心跳</b> '+(j.lastBeatAge==null?'—':j.lastBeatAge+'s')+
@@ -192,13 +211,13 @@ document.getElementById('stats').innerHTML=
 (j.lastError?'<br><span class="warn"><b>错误</b> '+
 esc(String(j.lastError).slice(0,100))+'</span>':'')+
 (j.exited?'<br><span class="warn">已退出云机！</span>':'');
-}).catch(function(){document.getElementById('dot').className='bad'});
+}).catch(function(){document.getElementById('fpsb').firstElementChild.className='bad'});
 }
 poll();setInterval(poll,3000);
 
 // —— 实时画面：fetch MJPEG 流 → JPEG SOI/EOI 切帧 → Blob 直显 ——
 // 断流（引擎重建/浏览器重启）自动重连；流建立失败 → 截图轮询兜底，8s 后重试实时流
-// 画面新鲜（8s 内有帧）时重连不闪全屏「连接实时画面…」：画面保留，顶栏提示等待
+// 画面新鲜（8s 内有帧）时重连不闪全屏「连接实时画面…」：画面保留，徽标提示等待
 function staleShot(){return !lastFrameAt||Date.now()-lastFrameAt>8000}
 function stopLive(){
 if(live.abort){try{live.abort.abort()}catch(e){}live.abort=null}
@@ -264,7 +283,7 @@ ov('画面暂不可用','引擎启动/重启中，自动重试…');live.shotTim
 IMG.src=U('/shot.jpg?_='+Date.now()).href;
 }
 loop();
-// 网络层悬挂兑底：图片加载无回调 8s → 强制下一轮
+// 网络层悬挂兜底：图片加载无回调 8s → 强制下一轮
 live.shotGuard=setInterval(function(){
 if(live.mode==='shot'&&live.shotBusy){live.shotBusy=false;loop()}
 },8000);
@@ -278,11 +297,11 @@ else if(live.mode!=='live'){startLive()}
 });
 if(!document.hidden)startLive();  // 后台打开的标签页：回前台再连，落地即省 CPU
 setInterval(function(){
-var el=document.getElementById('fps');
-if(live.mode==='paused'){el.textContent='已暂停';return}
-if(live.mode!=='live'){el.textContent='';return}
+var t=document.getElementById('fpst');
+if(live.mode==='paused'){t.textContent='已暂停';return}
+if(live.mode!=='live'){t.textContent='';return}
 var fps=live.frames-live.last;live.last=live.frames;
-el.textContent=(Date.now()-lastFrameAt>3000)?'重连/等帧…':(fps+' fps');
+t.textContent=(Date.now()-lastFrameAt>3000)?'等帧…':(fps+' fps');
 },1000);
 
 // —— 触摸坐标映射：帧原始尺寸等比换算（object-fit:contain 居中修正）——
@@ -293,9 +312,12 @@ var s=Math.min(r.width/nw,r.height/nh),dw=nw*s,dh=nh*s;
 var ox=r.left+(r.width-dw)/2,oy=r.top+(r.height-dh)/2;
 return [Math.max(0,Math.min(nw,(cx-ox)/dw*nw)),Math.max(0,Math.min(nh,(cy-oy)/dh*nh))];
 }
-// —— 实时触摸流：按下/移动/抬起逐点直通引擎（CDP Input.dispatchTouchEvent）——
-// 不再「松手才补发整段滑动」：移动事件实时转发，页面拖动跟手（列表/滑块/下拉刷新）。
-// 串行化 + 最新点覆盖：请求按序发送，引擎响应慢时自动丢弃中间点（最新位置为准，绝不积压）
+// 触摸反馈点（视口坐标 → wrap 内定位）
+function tdotShow(cx,cy){
+var w=WRAP.getBoundingClientRect();
+TD.style.left=(cx-w.left)+'px';TD.style.top=(cy-w.top)+'px';TD.style.display='block'}
+// —— 实时触摸流：按下/移动/抬起逐点直通引擎（CDP Input.dispatchTouchEvent，fire 即答）——
+// 串行化 + 最新点覆盖：引擎响应慢时自动丢弃中间点（最新位置为准，绝不积压）
 var TCH={pending:null,busy:false,down:false,lastMove:0,downAt:0};
 function tsend(phase,x,y){TCH.pending=[phase,x,y];if(!TCH.busy)tpump()}
 function tpump(){
@@ -314,17 +336,19 @@ if(flushEnd)flushEnd();
 var p=xy(ev.clientX,ev.clientY);
 TCH.down=true;TCH.downAt=Date.now();TCH.lastMove=0;
 tsend('start',p[0],p[1]);
+tdotShow(ev.clientX,ev.clientY);
 });
 IMG.addEventListener('pointermove',function(ev){
 if(!TCH.down)return;
-var n=Date.now();if(n-TCH.lastMove<40)return;  // ≤25 点/秒：CDP 从容，弱机不积压
+var n=Date.now();if(n-TCH.lastMove<33)return;  // ≤30 点/秒：CDP 从容，弱机不积压
 TCH.lastMove=n;
 var p=xy(ev.clientX,ev.clientY);
 tsend('move',p[0],p[1]);
+tdotShow(ev.clientX,ev.clientY);
 });
 var flushEnd=null;  // 延迟中的轻点 end（新按下前冲刷，防 start 被 end 越过）
 function tUp(ev,phase){
-if(!TCH.down)return;TCH.down=false;
+if(!TCH.down)return;TCH.down=false;TD.style.display='none';
 var p=xy(ev.clientX,ev.clientY),gap=Date.now()-TCH.downAt;
 function fin(){if(flushEnd!==fin)return;flushEnd=null;tsend(phase,p[0],p[1])}
 // 轻点补足 ≥60ms 按下时长：贴近真实触摸节奏，保证 tap 手势识别（合成 click）
@@ -333,16 +357,11 @@ if(gap<60){flushEnd=fin;setTimeout(fin,60-gap)}else{fin()}
 IMG.addEventListener('pointerup',function(ev){tUp(ev,'end')});
 IMG.addEventListener('pointercancel',function(ev){tUp(ev,'cancel')});
 // —— 面板操作 ——
-function swipe(hx,hy){
-var cx=VW/2,cy=VH/2,d=Math.min(VW,VH)*0.35;
-post('/swipe','x1='+cx+'&y1='+cy+'&x2='+(cx+hx*d)+'&y2='+(cy+hy*d));
-ping(hx?(hx>0?'右滑':'左滑'):(hy>0?'下滑':'上滑'));
-}
 function sendKey(k){post('/key','key='+encodeURIComponent(k)).then(function(){ping('按键 '+k)})}
 function doReload(){post('/reload','').then(function(){ping('已刷新页面')})}
 function doNav(){if(!HOME){ping('未知首页地址');return}
 post('/nav','url='+encodeURIComponent(HOME)).then(function(){ping('已回首页')})}
-function fs(){var el=document.getElementById('wrap');
+function fs(){var el=document.documentElement;
 if(document.fullscreenElement){document.exitFullscreen()}
 else if(el.requestFullscreen){el.requestFullscreen()}}
 document.getElementById('text').addEventListener('keydown',function(ev){
@@ -417,21 +436,21 @@ fn handle_conn(
     Ok(())
 }
 
-/// 实时画面流：向引擎订阅 screencast 帧，以 multipart/x-mixed-replace 推送（MJPEG）。
-/// 退出条件：客户端断开（写失败）/ 引擎侧订阅通道关闭（CDP 重建、浏览器重启时
-/// 订阅者被丢弃）/ 首帧 30s 未至（引擎极端繁忙）。关流后页面侧自动重连。
-/// 静态页面合成器无更新 → screencast 不发新帧：以 2s 心跳重发上一帧维持连接
-/// （路由器/代理不掐空闲连接，页面也不会闪「连接实时画面…」重连循环）。
+/// 实时画面流：向引擎订阅 screencast 帧信箱（只存最新帧），以 multipart/x-mixed-replace
+/// 推送（MJPEG）。退出条件：客户端断开（写失败）/ 生产侧心跳丢失（CDP 重建、
+/// 浏览器重启：连续两个窗口无引擎泵心跳）/ 首帧 30s 未至（引擎极端繁忙）。
+/// 关流后页面侧自动重连。静态页面合成器无更新 → screencast 不发新帧：以 2s
+/// 心跳重发上一帧维持连接。
 fn stream_mjpeg(stream: &mut TcpStream, ctrl: &Sender<ControlRequest>, logger: &Arc<Logger>) {
     const BOUNDARY: &str = "cpkframe";
     // 1) 订阅引擎实时画面：引擎线程可能正在慢 eval（弱机 tick/采样可达数秒）/
-    // 启动浏览器，宽限 8s 再判超时；引擎彻底不可用会立刻 500
+    //    启动浏览器，宽限 8s 再判超时；引擎彻底不可用会立刻 500
     let (tx, rx) = std::sync::mpsc::channel();
     if ctrl.send(ControlRequest::ScreencastAttach { reply: tx }).is_err() {
         respond(stream, 500, "text/plain; charset=utf-8", "引擎不可用".as_bytes());
         return;
     }
-    let (sub_id, frame_rx) = match rx.recv_timeout(Duration::from_secs(8)) {
+    let (sub_id, frame_box) = match rx.recv_timeout(Duration::from_secs(8)) {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
             respond(
@@ -452,7 +471,8 @@ fn stream_mjpeg(stream: &mut TcpStream, ctrl: &Sender<ControlRequest>, logger: &
             return;
         }
     };
-    // 2) 流头 + 帧循环（multipart；每次写失败即客户端已断开）
+    // 2) 流头 + 帧循环（multipart；每次写失败即客户端已断开）。
+    //    帧信箱只存最新帧：引擎覆盖写入（丢旧保新），此处 poll 等待/取帧
     let head = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary={BOUNDARY}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
     );
@@ -464,34 +484,36 @@ fn stream_mjpeg(stream: &mut TcpStream, ctrl: &Sender<ControlRequest>, logger: &
     let mut last_push = Instant::now();
     let opened = Instant::now();
     loop {
-        match frame_rx.recv_timeout(Duration::from_secs(2)) {
-            Ok(frame) => {
+        match frame_box.poll(Duration::from_secs(2)) {
+            FramePoll::Frame(frame) => {
                 if !write_part(stream, BOUNDARY, &frame) {
                     break;
                 }
                 last = Some(frame);
                 last_push = Instant::now();
             }
-            Err(RecvTimeoutError::Timeout) => match &last {
-                Some(f) => {
-                    // 静态页心跳：重发上一帧，连接保持活性（局域网开销可忽略）
+            FramePoll::Idle => {
+                // 静态页：生产侧活着但无新帧 → 心跳重发上一帧维持连接
+                // （路由器/代理不掐空闲连接，页面也不闪重连循环）
+                if let Some(f) = &last {
                     if last_push.elapsed() >= Duration::from_secs(2) {
                         if !write_part(stream, BOUNDARY, f) {
                             break;
                         }
                         last_push = Instant::now();
                     }
+                } else if opened.elapsed() > Duration::from_secs(30) {
+                    // 首帧 30s 未至（引擎极端繁忙/浏览器启动中）→ 关流，页面转截图兜底
+                    logger.log(1, "sys", "实时画面流首帧 30s 未至，关流（页面自动转截图轮询并重连）");
+                    break;
                 }
-                None => {
-                    // 首帧 30s 未至（引擎极端繁忙/浏览器启动中）→ 关流，页面转截图兑底
-                    if opened.elapsed() > Duration::from_secs(30) {
-                        logger.log(1, "sys", "实时画面流首帧 30s 未至，关流（页面自动转截图轮询并重连）");
-                        break;
-                    }
-                }
-            },
-            // 引擎侧订阅通道关闭：CDP 重建/浏览器重启时订阅者被丢弃 → 关流重连
-            Err(RecvTimeoutError::Disconnected) => break,
+            }
+            // 生产侧心跳丢失：CDP 会话重建/浏览器重启，旧信箱不会再有帧
+            // → 立即关流，页面 1.5s 重连新订阅（替代旧 mpsc 的 Disconnected 信号）
+            FramePoll::Dead => {
+                logger.log(1, "sys", "实时画面流生产侧心跳丢失，关流重连（CDP 会话重建/浏览器重启）");
+                break;
+            }
         }
     }
     screencast_detach(ctrl, sub_id);
@@ -871,7 +893,8 @@ mod tests {
     #[test]
     fn stream_mjpeg_frames_keepalive_and_close() {
         // 自建控制通道（start_server 辅助会丢弃接收端）：模拟引擎应答
-        // ScreencastAttach 并交出帧通道；收到 Detach 后收尾退出
+        // ScreencastAttach 并交出帧信箱（FrameBox）；随后按引擎节奏推帧/泵心跳，
+        // 收到 Detach 后收尾退出
         let cfg = Config::from_env();
         let shared = SharedState::new(&cfg);
         let (tx, engine_rx) = std::sync::mpsc::channel();
@@ -883,14 +906,18 @@ mod tests {
             tx.clone(),
         )
         .unwrap();
-        let (frame_tx, frame_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        // 模拟引擎的帧信箱：attach 时交给流线程；推帧=post，泵周期=touch_alive
+        let box_ = crate::cdp::FrameSlot::new();
+        let box_tx = box_.clone();
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let running2 = running.clone();
         thread::spawn(move || {
-            let mut pending = Some(frame_rx);
+            let mut pending = Some(box_tx);
             while let Ok(req) = engine_rx.recv() {
                 match req {
                     ControlRequest::ScreencastAttach { reply } => {
-                        if let Some(rx) = pending.take() {
-                            let _ = reply.send(Ok((1u32, rx)));
+                        if let Some(b) = pending.take() {
+                            let _ = reply.send(Ok((1u32, b)));
                         }
                     }
                     ControlRequest::ScreencastDetach { reply, .. } => {
@@ -900,9 +927,18 @@ mod tests {
                     _ => {}
                 }
             }
+            running2.store(false, std::sync::atomic::Ordering::Release);
+        });
+        // 模拟引擎泵心跳（每 300ms touch，直到 Detach 收尾）
+        let heartbeat = box_.clone();
+        thread::spawn(move || {
+            while running.load(std::sync::atomic::Ordering::Acquire) {
+                heartbeat.touch_alive();
+                thread::sleep(Duration::from_millis(300));
+            }
         });
         // 引擎推一帧（5 字节假帧：SOI+EOI+尾部，客户端只看 multipart 语义）
-        frame_tx.send(vec![0xFF, 0xD8, 0xFF, 0xD9, 0x01]).unwrap();
+        box_.post(vec![0xFF, 0xD8, 0xFF, 0xD9, 0x01]);
 
         let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         s.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
@@ -922,7 +958,8 @@ mod tests {
         assert!(text.starts_with("HTTP/1.1 200"), "{text}");
         assert!(text.contains("multipart/x-mixed-replace"), "{text}");
         assert!(text.contains("Content-Length: 5"), "{text}");
-        // 静态页心跳：无新帧 2s 后重发上一帧 → 字节继续增长（连接不再被 10s 看门狗掐断）
+        // 静态页心跳：无新帧 2s 后重发上一帧 → 字节继续增长（连接保持活性，
+        // 生产侧 touch_alive 心跳在 → 不触发 Dead 关流）
         let before = out.len();
         let t1 = Instant::now();
         while out.len() == before && t1.elapsed() < Duration::from_secs(6) {
@@ -962,12 +999,16 @@ mod tests {
             "GET /touch?phase=start&x=1&y=2 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
         );
         assert_eq!(st3, 403);
-        // 控制页已接线实时触摸流（按下/移动/抬起）
+        // 控制页已接线实时触摸流（按下/移动/抬起）+ 移动端圆点抽屉 + 触摸反馈
         let (st4, body4) = http(port2, "GET /?token=s3cret HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
         assert_eq!(st4, 200);
         assert!(body4.contains("/touch"), "控制页缺 /touch 接线");
         assert!(body4.contains("pointermove"), "控制页缺实时拖动接线");
         assert!(body4.contains("visibilitychange"), "控制页缺后台暂停接线");
+        assert!(body4.contains("homei"), "控制页缺移动端圆点菜单");
+        assert!(body4.contains("id=\"fpsb\""), "控制页缺 fps 徽标");
+        assert!(!body4.contains("上滑"), "方向滑动按钮应已删除");
+        assert!(!body4.contains("<header"), "顶栏应已删除");
     }
 
     #[test]
