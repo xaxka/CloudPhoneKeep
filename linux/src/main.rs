@@ -213,6 +213,14 @@ fn selftest(cfg: &config::Config, logger: &Arc<Logger>) -> i32 {
             checks.push(("server: 实时画面流端点", false));
         }
     }
+    // 触控端点：phase 非法值在 HTTP 层直接 400（不依赖引擎/浏览器）
+    match util::http_get(p, "/touch?phase=poke&x=1&y=1", 3000) {
+        Ok((st, _)) if st == 400 => checks.push(("server: 触控端点参数校验", true)),
+        other => {
+            logger.log(0, "error", &format!("selftest touch 端点异常：{other:?}"));
+            checks.push(("server: 触控端点参数校验", false));
+        }
+    }
     let mut failed = 0;
     for (name, ok) in &checks {
         logger.log(0, "sys", &format!("selftest {} {}", if *ok { "PASS" } else { "FAIL" }, name));

@@ -10,7 +10,8 @@
 //!  - GET  /stream.mjpg       实时画面流（MJPEG multipart，Page.startScreencast 帧直推，
 //!                            断流自动重连；页面侧不可用时退化 /shot.jpg 轮询）
 //!  - GET  /shot.jpg          单帧页面截图（JPEG，兼容/兜底用）
-//!  - POST /tap /swipe /type /key /nav /reload  控制端点（token 可选保护）
+//!  - POST /tap /swipe /touch /type /key /nav /reload  控制端点（token 可选保护；
+//!                            /touch=实时触摸流 phase=start/move/end/cancel）
 //!
 //!  说明：控制端点经 channel 由引擎线程用 CDP Input 域执行 = 内核级触摸模拟，
 //!        无需桌面/VNC；/report 与 /log 即使被 Chromium 专用网络访问(PNA)策略
@@ -140,7 +141,8 @@ main{flex-direction:column}
 <button onclick="swipe(1,0)">→ 右滑</button>
 </div>
 <h2>说明</h2>
-<div class="note">左侧为云手机实时画面：单击＝触摸，按住拖动＝滑动（返回/切后台等手势）。
+<div class="note">左侧为云手机实时画面，触摸完全跟手：按下/移动/抬起实时注入（列表拖动、
+下拉刷新、滑块都跟手），按住不动＝长按。切后台/锁屏自动暂停画面流省 CPU，回来自动恢复。
 首次登录：画面中点「登录」→ 点手机号输入框 → 右侧输入手机号回车 → 收到验证码后输入 →
 登录态自动持久化，之后免登录。画面全白且出现红色「导航失败」徽标＝首页打不开
 （网络/DNS 问题，引擎在自动重试，看「状态」里的错误行定位），与画面链路无关。</div>
@@ -170,6 +172,7 @@ if(t){o.classList.remove('hidden')}else{o.classList.add('hidden')}}
 var PAGEMAP={loading:'加载中',ok:'页面正常',reloading:'重载中','nav-error':'导航失败·重试中'};
 function pt(s){return PAGEMAP[s]||s||'—'}
 function poll(){
+if(document.hidden)return;   // 切后台不轮询（省唤醒）
 fetch(U('/healthz')).then(function(r){return r.json()}).then(function(j){
 VW=j.vw||414;VH=j.vh||896;
 document.getElementById('wrap').style.aspectRatio=VW+'/'+VH;
@@ -268,11 +271,15 @@ if(live.mode==='shot'&&live.shotBusy){live.shotBusy=false;loop()}
 setTimeout(function(){if(live.mode==='shot')startLive()},8000);
 }
 document.addEventListener('visibilitychange',function(){
-if(!document.hidden&&live.mode!=='shot')startLive();
+// 切后台/锁屏即断流：连接关闭 → 引擎最后一个订阅者离开 → 自动 stopScreencast
+// （无人观看＝零 JPEG 编码开销，CPU 即降）；回前台自动重连（画面新鲜不闪提示）
+if(document.hidden){stopLive();live.mode='paused'}
+else if(live.mode!=='live'){startLive()}
 });
-startLive();
+if(!document.hidden)startLive();  // 后台打开的标签页：回前台再连，落地即省 CPU
 setInterval(function(){
 var el=document.getElementById('fps');
+if(live.mode==='paused'){el.textContent='已暂停';return}
 if(live.mode!=='live'){el.textContent='';return}
 var fps=live.frames-live.last;live.last=live.frames;
 el.textContent=(Date.now()-lastFrameAt>3000)?'重连/等帧…':(fps+' fps');
@@ -286,28 +293,45 @@ var s=Math.min(r.width/nw,r.height/nh),dw=nw*s,dh=nh*s;
 var ox=r.left+(r.width-dw)/2,oy=r.top+(r.height-dh)/2;
 return [Math.max(0,Math.min(nw,(cx-ox)/dw*nw)),Math.max(0,Math.min(nh,(cy-oy)/dh*nh))];
 }
-var lastSwipe=0;
-IMG.addEventListener('click',function(ev){
-if(Date.now()-lastSwipe<450)return;
-var p=xy(ev.clientX,ev.clientY);
-post('/tap','x='+p[0].toFixed(1)+'&y='+p[1].toFixed(1))
-.then(function(){ping('触摸 '+Math.round(p[0])+','+Math.round(p[1]))});
-});
-var drag=null;
+// —— 实时触摸流：按下/移动/抬起逐点直通引擎（CDP Input.dispatchTouchEvent）——
+// 不再「松手才补发整段滑动」：移动事件实时转发，页面拖动跟手（列表/滑块/下拉刷新）。
+// 串行化 + 最新点覆盖：请求按序发送，引擎响应慢时自动丢弃中间点（最新位置为准，绝不积压）
+var TCH={pending:null,busy:false,down:false,lastMove:0,downAt:0};
+function tsend(phase,x,y){TCH.pending=[phase,x,y];if(!TCH.busy)tpump()}
+function tpump(){
+if(!TCH.pending)return;
+var e=TCH.pending;TCH.pending=null;TCH.busy=true;
+post('/touch','phase='+e[0]+'&x='+e[1].toFixed(1)+'&y='+e[2].toFixed(1))
+.catch(function(){})
+.then(function(){TCH.busy=false;tpump()});
+}
+IMG.addEventListener('contextmenu',function(ev){ev.preventDefault()});
 IMG.addEventListener('pointerdown',function(ev){
-drag={x:ev.clientX,y:ev.clientY};
+ev.preventDefault();
 try{this.setPointerCapture(ev.pointerId)}catch(e){}
+// 先冲刷上一轻点延迟中的 end：保证触摸序列合法（双击 zoom 场景 start→end→start→end）
+if(flushEnd)flushEnd();
+var p=xy(ev.clientX,ev.clientY);
+TCH.down=true;TCH.downAt=Date.now();TCH.lastMove=0;
+tsend('start',p[0],p[1]);
 });
-IMG.addEventListener('pointerup',function(ev){
-if(!drag)return;
-var dx=ev.clientX-drag.x,dy=ev.clientY-drag.y,a=xy(drag.x,drag.y),b=xy(ev.clientX,ev.clientY);
-drag=null;
-if(Math.abs(dx)<10&&Math.abs(dy)<10)return;
-lastSwipe=Date.now();
-post('/swipe','x1='+a[0].toFixed(1)+'&y1='+a[1].toFixed(1)+
-'&x2='+b[0].toFixed(1)+'&y2='+b[1].toFixed(1))
-.then(function(){ping('滑动 '+Math.round(dx)+','+Math.round(dy))});
+IMG.addEventListener('pointermove',function(ev){
+if(!TCH.down)return;
+var n=Date.now();if(n-TCH.lastMove<40)return;  // ≤25 点/秒：CDP 从容，弱机不积压
+TCH.lastMove=n;
+var p=xy(ev.clientX,ev.clientY);
+tsend('move',p[0],p[1]);
 });
+var flushEnd=null;  // 延迟中的轻点 end（新按下前冲刷，防 start 被 end 越过）
+function tUp(ev,phase){
+if(!TCH.down)return;TCH.down=false;
+var p=xy(ev.clientX,ev.clientY),gap=Date.now()-TCH.downAt;
+function fin(){if(flushEnd!==fin)return;flushEnd=null;tsend(phase,p[0],p[1])}
+// 轻点补足 ≥60ms 按下时长：贴近真实触摸节奏，保证 tap 手势识别（合成 click）
+if(gap<60){flushEnd=fin;setTimeout(fin,60-gap)}else{fin()}
+}
+IMG.addEventListener('pointerup',function(ev){tUp(ev,'end')});
+IMG.addEventListener('pointercancel',function(ev){tUp(ev,'cancel')});
 // —— 面板操作 ——
 function swipe(hx,hy){
 var cx=VW/2,cy=VH/2,d=Math.min(VW,VH)*0.35;
@@ -628,6 +652,25 @@ fn route(
             let y2 = num(&req.query, &req.form, "y2");
             control_void(ctrl, move |reply| ControlRequest::Swipe { x1, y1, x2, y2, reply })
         }
+        "/touch" => {
+            // 实时触摸流：phase 在 HTTP 层校验（非法 400，不占引擎）；坐标与 /tap 同坐标系
+            let phase = req
+                .query
+                .get("phase")
+                .or_else(|| req.form.get("phase"))
+                .cloned()
+                .unwrap_or_default();
+            if !matches!(phase.as_str(), "start" | "move" | "end" | "cancel") {
+                return (
+                    400,
+                    "text/plain; charset=utf-8".into(),
+                    b"phase must be start/move/end/cancel".to_vec(),
+                );
+            }
+            let x = num(&req.query, &req.form, "x");
+            let y = num(&req.query, &req.form, "y");
+            control_void(ctrl, move |reply| ControlRequest::Touch { phase, x, y, reply })
+        }
         "/type" => {
             let text = req
                 .query
@@ -893,6 +936,38 @@ mod tests {
         // 客户端断开 → 服务端写失败退出并发 Detach（引擎线程收尾，测试可退出）
         drop(s);
         thread::sleep(Duration::from_millis(300));
+    }
+
+    #[test]
+    fn touch_endpoint_guards() {
+        // phase 非法 → HTTP 层直接 400（不占引擎，无需浏览器）
+        let (port, _shared, _tx) = start_server("");
+        let (st, body) = http(
+            port,
+            "GET /touch?phase=poke&x=1&y=2 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 400);
+        assert!(body.contains("phase"), "{body}");
+        // phase 合法但引擎不可用（控制通道无接收者）→ 500（已过参数校验，进入控制通道）
+        let (st2, body2) = http(
+            port,
+            "GET /touch?phase=move&x=1.5&y=2.5 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st2, 500);
+        assert!(body2.contains("engine unavailable"), "{body2}");
+        // token 保护与其它控制端点同策略
+        let (port2, _shared2, _tx2) = start_server("s3cret");
+        let (st3, _) = http(
+            port2,
+            "GET /touch?phase=start&x=1&y=2 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st3, 403);
+        // 控制页已接线实时触摸流（按下/移动/抬起）
+        let (st4, body4) = http(port2, "GET /?token=s3cret HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        assert_eq!(st4, 200);
+        assert!(body4.contains("/touch"), "控制页缺 /touch 接线");
+        assert!(body4.contains("pointermove"), "控制页缺实时拖动接线");
+        assert!(body4.contains("visibilitychange"), "控制页缺后台暂停接线");
     }
 
     #[test]

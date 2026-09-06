@@ -199,6 +199,10 @@ pub enum ControlRequest {
     Screenshot { reply: Sender<Result<Vec<u8>, String>> },
     Tap { x: f64, y: f64, reply: Sender<Result<(), String>> },
     Swipe { x1: f64, y1: f64, x2: f64, y2: f64, reply: Sender<Result<(), String>> },
+    /// 实时触摸流（/touch）：按下/移动/抬起/取消逐点直通 CDP Input.dispatchTouchEvent
+    /// ——页面拖动跟手（不再「松手才补发整段滑动」）；move 高频，仅按下留日志、
+    /// 超时收紧防积压（渲染卡顿时移动点丢弃链路继续，不占引擎 5s）
+    Touch { phase: String, x: f64, y: f64, reply: Sender<Result<(), String>> },
     TypeText { text: String, reply: Sender<Result<(), String>> },
     Key { key: String, reply: Sender<Result<(), String>> },
     Navigate { url: String, reply: Sender<Result<(), String>> },
@@ -757,6 +761,20 @@ fn handle_control(cdp: &mut Cdp, session: &str, req: ControlRequest, logger: &Ar
             swipe(cdp, session, x1, y1, x2, y2)?;
             let _ = reply.send(Ok(()));
         }
+        ControlRequest::Touch { phase, x, y, reply } => {
+            // phase 在 HTTP 层已校验（start/move/end/cancel）；未知值按 cancel 兑底
+            let (typ, points, timeout_ms): (&str, Value, u64) = match phase.as_str() {
+                "start" => ("touchStart", json!([{ "x": x, "y": y, "id": 1 }]), 5000),
+                "move" => ("touchMove", json!([{ "x": x, "y": y, "id": 1 }]), 2000),
+                "end" => ("touchEnd", json!([]), 5000),
+                _ => ("touchCancel", json!([]), 5000),
+            };
+            if phase == "start" {
+                logger.log(1, "click", &format!("触摸按下 ({x:.0},{y:.0})"));
+            }
+            touch_event(cdp, session, typ, points, timeout_ms)?;
+            let _ = reply.send(Ok(()));
+        }
         ControlRequest::TypeText { text, reply } => {
             logger.log(1, "click", &format!("输入文本（{} 字符）", text.chars().count()));
             cdp.call("Input.insertText", json!({ "text": text }), Some(session), 5000)?;
@@ -829,32 +847,38 @@ fn handle_control(cdp: &mut Cdp, session: &str, req: ControlRequest, logger: &Ar
     Ok(())
 }
 
-fn touch_event(cdp: &mut Cdp, session: &str, typ: &str, points: Value) -> Result<(), String> {
+fn touch_event(
+    cdp: &mut Cdp,
+    session: &str,
+    typ: &str,
+    points: Value,
+    timeout_ms: u64,
+) -> Result<(), String> {
     cdp.call(
         "Input.dispatchTouchEvent",
         json!({ "type": typ, "touchPoints": points }),
         Some(session),
-        5000,
+        timeout_ms,
     )
     .map(|_| ())
 }
 
 fn tap(cdp: &mut Cdp, session: &str, x: f64, y: f64) -> Result<(), String> {
-    touch_event(cdp, session, "touchStart", json!([{ "x": x, "y": y, "id": 1 }]))?;
+    touch_event(cdp, session, "touchStart", json!([{ "x": x, "y": y, "id": 1 }]), 5000)?;
     thread::sleep(Duration::from_millis(80));
-    touch_event(cdp, session, "touchEnd", json!([]))
+    touch_event(cdp, session, "touchEnd", json!([]), 5000)
 }
 
 fn swipe(cdp: &mut Cdp, session: &str, x1: f64, y1: f64, x2: f64, y2: f64) -> Result<(), String> {
-    touch_event(cdp, session, "touchStart", json!([{ "x": x1, "y": y1, "id": 1 }]))?;
+    touch_event(cdp, session, "touchStart", json!([{ "x": x1, "y": y1, "id": 1 }]), 5000)?;
     for i in 1..=8 {
         let t = i as f64 / 8.0;
         let xi = x1 + (x2 - x1) * t;
         let yi = y1 + (y2 - y1) * t;
-        touch_event(cdp, session, "touchMove", json!([{ "x": xi, "y": yi, "id": 1 }]))?;
+        touch_event(cdp, session, "touchMove", json!([{ "x": xi, "y": yi, "id": 1 }]), 5000)?;
         thread::sleep(Duration::from_millis(16));
     }
-    touch_event(cdp, session, "touchEnd", json!([]))
+    touch_event(cdp, session, "touchEnd", json!([]), 5000)
 }
 
 fn key_event(cdp: &mut Cdp, session: &str, key: &str) -> Result<(), String> {

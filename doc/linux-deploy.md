@@ -59,9 +59,16 @@ docker logs -f cpk-138xxxx1234     # 诊断日志实时镜像
 
 浏览器打开 `http://127.0.0.1:8088/`：**左侧实时画面 + 右侧操作栏**（窄屏自动上下堆叠）。
 画面为 `Page.startScreencast` 合成器帧直推的 MJPEG 流（页面一有更新即出帧，
-局域网延迟 ≈ 引擎监督周期）；单击＝触摸、按住拖动＝滑动
-（CDP `Input.dispatchTouchEvent`，内核级注入）；右侧可输入文本、按键、方向滑动、全屏。
+局域网延迟 ≈ 引擎监督周期）；**触摸完全跟手**：按下/移动/抬起实时注入
+（CDP `Input.dispatchTouchEvent`，内核级）：拖列表/拉滑块/下拉刷新即时响应，
+按住不动＝长按；轻点由 Chromium 手势识别自动合成 click。控制端点
+`POST /touch`（`phase=start/move/end/cancel` + `x/y`）也可外部脚本直调。
+右侧可输入文本、按键、方向滑动、全屏。
 VLC 等标准播放器也可直接打开 `http://<host>:<port>/stream.mjpg` 观看。
+
+**切后台/锁屏自动省 CPU**：控制页不可见即断流，引擎最后一个订阅者离开后
+自动 `Page.stopScreencast`——无人观看＝零 JPEG 编码开销，CPU 即降（云机页面
+本身的运行开销仍在，那是保活语义）；回前台自动重连。关闭标签页同理。
 
 流的连接语义（弱机/慢网络均按此设计，控制页顶栏会显示 `N fps`）：
 
