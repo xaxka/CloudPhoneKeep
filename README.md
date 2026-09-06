@@ -4,6 +4,8 @@
 
 ![Tauri](https://img.shields.io/badge/Tauri-2.x-blue) ![License](https://img.shields.io/badge/License-MIT-green) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20Docker-lightgrey) ![Portable](https://img.shields.io/badge/便携版-免安装-orange)
 
+**技术文档**（架构 / 保活规则 / 排查 / 配置 / Linux 部署）已集中到 [`doc/`](doc/README.md)，本文件只保留上手所需。
+
 ## 支持平台
 
 | 平台 | 入口 | 保活能力 |
@@ -11,162 +13,37 @@
 | 移动云手机 | `cloudphoneh5.buy.139.com` | 解锁区自动进入云机、万能确认按钮按文字分流重连/确认、到期弹窗确认、退回首页检测 |
 | 联通云手机 | `uphone.wo-adv.cn` | 试用弹窗自动启用、断连自动重试、自动进入云机、到期弹窗确认、退出检测 |
 
-每个帐号可独立选择平台，不同平台的保活选择器互不干扰。
+每个帐号可独立选择平台，不同平台的保活选择器互不干扰（规则明细见 [doc/keepalive-rules.md](doc/keepalive-rules.md)）。
 
 ## 界面（还原原版 exe）
 
-启动后是一个小「新开账号」窗口（窗口标题即「新开账号」，与原版 login 窗体一致）：
+启动后是一个小「新开账号」窗口（窗口标题即「新开账号」，与原版 login 窗体一致）：选平台、填手机号（缓存目录名）、选老板键索引 → 点「进入」打开云手机窗口。
 
-```
-┌─ 新开账号 ────────────────────┐
-│            平台                │
-│      [移动云手机 ▼]            │
-│   缓存数据目录名(建议填手机号)  │
-│      [  138xxxx1234  ]        │
-│          窗口分辨率            │
-│      [414]  X  [896]          │
-│      老板键索引 CTRL + (1~9)   │
-│         [ 1 ]                 │
-│     运行中：帐号1(Ctrl+1)      │
-│      ┌──── 进入 ────┐         │
-└───────────────────────────────┘
-```
-
-点「进入」即打开云手机窗口。窗口不挂菜单栏（原「首页 | 旋转 | 窗口置顶 | 窗口设置 | 检查更新」五项已移除，「旋转」「检查更新」不再提供），标题栏只保留关闭按钮（无最小化/最大化按钮；可拖拽自由调整大小）：
-
-- **不在任务栏显示**：设置窗口、云手机窗口均跳过 Windows 任务栏（`skipTaskbar` / `skip_task_bar`），交互通过各云手机窗口的独立托盘完成。**不再有启动即常驻的全局托盘**——「新开账号」设置窗口只在启动时显示，点「进入」后隐藏，本实例内不会再次唤回（再开一个云手机 = 再运行一个 exe 实例）
-- 「首页」「窗口置顶」移至托盘右键菜单
+- 窗口不挂菜单栏（原五项已移除），标题栏只保留关闭按钮，可拖拽自由调整大小
+- **不在任务栏显示**：交互通过各云手机窗口的独立托盘完成
 - `Ctrl+N`（N=老板键索引）瞬间隐藏/呼出，`Ctrl+U` 呼出地址栏（回车跳转、Esc 关闭，与原版一致）
-- 每个云手机窗口有**自己的托盘图标**（与原版每个 webForm 各建一个托盘一致），多 exe 多开时每个实例的托盘相互独立：**左键单击或双击打开窗口，右键弹出菜单**：**首页 / 窗口置顶 / 打开数据目录 / 退出**（菜单项不带前缀标记，文字左对齐）；托盘悬停提示为「平台 - 帐号名」，便于区分多个实例
+- 每个云手机窗口**自己的托盘图标**：左键打开窗口，右键菜单「首页 / 窗口置顶 / 打开数据目录 / 退出」；悬停提示「平台 - 帐号名」
+- 多开 = 再运行一个 exe（不同实例用不同缓存目录名与老板键索引）
 
 ## 退出语义
 
 - **云手机窗口右上角 X = 隐藏到托盘，保活继续**（要退出请用托盘菜单「退出」）
 - **设置窗口右上角 X = 退出整个程序**（原版 `loginForm.onClose → win.quitMessage()`）
-- **托盘右键 → 退出 = 退出整个程序**（还原原版 `tray.delete + close + quitMessage`）
+- **托盘右键 → 退出 = 退出整个程序**
 
-隐藏窗口继续保活：点云手机窗口 X、老板键 `Ctrl+N` 均可隐藏；再次点击托盘图标即可呼出。
-
-## WebView2 性能调优（v1.8.1 起）
-
-程序启动早期自动设置 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`（WebView2 加载器与内置参数**合并**生效，全部窗口共享）：
-
-- **关闭 `CalculateNativeWinOcclusion`（遮挡限流）**：Chromium 默认检测窗口遮挡，云手机窗口被其他窗口盖住时可能被当作后台而限流渲染器——对每秒传输画面的保活场景是直接威胁。关闭后盖住照常跑（代价：被盖住时照常渲染，略多 CPU）
-- **关闭 Edge 后台服务**：`Translate`（翻译）、`AutofillServerCommunication`（表单自动填充云端上报）、`OptimizationHints`（优化指南预取）、`InterestFeedContentSuggestions`（资讯流）、`HardwareMediaKeyHandling`/`MediaSessionService`（系统媒体键/正在播放集成）、`msEdgeBackgroundProcessing`（后台维护）。均与页面脚本、视频流无关，只省待命开销
-- `--disable-features` 多处出现时 WebView2 按**并集合并**（官方文档明确的例外，普通开关才只认最后一个），与 wry 内置的关闭项自动合并互不覆盖；清单仍重复带上 wry 默认三项（`msWebOOUI,msPdfOOUI,msSmartScreenProtection`）作防御
-
-注意：若外部已设置该环境变量，程序**不覆盖**（启动日志有记录），需要内置调优时请清除该变量后重启。启动参数完整内容见程序级日志（数据根目录 `cpk-*.log`）首条的「WebView2 调优参数已应用」。
-
-## 源码级复刻对照（aardio → Tauri）
-
-| 原版行为（aardio 源码） | 本项目实现 |
-| :--- | :--- |
-| `login.aardio` 目录名为空 → msgbox「缓存数据目录名不能为空」 | 前端红横幅同文案阻止，后端同样拦截 |
-| `showWebForm` 成功 → `loginForm.show(false)` | 点「进入」**立即**隐藏设置窗口（前端直接隐藏，不等窗口创建）；启动失败自动唤回并显示错误 |
-| `login/web.aardio` 关闭窗口 → `win.quitMessage()` | 设置窗口点 X → 销毁全部窗口并退出进程；**云手机窗口点 X → 隐藏到托盘继续保活**（退出走托盘菜单） |
-| `web.aardio` 菜单五项：云手机首页/旋转/窗口置顶/设置/检查更新 | 窗口菜单栏已移除：「首页/窗口置顶」并入托盘右键菜单；「旋转/检查更新」删除 |
-| 「设置」settingWin：仅分辨率 + 保存，内存生效不落盘 | `winset` 小窗：改窗口与会话内覆盖，重启恢复配置值 |
-| 「旋转」交换 userInfo 宽高 + `go(location)` 刷新，不落盘 | **已移除**（随菜单栏一起删除；横竖屏需求可在设置窗口直接改窗口分辨率） |
-| `win.util.tray(webForm)` 每窗口一托盘，菜单 显示(●)/隐藏/退出 | 每槽位独立托盘，左键单击/双击呼出窗口（不再设显示/隐藏菜单项），退出=退出程序 |
-| `reghotkey Ctrl+N` 显隐 + 置前 | 同；注册失败仅告警不阻塞（原版亦不检查返回值） |
-| `reghotkey Ctrl+U` 地址栏，回车 `go(url)` | 同；Esc 关闭为附加便利 |
-| `runTimer 5000ms`：重连/进入/确认弹窗 + 解锁区 + 进入云机 | `actionTick` 每 5 秒，文字**包含匹配**（还原 `string.keywords`） |
-| `stopTimer 1000ms`：#tabbar 退出检测 + 「知道了」到期确认，触发后停用 | `stopCheck` 每 1 秒，`stopDone` 标志触发一次后停用 |
-| CDP `Network.setCookies` domain=`.139.com` 导航前生效 | **已移除**（登录态由各帐号独立数据目录保持，无需手动指定 Cookie） |
-| `enableDefaultContextMenus(false)`、触点光标注入、`onDocumentInit` 重装 | 右键屏蔽 + 触点光标**默认关闭**（使用系统默认鼠标指针，资源本地内嵌备用）+ 每次导航自动重装 |
-| 桌面浏览器打开 H5 即可用鼠标操控（页面自带鼠标→触摸模拟器） | **鼠标→触摸操控模拟**：注入脚本在页面代码运行前补齐 `ontouchstart`，页面自带的模拟器永不加载，鼠标→触摸一律由内置同款模拟器接管——任何路由、**重载后**都能点动云机，鼠标拖动=滑动、不再选择文本 |
-| 启动时 `fsys.update` 自动更新（第三方服务器后门） | **已移除**（原「检查更新」菜单项也随菜单栏删除） |
-
-原版已知的坑未复刻（属 bug 而非行为）：`appComponents` 全局命名空间导致多窗口互相覆盖定时器、地址栏 `myTimer` 空引用、同索引重复加载窗口等——本项目按槽位隔离修复，否则多开保活无法工作。
-
-## 出问题怎么排查
-
-| 现象 | 原因与处理 |
-| :--- | :--- |
-| 点「进入」弹红色横幅 | 横幅里就是具体原因。常见：老板键 Ctrl+N 被其他程序占用（此时窗口仍会正常打开，仅无老板键，并弹系统通知）；数据目录被占用（程序会自动换新目录重试，日志有记录） |
-| 提示缺少 WebView2 | 程序会自动打开微软官方下载页，安装「Evergreen 独立安装包」后重开即可 |
-| 页面空白/加载不出来 | 15 秒后页面底部会出现黄色重试条（重新加载 / 回云手机首页），同时帐号数据目录的日志里有对应的 `[error]` 记录 |
-| 看日志 | 数据根目录 `cpk-YYYYMMDD.log`（程序级）与各帐号数据目录内的 `cpk-YYYYMMDD.log`（帐号级）；行内 `[pid=N]` 区分多实例；程序一启动就会写入，含版本、pid、数据根目录、回环端口、WebView2 状态；任何启动失败也会落盘 |
-| 窗口最小化后保好像停了 | v1.11.0 起最小化与隐藏同等由看门狗驱动（[sys] 日志有「窗口被最小化…看门狗已接管」记录）；旧版本遇到此情况请升级 |
-
-## 功能一览
-
-- **多 exe 多开**：每运行一个 exe 即一个独立实例——各自的设置窗口、云手机窗口与独立托盘图标；每帐号独立 WebView2 数据目录，Cookie / 缓存 / 登录态完全隔离（不同实例使用相同缓存目录名时自动换新目录兜底）
-- **老板键**：`Ctrl+1` ~ `Ctrl+9` 瞬间隐藏 / 呼出对应帐号窗口（按窗口注册，热键冲突时明确报错而不是崩溃）
-- **自动保活引擎**：页内脚本 + Rust 看门狗双重驱动，窗口隐藏或最小化（Win+D / 显示桌面）后保活不中断（绕过 Chromium 后台定时器节流；看门狗连续 eval 失败会升级为明确错误日志，不再无声死亡）
-- **弹窗自动处理**：自动启用试用 / 自动重连 / 自动进入云机 / 到期弹窗确认 / 退出检测（见下文选择器明细）
-- **窗口置顶**（托盘菜单开关；隐藏再呼出后自动保持置顶）
-- **鼠标→触摸操控模拟**（任何路由、重载后均可点动云机）、**屏蔽页面右键菜单**；触点光标默认关闭，使用系统默认鼠标指针
-- **云手机窗口点 X 隐藏到托盘**，保活不中断；退出统一走托盘菜单
-- **空闲模拟鼠标活动**防掉线
-- **标准数据目录**：配置 / 数据 / 日志全部在 `AppData\LocalLow\CloudPhoneKeep`（旧版 exe 旁数据首次启动自动迁移），不写注册表
-- **免安装**：单文件 exe，需要系统已安装 WebView2 运行时（Win11 自带；Win10 缺失时会提示安装）
-
-## 数据目录（AppData\LocalLow\CloudPhoneKeep）
-
-```
-C:\Users\<用户名>\AppData\LocalLow\CloudPhoneKeep\
-├── config.json          # 全部帐号配置
-├── cpk-YYYYMMDD.log     # 程序级日志（按天滚动，保留 7 天）
-├── panic-pPID.log       # 若程序异常崩溃，原因记录于此
-├── 1/                   # 目录名填「1」的帐号：浏览器数据（Cookie/登录态/缓存）
-│   └── cpk-YYYYMMDD.log #   该帐号的日志（与数据同目录）
-└── 138xxxx1234/         # 目录名填「138xxxx1234」的帐号 …
-```
-
-## 保活原理
-
-页面加载后注入的保活脚本周期执行（窗口可见且未最小化时由页内 `setInterval` 驱动；窗口被隐藏**或最小化**后由 Rust 侧看门狗周期 `eval` 驱动——最小化窗口的页内定时器同样会被 Chromium 后台节流，看门狗对两者同等接管），按帐号所选平台分流：
-
-**移动云手机**（依据原作者 aardio 源码忠实还原）：
-
-1. `.van-dialog__confirm` 是该站万能确认按钮，按按钮文字**包含匹配**分流（每 5 秒）：含「重连」断线重连；含「进入」超时重进；含「确认」到期与提示确认
-2. 出现 `.unlocked` 解锁区且文字含「进入」→ 直接点击容器本身进入云机
-3. 出现 `.enter-intance` 且文字含「进入云机」→ 点击进入
-4. 每 1 秒检测 `#tabbar`（退回 H5 首页，即云机退出）→ 状态上报 + 系统通知，检测一次后停用（还原原版 topTimerStatus）
-5. 每 1 秒检测确认按钮含「知道了」→ 自动点击 + 「时间已到期」通知，同样触发一次后停用
-6. 遇到未知文字的确认弹窗不盲点，写入 `[miss]` 日志（附弹窗全文与按钮清单）供分析；持续 3 分钟未识别自动整页重载兜底（登录态在本地数据目录，重载自动回云机页，对齐联通 v1.9.0 同款分级兜底）
-
-**联通云手机**：
-
-1. 出现 `.try-content`（试用提示）→ 自动点击 `.try-btn`「立即启用云手机」
-2. 出现 `.phone-dialog-wrap`「无法连接」→ 按钮按**精确 → 宽松包含 → 确认词**三级匹配重试/确定类按钮（v1.9.0）；持续 60 秒无已知按钮则点弹窗内任意非退出类按钮兜底，持续 3 分钟未恢复自动整页重载（登录态在本地数据目录，重载自动回云机页）
-3. 出现 `.detail-info-container` 详情页 → 自动点击 `.enter-intance`「进入云机」
-4. 出现 `.van-dialog__confirm` 到期弹窗 → 自动点击「知道了」并发出系统通知
-5. 检测到 `.title-bar`（退回首页，即云机退出）→ 状态上报 + 系统通知
-
-**通用**：空闲周期内向页面派发轻微 `mousemove` 事件降低会话闲置断开概率；全部状态通过 `http://127.0.0.1:<port>/report` 回环上报（Chromium 允许 HTTPS 页面访问环回地址，不受混合内容限制）。
-
-## 诊断日志（改版失效排查）
-
-云手机网站改版导致保活失效时，可通过日志快速定位原因：程序级日志在数据根目录 `cpk-YYYYMMDD.log`，帐号级日志在各帐号数据目录内（托盘菜单「打开数据目录」直达），按天滚动、自动保留 7 天。
-
-| 级别 | 含义 | 排查价值 |
-| :--- | :--- | :--- |
-| `nav` | 页面 URL / 路由变化 | 改版定位第一线索：路由结构是否变化 |
-| `beat` | 保活心跳采样（每 20 tick 一条） | 附全部选择器命中摘要，**全 0 即疑似改版** |
-| `click` | 自动点击命中 | 记录目标元素 `tag.class("文字")`，确认点到了什么 |
-| `miss` | 容器可见但按钮未找到 / 未知弹窗文字 | **改版最直接证据**；断连弹窗与移动确认弹窗 miss 均附弹窗全文（160 字符）与弹窗内按钮清单，可直接看出按钮真实文案（v1.9.0 联通 / v1.11.0 移动） |
-| `exit` | 云机退出事件 | 附当时页面全部 DOM class 清单采样 |
-| `probe` | 手动 DOM 采样 | 页内 `__CPK_PROBE__` 调试钩子输出当前页面全部 class（`exit` 日志也会自动附带 DOM 采样） |
-| `error` | 脚本异常 | 含异常 message 与调用栈头部 |
-| `sys` | 窗口/看门狗生命周期 | 启动、隐藏（切换看门狗驱动）、显示、停止、eval 失败 |
-
-典型排查：搜 `[beat]` 看选择器是否全 0 → 搜 `[miss]` 看哪个选择器失效（miss 日志附弹窗按钮清单）→ 结合 `exit` 日志自动附带的 DOM class 清单修正 `keepalive.rs` 中的选择器。
-
-日志不记录任何帐号凭证，只含页面结构与保活动作。
+隐藏与最小化窗口均继续保活（看门狗接管，见 [doc/architecture.md](doc/architecture.md)）。
 
 ## 使用方法
 
-1. 从 [Releases](https://github.com/xixka/CloudPhoneKeep/releases) 下载 `CloudPhoneKeep.exe`（dev 预发布为自动构建），放到任意目录
+1. 从 [Releases](https://github.com/xaxka/CloudPhoneKeep/releases) 下载 `CloudPhoneKeep.exe`（dev 预发布为自动构建），放到任意目录
 2. 双击运行 → 设置窗口中选平台、填手机号（缓存目录名）、选老板键索引 → 「进入」
 3. 在打开的窗口中完成云手机登录；之后点窗口 X 或 `Ctrl+N` 收起窗口（隐藏到托盘），保活继续
-4. 需要多开：再运行一个 exe（直接再启动一次或复制一份程序均可），每个运行实例都有自己的云手机窗口与独立托盘图标（不同实例请使用不同的缓存目录名与老板键索引）
-5. 数据位置：配置与程序级日志在数据根目录 `AppData\LocalLow\CloudPhoneKeep`，帐号数据与帐号级日志（`cpk-*.log`）在各自帐号目录里，登录态随之保留（多实例共用数据根目录，按帐号目录名隔离）
+4. 需要多开：再运行一个 exe，每个实例都有自己的云手机窗口与独立托盘
+5. 数据位置：`AppData\LocalLow\CloudPhoneKeep`（配置/日志/各帐号数据隔离，详见 [doc/configuration.md](doc/configuration.md)）
 
 ## 安全性说明
 
-- 不含任何自动更新 / 自动下载执行逻辑：原「检查更新」菜单项已删除，无任何联网比对或下载行为
+- 不含任何自动更新 / 自动下载执行逻辑：无任何联网比对或下载行为
 - 触点光标（默认关闭）为**本地内嵌资源**（`src-tauri/assets/cursor.b64`），零外部资源依赖
 - 对外网络行为只有一类：云手机页面本身的正常访问
 - 无键盘钩子（老板键使用系统全局热键注册，而非 `SetWindowsHookEx`）
@@ -180,11 +57,11 @@ C:\Users\<用户名>\AppData\LocalLow\CloudPhoneKeep\
 cargo build --release --manifest-path src-tauri/Cargo.toml
 # 产物：src-tauri/target/release/CloudPhoneKeep.exe（单文件便携版）
 
-# Linux / Docker（一个容器一个账号）
+# Linux / Docker（一个容器一个账号；构建上下文在仓库根）
 cd linux && docker compose up -d --build
 ```
 
-前端为纯静态 HTML/JS（`ui/` 目录），无 Node 构建步骤。推送代码后 GitHub Actions 自动构建并发布到 `dev` 预发布版（Windows exe），同时构建 Linux Docker 镜像并推送 GHCR（`ghcr.io/xaxka/cloudphonekeep`）。
+前端为纯静态 HTML/JS（`ui/` 目录），无 Node 构建步骤。推送代码后 GitHub Actions 自动构建并发布到 `dev` 预发布版（Windows exe），同时构建 Linux 多架构 Docker 镜像（amd64/arm64）推送 GHCR（`ghcr.io/xaxka/cloudphonekeep`）。
 
 ## 目录结构
 
@@ -195,19 +72,22 @@ cd linux && docker compose up -d --build
 │   ├── src/
 │   │   ├── main.rs          # 入口、panic 记录、托盘、菜单事件
 │   │   ├── browser.rs       # 窗口生命周期 / 原生菜单 / 老板键 / 托盘
-│   │   ├── keepalive.rs     # 注入页面的保活脚本生成（含地址栏）
+│   │   ├── keepalive.rs     # 注入脚本构建器（include_str! shared/）
 │   │   ├── report_server.rs # 127.0.0.1 状态回传服务
 │   │   ├── config.rs        # 便携配置、帐号数据目录隔离
 │   │   ├── commands.rs      # Tauri 命令
 │   │   ├── logger.rs        # 按天滚动诊断日志
 │   │   └── state.rs         # 槽位运行状态
 │   └── tauri.conf.json
+├── shared/
+│   └── keepalive.inject.js  # 保活脚本唯一源文件（Windows/Linux 共用，改一处双端生效）
 ├── linux/                   # Linux + Docker 版（一容器一账号，详见 linux/README.md）
-│   ├── Dockerfile           # rust:1-alpine musl 编译 → alpine:3.21 + Chromium 运行
+│   ├── Dockerfile           # rust:1-alpine 交叉编译（多架构）→ alpine:3.21 + Chromium
 │   ├── docker-compose.yml
-│   ├── src/                 # Rust 保活引擎（keepalive.rs 同源移植 + 手写 WS/CDP 客户端）
+│   ├── src/                 # Rust 保活引擎（手写 WS/CDP 客户端）
 │   └── Cargo.toml           # 仅依赖 serde_json
-└── .github/workflows/       # CI：Windows exe + Linux 镜像（GHCR）
+├── doc/                     # 技术文档（架构/保活规则/排查/配置/部署）
+└── .github/workflows/       # CI：Windows exe + Linux 多架构镜像（GHCR）
 ```
 
 ## 免责声明
@@ -218,4 +98,4 @@ cd linux && docker compose up -d --build
 
 ## License
 
-MIT © xixka
+MIT © xaxka

@@ -1,13 +1,14 @@
-//! 保活初始化脚本构建器：内嵌 keepalive.inject.js（Windows 版
-//! src-tauri/src/keepalive.rs::build_init_script 的逐行移植），替换占位符。
-//! 与 Windows 差异：
+//! 保活初始化脚本构建器：注入脚本本体在仓库根 `shared/keepalive.inject.js`
+//! （Windows/Linux 双平台唯一源文件，改保活规则只需改那一份），
+//! 这里 include_str! 内嵌 + 替换占位符。与 Windows 构建器差异：
 //!  - customCursor 恒为 false（无头模式没有可见光标，占位符替换为空串）
-//!  - 新增 pageTimer: false（tick 由宿主 Rust 看门狗经 CDP 驱动，见注入文件头注释）
+//!  - pageTimer 恒取 cfg.page_timer（默认 false：tick 由宿主 Rust 看门狗
+//!    经 CDP 驱动；Windows 侧传 true 保持页内定时器）
 //!  - slot 恒为 1（一个容器一个账号）
 
 use crate::config::Config;
 
-const TEMPLATE: &str = include_str!("keepalive.inject.js");
+const TEMPLATE: &str = include_str!("../../shared/keepalive.inject.js");
 
 pub fn build_init_script(cfg: &Config, port: u16) -> String {
     let inject = serde_json::json!({
@@ -48,7 +49,7 @@ mod tests {
             simulate_activity: true,
             block_context_menu: true,
             page_timer: false,
-            report_port: 8080,
+            report_port: 8088,
             bind: "0.0.0.0".into(),
             control_token: String::new(),
             cdp_port: 0,
@@ -70,11 +71,12 @@ mod tests {
 
     #[test]
     fn placeholders_replaced() {
-        let s = build_init_script(&cfg(), 8080);
-        assert!(!s.contains("__CPK_CFG__"), "CFG 占位符应被替换");
-        assert!(!s.contains("__CPK_CURSOR__"), "光标占位符应被替换");
+        let s = build_init_script(&cfg(), 8088);
+        // 注：脚本头部文档注释会提及占位符名，断言只针对实际代码行
+        assert!(!s.contains("var CFG = __CPK_CFG__;"), "CFG 占位符应被替换");
+        assert!(!s.contains("base64,__CPK_CURSOR__"), "光标占位符应被替换");
         assert!(s.contains("\"platform\":\"mobile\""));
-        assert!(s.contains("\"port\":8080"));
+        assert!(s.contains("\"port\":8088"));
         assert!(s.contains("\"pageTimer\":false"));
         // 注入的 JSON 含 $ 序列时不得被误展开（Rust replace 是字面替换，天然满足；
         // 显式断言防回归）
@@ -95,7 +97,7 @@ mod tests {
 
     #[test]
     fn keepalive_semantics_fully_ported() {
-        let s = build_init_script(&cfg(), 8080);
+        let s = build_init_script(&cfg(), 8088);
         // 双定时器语义（stopCheck 1s / actionTick 5s）
         assert!(s.contains("state.n >= every"));
         assert!(s.contains("stopCheck"));

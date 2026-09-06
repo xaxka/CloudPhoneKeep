@@ -1,23 +1,26 @@
 (function(){
   // =====================================================================
-  // CloudPhoneKeep 保活脚本（Linux/Chromium Headless 移植版）
+  // CloudPhoneKeep 保活脚本 —— Windows / Linux 双平台唯一源文件
   // ---------------------------------------------------------------------
-  // 来源：src-tauri/src/keepalive.rs::build_init_script 的逐行移植
-  //       （对齐 Windows v1.11.0，保活逻辑与选择器 100% 同源）。
-  // 配置占位符（见 keepalive.js 的 buildInitScript）在「var CFG = …」一行
-  // 由 Node 侧替换为配置 JSON（对应 Rust 的 {cfg_json}）；触点光标占位符
-  // 在样式串中替换为 base64（Linux 无可见光标，恒为空串）。
+  // 注入方（两个 Rust 构建器 include_str! 同一本文件，只改此处即双端生效）：
+  //   Windows: src-tauri/src/keepalive.rs   （WebView2，Tauri 窗口）
+  //   Linux:   linux/src/keepalive.rs       （Chromium headless，CDP 驱动）
+  // 构建器只做两件事：生成 CFG JSON + 替换下方两个占位符。
+  //   __CPK_CFG__     → 配置 JSON：slot/port/platform/homeUri/keepAlive/
+  //                     intervalMs/simulateActivity/customCursor/
+  //                     blockContextMenu/pageTimer
+  //   __CPK_CURSOR__  → 触点光标 PNG base64（Windows 注入真实内嵌资源；
+  //                     Linux 无可见光标，恒替换为空串且 customCursor=false）
   //
-  // 【Linux 移植增量（其余逻辑与 Windows 版完全一致）】
-  //  1) CFG.pageTimer（默认 false）：关闭页内 setInterval 驱动，改由宿主
-  //     Node 看门狗每 1 秒经 CDP Runtime.evaluate 调 __CPK_TICK__()——
-  //     与 Windows「窗口隐藏时由 Rust 看门狗驱动」同一模型（headless 页面
-  //     永远不可见，恒由外部驱动，避免页内+外部双驱动把 5 秒周期缩短一半）。
-  //     pageTimer 置 true 可恢复纯页内驱动（页内 setInterval 在无头模式
-  //     配合 --disable-background-timer-throttling 亦可工作，双保险可开）。
-  //  2) window.__CPK_DRAIN__()：诊断环形缓冲。headless 内 fetch http://127.0.0.1
-  //     回环上报可能受混合内容/专用网络访问(PNA)策略影响，Node 侧每 5 秒经
-  //     CDP 直接取走缓冲，保证诊断日志与状态在任何网络策略下都不丢。
+  // 平台差异全部收敛为 CFG 开关（其余逻辑双端 100% 一致）：
+  //  1) CFG.pageTimer：true = 页内 setInterval 1 秒驱动（Windows 窗口可见态；
+  //     隐藏/最小化时仍由 Rust 看门狗 eval __CPK_TICK__ 接管）；false = 完全
+  //     由宿主看门狗驱动（Linux CDP 恒定态——无头页面永不可见，避免
+  //     页内+外部双驱动把 5 秒动作周期缩短一半）。
+  //  2) window.__CPK_DRAIN__()：诊断环形缓冲（取走即清空，最多 200 条）。
+  //     Linux 宿主每 5 秒经 CDP 取走——headless 内 fetch 回环 /log 上报可能
+  //     受混合内容/专用网络访问策略影响，缓冲保证诊断日志任何网络策略下
+  //     不丢（/log 上报保留，双保险）；Windows 不调用，纯惰性代码无副作用。
   // =====================================================================
   if (window.__CPK_INSTALLED__) return;
   window.__CPK_INSTALLED__ = true;
@@ -55,7 +58,7 @@
   }
 
   // ===== 诊断日志：POST 到本地 /log，由宿主侧落盘（同内容 5 秒内去重）=====
-  // 【Linux 增量】同时写入页内环形缓冲，宿主经 CDP 每周期 __CPK_DRAIN__ 取走，
+  // 同时写入页内环形缓冲，Linux 宿主经 CDP 每周期 __CPK_DRAIN__ 取走（Windows 不取，无副作用），
   // 网络策略拦截 /log 时日志依然完整（见文件头注释第 2 条）
   function diag(level, msg){
     try {
@@ -76,7 +79,7 @@
     } catch(e){}
   }
 
-  // 【Linux 增量】宿主 CDP 取走诊断缓冲（取走即清空，最多 200 条防泄漏）
+  // 诊断缓冲（取走即清空，最多 200 条防泄漏；由 Linux 宿主经 CDP 调用）
   window.__CPK_DRAIN__ = function(){
     var b = state.diagBuf;
     state.diagBuf = [];
@@ -587,9 +590,9 @@
 
   window.__CPK_TICK__ = tick;
   // 页面内定时器：Windows 版窗口可见时由它驱动（1 秒），隐藏时由 Rust 看门狗驱动。
-  // 【Linux 增量】CFG.pageTimer 默认 false：无头页面恒由 Node 看门狗经 CDP 驱动
+  // Linux 版 CFG.pageTimer=false：无头页面恒由宿主 Rust 看门狗经 CDP 驱动
   // __CPK_TICK__（与 Windows 隐藏态同一通道），避免双驱动把动作周期缩短一半；
-  // 置 true 时恢复纯页内驱动（配合禁用定时器节流亦可用作双保险）。
+  // Windows 传 true，页内驱动保持可用（配合禁用定时器节流亦为双保险）。
   if (CFG.pageTimer !== false) {
     setInterval(function(){ try { tick(); } catch(e){} }, 1000);
   }

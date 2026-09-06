@@ -4,13 +4,14 @@
 # 用法（在本目录）：
 #   mkdir -p data/138xxxx1234
 #   docker compose up -d --build        # 构建即编译（容器内完成，无需本地 Rust）
-#   # 打开控制页完成首次登录： http://127.0.0.1:18080/
+#   # 打开控制页完成首次登录： http://127.0.0.1:8088/
 #
 # 多账号：把下方服务块复制一份，改 服务名/CPK_ACCOUNT/CPK_PLATFORM/
 #         data 目录/端口映射 —— 每个账号独立容器、独立 Profile、独立恢复。
 #
 # 不想本地构建：注释掉 build:，直接用 GHCR 镜像
 #   image: ghcr.io/xaxka/cloudphonekeep:latest
+#   （多架构：amd64 / arm64 主机原生运行，无需 --platform）
 # =====================================================================
 services:
 
@@ -18,8 +19,8 @@ services:
   cpk-138xxxx1234:
     image: ghcr.io/xaxka/cloudphonekeep:latest
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..                # 构建上下文在仓库根（Dockerfile 引用 linux/ 与 shared/）
+      dockerfile: linux/Dockerfile
     container_name: cpk-138xxxx1234
     restart: unless-stopped
     init: true                      # 信号转发 + 僵尸回收（docker stop 优雅退出）
@@ -38,16 +39,16 @@ services:
     volumes:
       - ./data/138xxxx1234:/data    # Chromium Profile + 日志（Cookie/LocalStorage 持久化）
     ports:
-      - "127.0.0.1:18080:8080"      # 控制页（首次登录/观察）；默认只绑本机回环
+      - "127.0.0.1:8088:8088"       # 控制页（首次登录/观察）；默认只绑本机回环
     healthcheck:
       disable: false                # 镜像内置 healthcheck；如需自定义在此覆盖
 
-  # —— 示例账号 2：联通云手机（多开 = 复制此块并改名）——
+  # —— 示例账号 2：联通云手机（多开 = 复制此块并改名，端口 8089 起）——
   # cpk-186xxxx5678:
   #   image: ghcr.io/xaxka/cloudphonekeep:latest
   #   build:
-  #     context: .
-  #     dockerfile: Dockerfile
+  #     context: ..
+  #     dockerfile: linux/Dockerfile
   #   container_name: cpk-186xxxx5678
   #   restart: unless-stopped
   #   init: true
@@ -59,4 +60,4 @@ services:
   #   volumes:
   #     - ./data/186xxxx5678:/data
   #   ports:
-  #     - "127.0.0.1:18081:8080"
+  #     - "127.0.0.1:8089:8088"

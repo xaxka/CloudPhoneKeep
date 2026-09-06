@@ -996,7 +996,7 @@ mod tests {
             simulate_activity: true,
             block_context_menu: true,
             page_timer: false,
-            report_port: 8080,
+            report_port: 8088,
             bind: "0.0.0.0".into(),
             control_token: String::new(),
             cdp_port: 0,

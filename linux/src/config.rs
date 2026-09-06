@@ -119,7 +119,7 @@ impl Config {
             simulate_activity: bool_env("CPK_SIMULATE_ACTIVITY", true),
             block_context_menu: bool_env("CPK_BLOCK_CONTEXT_MENU", true),
             page_timer: bool_env("CPK_PAGE_TIMER", false),
-            report_port: i64_env("CPK_REPORT_PORT", 8080, 0, 65535) as u16,
+            report_port: i64_env("CPK_REPORT_PORT", 8088, 0, 65535) as u16,
             bind: envs("CPK_BIND").unwrap_or_else(|| "0.0.0.0".into()),
             control_token: envs("CPK_CONTROL_TOKEN").unwrap_or_default(),
             cdp_port: i64_env("CPK_CDP_PORT", 0, 0, 65535) as u16,
@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(cfg.width, 414);
         assert_eq!(cfg.height, 896);
         assert_eq!(cfg.interval_ms, 5000);
-        assert_eq!(cfg.report_port, 8080);
+        assert_eq!(cfg.report_port, 8088);
         assert_eq!(cfg.bind, "0.0.0.0");
         assert_eq!(cfg.ua_mode, "windows");
         assert_eq!(cfg.page_timer, false);
