@@ -42,26 +42,21 @@ Windows 版（Tauri + WebView2 便携 exe）见仓库根目录，功能与发布
 ## 快速开始
 
 ```bash
-# 1. 拉镜像（首次推送后 GHCR 可用；本地无 Rust 也可 docker compose build）
-docker pull ghcr.io/xaxka/cloudphonekeep:latest
 
-# 2. 数据目录（每账号一个）
-mkdir -p data/138xxxx1234
-
-# 3. 启动
-docker run -d --name cpk-138xxxx1234 \
-  -v $PWD/data/138xxxx1234:/data \
+# 1. 启动
+docker run -d --name cpk \
+  -v cpk:/data \
   -p 127.0.0.1:18080:8080 \
   -e CPK_PLATFORM=mobile \
   -e CPK_ACCOUNT=138xxxx1234 \
   --shm-size 128m --init --restart unless-stopped \
   ghcr.io/xaxka/cloudphonekeep:latest
 
-# 4. 首次登录（浏览器打开控制页，点截图=触摸）
+# 2. 首次登录（浏览器打开控制页，点截图=触摸）
 #    http://127.0.0.1:18080/
 #    登录一次后 Cookie/LocalStorage 持久化在 volume，之后自动保活
 
-# 5. 观察健康状态
+# 3. 观察健康状态
 curl http://127.0.0.1:18080/healthz
 docker logs -f cpk-138xxxx1234     # 诊断日志实时镜像
 ```
