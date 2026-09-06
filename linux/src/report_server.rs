@@ -17,8 +17,9 @@
 //!  - GET  /clip              读取云机选中文本（云机 → 本机剪贴板）
 //!  - POST /fps               运行时帧率上限（引擎侧软件限帧，实测 Chrome 152
 //!                            maxFrameRate 参数无效）
-//!  - POST /platform          运行时平台切换（mobile/unicom；换首页/视口/保活脚本，
-//!                            云机实例自动重启，Profile 保留双平台登录态）
+//!  - POST /platform          平台选择/切换（mobile/unicom；打开控制页时首选，
+//!                            之后可随时切换：换首页/视口/保活脚本，云机实例自动
+//!                            重启，Profile 保留双平台登录态）
 //!  - POST /tap /swipe /key /nav /reload  控制端点（token 可选保护；兼容保留）
 //!
 //!  说明：控制端点经 channel 由引擎线程用 CDP Input 域执行 = 内核级触摸模拟，
@@ -128,6 +129,18 @@ transition:background .15s}
 #homei:active::after{background:rgba(255,255,255,.9)}
 #mask{display:none;position:fixed;inset:0;background:#000a;z-index:20}
 #mask.on{display:block}
+/* 平台首选层：打开页面时选平台（选过即记住，可随时在「设置→平台」切换） */
+#pick{position:fixed;inset:0;background:#0f172af2;z-index:50;display:flex;
+align-items:center;justify-content:center;padding:24px}
+#pick.hidden{display:none}
+.pk-card{background:var(--panel);border:1px solid var(--line);border-radius:16px;
+padding:22px;width:100%;max-width:330px;display:flex;flex-direction:column;gap:10px;
+box-shadow:0 18px 60px #000c}
+.pk-t{font-size:17px;font-weight:600;text-align:center}
+.pk-s{font-size:12px;color:var(--dim);text-align:center;margin:2px 0 8px}
+.pk-b{display:flex;flex-direction:column;align-items:flex-start;gap:3px;padding:12px 16px}
+.pk-b b{font-size:15px}
+.pk-b span{font-size:12px;color:var(--dim)}
 @media (max-width:820px){
 #stage{padding:6px 6px calc(46px + env(safe-area-inset-bottom))}
 #wrap{height:auto;width:100%;max-height:100%}
@@ -178,14 +191,6 @@ autocapitalize="off" autocorrect="off" spellcheck="false">
 </select>
 </div>
 <div class="row">
-<span class="lb">触控</span>
-<select id="imode">
-<option value="auto">自动（点击=鼠标，拖动=触摸）</option>
-<option value="touch">触摸（移动页）</option>
-<option value="mouse">鼠标（桌面页）</option>
-</select>
-</div>
-<div class="row">
 <span class="lb">帧率</span>
 <select id="fpsel">
 <option value="25">25 流畅</option>
@@ -198,6 +203,14 @@ autocapitalize="off" autocorrect="off" spellcheck="false">
 </div>
 </aside>
 <div id="mask"></div>
+<div id="pick">
+<div class="pk-card">
+<div class="pk-t">选择云手机平台</div>
+<div class="pk-s">首次使用选一次即可；之后可随时在「设置 → 平台」切换</div>
+<button class="pk-b" data-p="mobile"><b>移动云手机</b><span>中国移动 · 414×896</span></button>
+<button class="pk-b" data-p="unicom"><b>联通云手机</b><span>中国联通 · 405×720</span></button>
+</div>
+</div>
 <button id="homei" aria-label="控制台菜单"></button>
 <div id="toast"></div>
 <script>
@@ -243,7 +256,7 @@ if(document.hidden)return;   // 切后台不轮询（省唤醒）
 fetch(U('/healthz')).then(function(r){return r.json()}).then(function(j){
 VW=j.vw||414;VH=j.vh||896;
 WRAP.style.aspectRatio=VW+'/'+VH;
-HLTH={ok:!!j.ok,page:j.page||'',exited:!!j.exited};
+HLTH={ok:!!j.ok,page:j.page||'',exited:!!j.exited,platform:j.platform||''};
 statNotify(j);
 document.getElementById('pdot').className=
 j.ok?(j.page==='nav-error'?'warn':'ok'):'bad';
@@ -253,6 +266,8 @@ if(j.page==='nav-error'){PB.style.display='block';
 PB.textContent='首页导航失败·引擎自动重试中'}else{PB.style.display='none'}
 syncFpsSel(j.fps);
 syncPlatSel(j.platform);
+// 上次选择的平台与引擎当前平台不一致（如容器重启回默认）→ 自动切回，无需再选
+if(PLTSTORED&&HLTH.platform&&HLTH.platform!==PLTSTORED&&!PLTAP)wantPlatform(PLTSTORED,true);
 document.getElementById('stats').innerHTML=
 '<b>'+esc(j.account||'')+' · '+esc(j.platformLabel||'')+' · '+pt(j.page)+
 (j.exited?' · 已退出云机!':'')+'</b>'+
@@ -293,8 +308,30 @@ PLSEL.value=(p==='unicom')?'unicom':'mobile';
 }
 PLSEL.addEventListener('change',function(){
 var v=this.value;this._t=1;this.blur();
-post('/platform','value='+v).then(function(){ping('平台切换中：云机实例重启（约 10 秒）',5000)})
-.catch(function(){ping('平台切换失败（引擎忙/重启中）')});
+wantPlatform(v,false);
+});
+
+// —— 平台首选（CPK_PLATFORM 环境变量已移除）：打开页面时选 ——
+// 首次打开弹选择层，选过即记住（localStorage）；之后打开若引擎平台与
+// 上次选择不同（如容器重启回默认）自动切回。手动切换也走同一入口
+var PICK=document.getElementById('pick');
+var PLTSTORED=localStorage.getItem('cpk_platform')||'';
+var PLTAP=false;
+function platLabel(v){return v==='unicom'?'联通云手机':'移动云手机'}
+function wantPlatform(v,silent){
+localStorage.setItem('cpk_platform',v);
+PICK.classList.add('hidden');
+if(PLTAP)return;PLTAP=true;
+var cur=HLTH.platform||'mobile';   // 引擎状态未知时按默认 mobile 判定
+if(cur!==v){
+post('/platform','value='+v).then(function(){ping('平台切换中：'+platLabel(v)+'（云机实例重启约 10 秒）',5000)})
+.catch(function(){ping('平台切换失败（引擎忙/重启中）');
+setTimeout(function(){PLTAP=false},8000)});
+}else if(!silent){ping('已选择 '+platLabel(v))}
+}
+if(PLTSTORED)PICK.classList.add('hidden');
+Array.prototype.forEach.call(document.querySelectorAll('.pk-b'),function(b){
+b.addEventListener('click',function(){wantPlatform(b.getAttribute('data-p'),false)});
 });
 
 // —— 实时画面：fetch MJPEG 流 → JPEG SOI/EOI 切帧 → Blob 直显 ——
@@ -500,20 +537,11 @@ function mouseDown(ev){
 var p=xy(ev.clientX,ev.clientY);
 MSE.down=true;MSE.btn=ev.button;MSE.mode='pend';
 MSE.x0=p[0];MSE.y0=p[1];
-if(IMODE==='mouse'){
-mSend('action=down&x='+p[0].toFixed(1)+'&y='+p[1].toFixed(1)+'&b='+(MBTN[ev.button]||'left')+
-'&n='+clkCnt(p)+'&m='+mods(ev)+'&bb='+(ev.buttons||1));
-}
-// 自动模式：抬起时判定——不动=真实点击序列，移动超阈值=转触摸拖动（移动页滚动）
+// 抬起时判定——不动=真实点击序列，移动超阈值=转触摸拖动（移动页滚动）
 }
 function mouseMove(ev){
 var n=Date.now();if(n-MSE.lastMv<33)return;MSE.lastMv=n;
 var p=xy(ev.clientX,ev.clientY);
-if(IMODE==='mouse'){
-mSend('action=move&x='+p[0].toFixed(1)+'&y='+p[1].toFixed(1)+'&b='+
-(ev.buttons?(MBTN[MSE.btn]||'left'):'none')+'&bb='+ev.buttons+'&m='+mods(ev));
-return;
-}
 if(!MSE.down){   // 纯悬停：真实 mouseMoved（桌面页 hover 菜单可用）
 mSend('action=move&x='+p[0].toFixed(1)+'&y='+p[1].toFixed(1)+'&b=none&bb=0&m='+mods(ev));
 return;
@@ -531,11 +559,6 @@ if(MSE.mode==='drag')touchMove(ev);
 }
 function mouseUp(ev){
 var p=xy(ev.clientX,ev.clientY);
-if(IMODE==='mouse'){
-mSend('action=up&x='+p[0].toFixed(1)+'&y='+p[1].toFixed(1)+'&b='+(MBTN[MSE.btn]||'left')+
-'&n='+clkCnt(p)+'&m='+mods(ev)+'&bb=0');
-MSE.down=false;return;
-}
 if(MSE.mode==='drag'){MSE.down=false;MSE.mode='';touchUp(ev,'end');return}
 if(MSE.mode==='pend'){    // 纯点击（左/右/中键）→ 真实鼠标点击序列（远程合成 click/dblclick/contextmenu）
 MSE.down=false;MSE.mode='';
@@ -553,18 +576,9 @@ mSend('action=wheel&x='+p[0].toFixed(1)+'&y='+p[1].toFixed(1)+
 '&dx='+(ev.deltaX*k).toFixed(1)+'&dy='+(ev.deltaY*k).toFixed(1)+'&m='+mods(ev));
 },{passive:false});
 
-// —— 输入路由：触控方式（自动=鼠标指针走混合模式，触摸指针走触摸流）——
-var IMODE=localStorage.getItem('cpk_imode')||'auto';
-document.getElementById('imode').value=IMODE;
-document.getElementById('imode').addEventListener('change',function(){
-IMODE=this.value;localStorage.setItem('cpk_imode',IMODE);this.blur();
-if(IMODE!=='mouse'){PTR.clear();MSE.down=false;MSE.mode=''}
-});
-function useMousePath(ev){
-if(IMODE==='mouse')return true;
-if(IMODE==='touch')return false;
-return ev.pointerType==='mouse';
-}
+// —— 输入路由（与 Windows 版一致，无模式选择）：鼠标指针=抬起时判定
+// （不动=真实鼠标点击，移动超阈值=转触摸拖动）；触摸/笔=触摸流 ——
+function useMousePath(ev){return ev.pointerType==='mouse'}
 IMG.addEventListener('contextmenu',function(ev){ev.preventDefault()});
 IMG.addEventListener('pointerdown',function(ev){
 ev.preventDefault();
@@ -1592,6 +1606,8 @@ mod tests {
         assert!(body4.contains("id=\"pstat\""), "控制页缺状态面板（fps 收纳处）");
         assert!(body4.contains("id=\"fpsel\""), "控制页缺帧率设置");
         assert!(body4.contains("id=\"kbin\""), "控制页缺键盘输入框");
+        assert!(!body4.contains("id=\"imode\""), "触控模式选择器应已移除（与 Windows 版一致）");
+        assert!(!body4.contains("cpk_imode"), "触控模式 localStorage 残留应已移除");
         assert!(!body4.contains("id=\"fpsb\""), "fps 悬浮徽标应已移入状态面板");
         assert!(body4.contains("pointer-events:none"), "提示层不应挡触摸");
         assert!(!body4.contains("上滑"), "方向滑动按钮应已删除");
@@ -1647,6 +1663,10 @@ mod tests {
         assert!(body3.contains(">联通云手机</option>"), "控制页缺联通选项");
         assert!(body3.contains("syncPlatSel"), "控制页缺平台同步逻辑");
         assert!(body3.contains("/platform"), "控制页缺平台切换接线");
+        // 平台首选：打开页面时选择（CPK_PLATFORM 环境变量已移除）
+        assert!(body3.contains("id=\"pick\""), "控制页缺平台首选层");
+        assert!(body3.contains("wantPlatform"), "控制页缺平台首选接线");
+        assert!(body3.contains("cpk_platform"), "控制页缺平台记忆");
     }
 
     #[test]

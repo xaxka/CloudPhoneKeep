@@ -17,12 +17,11 @@ mkdir -p data/138xxxx1234
 docker run -d --name cpk-138xxxx1234 \
   -v $PWD/data/138xxxx1234:/data \
   -p 127.0.0.1:8088:8088 \
-  -e CPK_PLATFORM=mobile \
   -e CPK_ACCOUNT=138xxxx1234 \
   --shm-size 128m --init --restart unless-stopped \
   ghcr.io/xaxka/cloudphonekeep:latest
 
-# 4. 首次登录（浏览器打开控制页，画面即触屏）
+# 4. 首次登录（浏览器打开控制页：先选平台（移动/联通），画面即触屏）
 #    http://127.0.0.1:8088/
 #    登录一次后 Cookie/LocalStorage 持久化在 volume，之后自动保活
 
@@ -161,7 +160,7 @@ Profile 持久化 + 上述分级，容器层面再叠 `restart: unless-stopped`�
 ```bash
 docker run -d --name cpk-138xxxx1234 --dns 223.5.5.5 \
   -v $PWD/data/138xxxx1234:/data -p 127.0.0.1:8088:8088 \
-  -e CPK_PLATFORM=mobile -e CPK_ACCOUNT=138xxxx1234 \
+  -e CPK_ACCOUNT=138xxxx1234 \
   --shm-size 128m --init --restart unless-stopped \
   ghcr.io/xaxka/cloudphonekeep:latest
 ```

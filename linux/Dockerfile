@@ -81,8 +81,7 @@ ENV TZ=Asia/Shanghai \
     CPK_DATA_DIR=/data \
     CPK_REPORT_PORT=8088 \
     CPK_BIND=0.0.0.0 \
-    CPK_CHROME_BIN=/opt/chrome-headless-shell/chrome-headless-shell \
-    CPK_HEADLESS=0
+    CPK_CHROME_BIN=/opt/chrome-headless-shell/chrome-headless-shell
 
 VOLUME ["/data"]
 EXPOSE 8088

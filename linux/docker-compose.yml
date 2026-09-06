@@ -6,8 +6,9 @@
 #   docker compose up -d --build        # 构建即编译（容器内完成，无需本地 Rust）
 #   # 打开控制页完成首次登录： http://127.0.0.1:8088/
 #
-# 多账号：把下方服务块复制一份，改 服务名/CPK_ACCOUNT/CPK_PLATFORM/
+# 多账号：把下方服务块复制一份，改 服务名/CPK_ACCOUNT/
 #         data 目录/端口映射 —— 每个账号独立容器、独立 Profile、独立恢复。
+#         平台（移动/联通）在打开控制页时选择，无需环境变量。
 #
 # 不想本地构建：注释掉 build:，直接用 GHCR 镜像
 #   image: ghcr.io/xaxka/cloudphonekeep:latest
@@ -15,7 +16,7 @@
 # =====================================================================
 services:
 
-  # —— 示例账号 1：移动云手机 ——
+  # —— 示例账号：打开控制页时选平台（移动云手机 / 联通云手机）——
   cpk-138xxxx1234:
     image: ghcr.io/xaxka/cloudphonekeep:latest
     build:
@@ -28,9 +29,9 @@ services:
     # mem_limit: 1g                 # 可选：单账号内存上限（Rust 引擎 ~10MB，主体是 Chromium，一般 400-600MB 足够）
     # oom_score_adj: 500            # 可选：内存吃紧时优先牺牲本容器而不是宿主关键服务
     environment:
-      CPK_PLATFORM: mobile          # mobile=移动云手机 unicom=联通云手机
       CPK_ACCOUNT: "138xxxx1234"    # 账号标识（决定 Profile 目录名，建议手机号）
       TZ: Asia/Shanghai
+      # 平台不在此设置：打开控制页 http://127.0.0.1:8088/ 时选择
       # —— 可选调优（默认即可）——
       # CPK_URL: "https://cloudphoneh5.buy.139.com"   # 覆盖平台默认入口
       # CPK_INTERVAL_MS: "5000"     # actionTick 周期（默认 5000ms）
@@ -43,7 +44,7 @@ services:
     healthcheck:
       disable: false                # 镜像内置 healthcheck；如需自定义在此覆盖
 
-  # —— 示例账号 2：联通云手机（多开 = 复制此块并改名，端口 8089 起）——
+  # —— 多开：复制此块并改名，端口 8089 起；平台各自在控制页选择 ——
   # cpk-186xxxx5678:
   #   image: ghcr.io/xaxka/cloudphonekeep:latest
   #   build:
@@ -54,7 +55,6 @@ services:
   #   init: true
   #   shm_size: 128m
   #   environment:
-  #     CPK_PLATFORM: unicom
   #     CPK_ACCOUNT: "186xxxx5678"
   #     TZ: Asia/Shanghai
   #   volumes:

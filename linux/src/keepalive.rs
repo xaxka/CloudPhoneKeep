@@ -60,7 +60,6 @@ mod tests {
             control_token: String::new(),
             cdp_port: 0,
             chrome_bin: "chrome-headless-shell".into(),
-            headless: false,
             no_sandbox: true,
             ua_mode: "windows".into(),
             lang: "zh-CN".into(),

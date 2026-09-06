@@ -1422,11 +1422,8 @@ pub fn build_args_with(cfg: &Config, vw: u32, vh: u32) -> Vec<String> {
         a.push("--no-sandbox".into());
         a.push("--disable-setuid-sandbox".into());
     }
-    // 完整 Chromium（发行版 chromium 包）需要显式无头模式；
-    // chrome-headless-shell 本身即无头，该开关对其无副作用
-    if cfg.headless {
-        a.push("--headless=new".into());
-    }
+    // 注：镜像固定 chrome-headless-shell（本身就无头，不需要 --headless=new）。
+    // 极少数换用完整 Chromium 的场景，经 CPK_EXTRA_CHROME_ARGS 自行追加参数。
     if !cfg.extra_chrome_args.is_empty() {
         for p in cfg.extra_chrome_args.split_whitespace() {
             a.push(p.to_string());
@@ -1664,7 +1661,6 @@ mod tests {
             control_token: String::new(),
             cdp_port: 0,
             chrome_bin: "chrome-headless-shell".into(),
-            headless: false,
             no_sandbox: true,
             ua_mode: "windows".into(),
             lang: "zh-CN".into(),
@@ -1714,7 +1710,6 @@ mod tests {
             control_token: String::new(),
             cdp_port: 0,
             chrome_bin: "chrome-headless-shell".into(),
-            headless: false,
             no_sandbox: true,
             ua_mode: "windows".into(),
             lang: "zh-CN".into(),
@@ -1793,7 +1788,6 @@ mod tests {
             control_token: String::new(),
             cdp_port: 0,
             chrome_bin: "chrome-headless-shell".into(),
-            headless: false,
             no_sandbox: true,
             ua_mode: "windows".into(),
             lang: "zh-CN".into(),
@@ -1822,10 +1816,7 @@ mod tests {
         assert!(args.contains(&"--js-flags=--max-old-space-size=512".to_string()));
         // 触摸事件需要 autoplay 策略放开
         assert!(args.contains(&"--autoplay-policy=no-user-gesture-required".to_string()));
-        // headless 开关：chrome-headless-shell 不需要，完整 Chromium 需要
+        // 恒无头：镜像固定 chrome-headless-shell，不添加 --headless=new
         assert!(!args.contains(&"--headless=new".to_string()));
-        let mut cfg2 = cfg;
-        cfg2.headless = true;
-        assert!(build_args(&cfg2).contains(&"--headless=new".to_string()));
     }
 }

@@ -22,7 +22,6 @@ C:\Users\<用户名>\AppData\LocalLow\CloudPhoneKeep\
 
 | 变量 | 默认 | 说明 |
 | :--- | :--- | :--- |
-| `CPK_PLATFORM` | `mobile` | 平台：`mobile` 移动云手机 / `unicom` 联通云手机 |
 | `CPK_ACCOUNT` | `account1` | 账号名（数据目录名、日志标识） |
 | `CPK_URL` | 平台默认 | 覆盖云手机入口 URL（调试/私有部署用） |
 | `CPK_WIDTH` / `CPK_HEIGHT` | 414×896（mobile） | 窗口分辨率 |
@@ -36,7 +35,6 @@ C:\Users\<用户名>\AppData\LocalLow\CloudPhoneKeep\
 | `CPK_CONTROL_TOKEN` | 空 | 控制页/截图/触摸端点的访问令牌（强烈建议公网可达时设置） |
 | `CPK_CDP_PORT` | `0` | Chromium DevTools 固定端口（0=自动分配；固定端口可用于外部 DevTools） |
 | `CPK_CHROME_BIN` | `/opt/chrome-headless-shell/chrome-headless-shell` | 浏览器二进制路径（镜像内为 CfT chrome-headless-shell；调试时可指向其他 Chrome） |
-| `CPK_HEADLESS` | `0` | 仅换用完整 Chromium 时置 1（加 `--headless=new`）；镜像内 headless-shell 本身即无头 |
 | `CPK_NO_SANDBOX` | `1` | 容器内通常需关闭 Chromium 沙箱 |
 | `CPK_UA_MODE` | `windows` | UA 策略：`windows` 伪装 Windows Chrome / `auto` 去 Headless 字样 / `none` 原样 |
 | `CPK_LANG` | `zh-CN` | Chromium UI 语言 |
@@ -51,3 +49,8 @@ C:\Users\<用户名>\AppData\LocalLow\CloudPhoneKeep\
 | `CPK_SMOKE` / `CPK_SMOKE_SECONDS` | `0` / `60` | 冒烟模式（跑 N 秒按指标退出，CI 用） |
 
 > 数值类变量超范围会被自动钳回边界并落 `[error]` 日志。
+>
+> 平台（移动/联通）已不通过环境变量设置：容器按默认 mobile 启动，打开控制页时
+> 由用户选择（首次选择后记住，可随时在「设置→平台」切换）；引擎恒无头（镜像固定
+> chrome-headless-shell，本身就无头；换用完整 Chromium 的极少数场景经
+> `CPK_EXTRA_CHROME_ARGS` 自行追加 `--headless=new`）。

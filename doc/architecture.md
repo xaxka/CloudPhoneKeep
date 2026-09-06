@@ -32,8 +32,8 @@ Linux 版使用 **Google Chrome for Testing 官方预编译的 `chrome-headless-
 - **版本**：amd64 用 stable `152.0.7977.82`（开发环境端到端冒烟验证过的
   版本）；arm64 用 beta `154.0.8037.0`（stable 渠道尚无 arm64，取 arm64
   可用的最近渠道），见 `linux/Dockerfile` 的 ARG
-- headless-shell 本身即无头模式，无需 `--headless=new`（`CPK_HEADLESS`
-  仅在换用完整 Chromium 时置 1）
+- headless-shell 本身即无头模式，恒不加 `--headless=new`（`CPK_HEADLESS` 开关
+  已移除；极少数换用完整 Chromium 的场景经 `CPK_EXTRA_CHROME_ARGS` 自行追加）
 - 依赖最小化：运行层 apt 包为 `ldd` 实测结果（nss/glib/X11 基础库/alsa/
   gbm 等，见 Dockerfile 注释），curl/unzip 仅构建期使用后即删除
 

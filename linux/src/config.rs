@@ -49,9 +49,6 @@ pub struct Config {
     pub control_token: String,
     pub cdp_port: u16,
     pub chrome_bin: String,
-    /// 完整 Chromium 需要 --headless=new；chrome-headless-shell 本身即无头，无需该参数
-    /// （Alpine 版镜像用发行版 chromium 包 → CPK_HEADLESS=1）
-    pub headless: bool,
     pub no_sandbox: bool,
     pub ua_mode: String,
     pub lang: String,
@@ -99,24 +96,16 @@ fn sanitize(s: &str) -> String {
 
 impl Config {
     pub fn from_env() -> Config {
-        let raw_platform = envs("CPK_PLATFORM").unwrap_or_else(|| "mobile".into());
-        let (platform, platform_label, default_url, w, h) = match raw_platform.as_str() {
-            "unicom" => (
-                "unicom".to_string(),
-                "联通云手机".to_string(),
-                PLATFORM_UNICOM_URI.to_string(),
-                405i64,
-                720i64,
-            ),
-            // 未知平台回退 mobile（与 Windows 默认一致）
-            _ => (
-                "mobile".to_string(),
-                "移动云手机".to_string(),
-                PLATFORM_MOBILE_URI.to_string(),
-                414i64,
-                896i64,
-            ),
-        };
+        // 平台不由环境变量定死（CPK_PLATFORM 已移除）：容器按默认 mobile 启动，
+        // 打开控制页时由用户选择平台（POST /platform 运行时切换，实例按需重启；
+        // Profile 保留双平台登录态，切回已登过的平台无需重登）
+        let (platform, platform_label, default_url, w, h) = (
+            "mobile".to_string(),
+            PLATFORM_MOBILE_LABEL.to_string(),
+            PLATFORM_MOBILE_URI.to_string(),
+            PLATFORM_MOBILE_W as i64,
+            PLATFORM_MOBILE_H as i64,
+        );
         let account = envs("CPK_ACCOUNT").unwrap_or_else(|| "account1".into());
         let data_dir = PathBuf::from(envs("CPK_DATA_DIR").unwrap_or_else(|| "/data".into()));
         let profile_dir = match envs("CPK_PROFILE_DIR") {
@@ -144,7 +133,6 @@ impl Config {
             control_token: envs("CPK_CONTROL_TOKEN").unwrap_or_default(),
             cdp_port: i64_env("CPK_CDP_PORT", 0, 0, 65535) as u16,
             chrome_bin: envs("CPK_CHROME_BIN").unwrap_or_else(|| "chrome-headless-shell".into()),
-            headless: bool_env("CPK_HEADLESS", false),
             no_sandbox: bool_env("CPK_NO_SANDBOX", true), // Docker 默认无 user-namespace 特权
             ua_mode: envs("CPK_UA_MODE")
                 .filter(|m| ["windows", "auto", "none"].contains(&m.as_str()))
@@ -171,7 +159,7 @@ mod tests {
     #[test]
     fn env_parsing_and_defaults() {
         let k = std::env::var("CPK_PLATFORM");
-        // 默认：mobile + 414x896 + 5s 周期
+        // 默认：mobile + 414x896 + 5s 周期（平台打开控制页时选，不由环境变量定死）
         for name in ["CPK_PLATFORM", "CPK_DATA_DIR", "CPK_ACCOUNT", "CPK_URL"] {
             std::env::remove_var(name);
         }
@@ -189,8 +177,7 @@ mod tests {
         assert_eq!(cfg.chrome_bin, "chrome-headless-shell");
         assert!(cfg.profile_dir.to_string_lossy().contains("profile-account1"));
 
-        // 覆盖：unicom + 自定义 URL + 分辨率 + 周期
-        std::env::set_var("CPK_PLATFORM", "unicom");
+        // 覆盖：自定义 URL + 分辨率 + 周期（平台不随环境变量变）
         std::env::set_var("CPK_ACCOUNT", "18612341234");
         std::env::set_var("CPK_URL", "https://example.com/h5");
         std::env::set_var("CPK_WIDTH", "405");
@@ -199,7 +186,7 @@ mod tests {
         std::env::set_var("CPK_KEEP_ALIVE", "no");
         std::env::set_var("CPK_REPORT_PORT", "9090");
         let cfg = Config::from_env();
-        assert_eq!(cfg.platform, "unicom");
+        assert_eq!(cfg.platform, "mobile");
         assert_eq!(cfg.url, "https://example.com/h5");
         assert_eq!(cfg.width, 405);
         assert_eq!(cfg.interval_ms, 8000);
@@ -207,8 +194,8 @@ mod tests {
         assert_eq!(cfg.report_port, 9090);
         assert!(cfg.profile_dir.to_string_lossy().contains("18612341234"));
 
-        // 非法平台回退 mobile
-        std::env::set_var("CPK_PLATFORM", "telecom");
+        // CPK_PLATFORM 已移除：残留环境变量不改变启动平台（防回归）
+        std::env::set_var("CPK_PLATFORM", "unicom");
         let cfg = Config::from_env();
         assert_eq!(cfg.platform, "mobile");
 
