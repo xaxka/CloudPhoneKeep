@@ -749,6 +749,25 @@ fn steady_loop(
         // 软限帧值同步：/fps 现由 HTTP 层直写共享状态，引擎每周期拉齐
         // CDP（即使通知请求在待机/重启窗口丢失，也在 1 个周期内生效）
         cdp.set_screencast_fps(shared.fps(), session);
+        // 画质/采集分辨率周期拉齐（与 /fps 同模式）：SetQuality/SetScale
+        // 的 ControlRequest 转发在引擎忙/重启窗口丢失时，HTTP 层直写的
+        // SharedState 值在这里 1 个周期内自愈——值变化且 cast 在播有观众
+        // 则 restart_cast 重建（首帧即按新画质/尺寸编码，画面闪动可见）；
+        // 幂等：值未变时 sync 返回 false，不会每周期空转重建
+        {
+            let p = shared.platform();
+            if cdp.sync_cast_tuning(shared.quality(), cast_max_for(shared.scale(), p.vw, p.vh))
+                && cdp.cast_active()
+                && cdp.has_sinks()
+            {
+                cdp.restart_cast(session);
+                logger.log(
+                    1,
+                    "sys",
+                    &format!("cast 参数周期同步：画质 {} / 分辨率 {}% 重建生效", shared.quality(), shared.scale()),
+                );
+            }
+        }
         // fire 类命令被 Chrome 拒绝的留痕（此前被当「无关应答」静默丢弃：
         // startScreencast 导航窗口被拒、dispatchTouchEvent 点列表违规被拒等）
         for e in cdp.take_error_replies() {

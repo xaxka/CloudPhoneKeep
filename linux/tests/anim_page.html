@@ -1,0 +1,5 @@
+<!doctype html><html><head><style>body{margin:0}</style></head><body>
+<div id=a style='position:absolute;width:100px;height:100px;background:red'></div>
+<div id=st style='position:fixed;top:0;right:0;background:#fff;font:12px monospace'>0</div>
+<script>let i=0;function f(){i++;a.style.background=['red','green','blue'][i%3];a.style.left=(i%300)+'px';st.textContent=i+':'+(i/((performance.now()-t0)/1000)).toFixed(1)+'fps';requestAnimationFrame(f)}let t0=performance.now();requestAnimationFrame(f)</script>
+</body></html>

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { margin:0; font-family:sans-serif; }
+#page { height: 3000px; }
+.card { width: 100%; height: 120px; background: #e8e8ff; margin-bottom: 10px; display:flex; align-items:center; justify-content:center; }
+.card.hot { background: #ffd; }
+#fixed { position: fixed; top:0; left:0; right:0; background:#000; color:#0f0; font:12px monospace; padding:4px; z-index:9999; white-space:pre; }
+</style>
+</head>
+<body>
+<div id="fixed">INIT</div>
+<div id="page">
+  <div class="card" id="c1">CARD 1 (去登陆)</div>
+  <div class="card" id="c2">CARD 2 (秒开)</div>
+  <div class="card" id="c3">CARD 3</div>
+</div>
+<script>
+// 模拟 Vue H5（139 cloudAppList 同款交互形态）：
+// - @click → addEventListener('click')
+// - 部分组件用 fastclick 风格（touchend 触发）
+// - 记录所有触摸/鼠标事件计数 + 滚动位置，供 CDP 侧查询
+window.__ev = { ts:0, tm:0, te:0, tc:0, md:0, mu:0, ck:0, sel:'', scrollY:0 };
+document.addEventListener('touchstart', function(){ window.__ev.ts++; }, {passive:true});
+document.addEventListener('touchmove',  function(){ window.__ev.tm++; }, {passive:true});
+document.addEventListener('touchend',   function(){ window.__ev.te++; }, {passive:true});
+document.addEventListener('touchcancel',function(){ window.__ev.tc++; }, {passive:true});
+document.addEventListener('mousedown',  function(){ window.__ev.md++; }, {passive:true});
+document.addEventListener('mouseup',    function(){ window.__ev.mu++; }, {passive:true});
+document.addEventListener('click',      function(e){ window.__ev.ck++;
+  var t = e.target.closest('.card'); if(t){ t.classList.toggle('hot'); window.__ev.sel = t.id; } }, {passive:true});
+// fastclick 风格兜底（真实 139 页大量 H5 组件的行为）
+document.addEventListener('touchend', function(e){
+  var t = e.target.closest('.card'); if(t){ window.__ev.sel = t.id + ':fc'; }
+}, {passive:true});
+setInterval(function(){
+  window.__ev.scrollY = window.scrollY;
+  var e = window.__ev;
+  document.getElementById('fixed').textContent =
+    'ts:'+e.ts+' tm:'+e.tm+' te:'+e.te+' tc:'+e.tc+' md:'+e.md+' mu:'+e.mu+' ck:'+e.ck+' sel:'+e.sel+' y:'+Math.round(e.scrollY);
+}, 100);
+</script>
+</body>
+</html>

@@ -255,6 +255,22 @@ impl Cdp {
         self.cast_max = max;
     }
 
+    /// 幂等同步入口（稳态循环每周期调用，与 /fps 的周期拉齐同模式）：
+    /// 与当前值一致返回 false（零副作用）；不同才写入并返回 true——
+    /// 调用方据此 restart_cast。/quality /scale 的 ControlRequest 转发在
+    /// 引擎待机/重启窗口丢失时（HTTP 层已直写 SharedState），靠这里
+    /// 1 个周期内自愈重建，否则要拖到下次 CDP 装配才生效——
+    /// 「面板改画质/分辨率感觉不实时」的兜底修复
+    pub fn sync_cast_tuning(&mut self, quality: u32, max: Option<(u32, u32)>) -> bool {
+        let q = quality.clamp(10, 90);
+        if !cast_tuning_changed(self.cast_quality, self.cast_max, q, max) {
+            return false;
+        }
+        self.cast_quality = q;
+        self.cast_max = max;
+        true
+    }
+
     /// cast 是否处于活动订阅（配合 has_sinks 判断运行时改参数要不要重建：
     /// quality/maxWidth 只在 startScreencast 时读取，无观众则下次 start 自然生效）
     pub fn cast_active(&self) -> bool {
@@ -804,6 +820,13 @@ pub fn is_transient_cast_error(e: &str) -> bool {
     e.contains("Not attached to an active page")
 }
 
+/// cast 调优值变化判定（纯函数，可单测）：new_q 先按 10..=90 截断
+/// （与 set/sync 写入口径一致，出界值与当前值等价时不触发重建）
+fn cast_tuning_changed(cur_q: u32, cur_max: Option<(u32, u32)>, new_q: u32, new_max: Option<(u32, u32)>) -> bool {
+    let q = new_q.clamp(10, 90);
+    q != cur_q || new_max != cur_max
+}
+
 /// 触点跟踪（纯函数，可单测）。协议语义（CDP Input 文档：touchEnd/
 /// touchCancel 不得携带触点 → 整组释放）：
 /// - start：记录触点（已存在则覆盖坐标）
@@ -844,7 +867,7 @@ fn track_touch_points(
 
 #[cfg(test)]
 mod tests {
-    use super::{ack_hold_deadline, frame_throttled, is_transient_cast_error, track_touch_points, FramePoll, FrameSlot, Cdp};
+    use super::{ack_hold_deadline, cast_tuning_changed, frame_throttled, is_transient_cast_error, track_touch_points, FramePoll, FrameSlot, Cdp};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
@@ -966,6 +989,23 @@ mod tests {
             ack_hold_deadline(Some(t0), now3, 3).expect("3fps 不截断"),
             t0 + Duration::from_millis(333)
         );
+    }
+
+    /// cast 参数周期同步（sync_cast_tuning）幂等性：值未变返回 false 零
+    /// 副作用（稳态循环每周期调用不得空转重建）；值变化返回 true 并写入。
+    /// 判定逻辑独立成纯函数，不依赖真 WS 连接即可测。
+    #[test]
+    fn cast_tuning_sync_idempotent() {
+        // 同值：不变
+        assert!(!cast_tuning_changed(50, None, 50, None), "同值不应触发重建");
+        assert!(!cast_tuning_changed(70, Some((310, 672)), 70, Some((310, 672))));
+        // 画质变化
+        assert!(cast_tuning_changed(50, None, 70, None));
+        // 缩放变化（画质同）
+        assert!(cast_tuning_changed(70, None, 70, Some((310, 672))));
+        assert!(cast_tuning_changed(70, Some((310, 672)), 70, Some((311, 672))));
+        // clamp 后同值：95→90 与当前 90 同 → 不变（防稳态循环每秒空转重建）
+        assert!(!cast_tuning_changed(90, None, 95, None));
     }
 
     /// 触点跟踪语义（协议规定 touchEnd/touchCancel 不得携带触点）：
