@@ -45,7 +45,9 @@ C:\Users\<用户名>\AppData\LocalLow\CloudPhoneKeep\
 | `CPK_TICK_FAIL_RELOAD` | `10` | tick 连续失败 N 次后导航回首页 |
 | `CPK_FROZEN_RELOAD` | `3` | 状态冻结 N 个采样周期后导航回首页 |
 | `CPK_BEAT_STALE_SEC` | `180` | 心跳超龄 N 秒硬重启浏览器 |
-| `CPK_FPS` | `25` | 实时画面帧率上限（1-60；控制台「设置→帧率」可运行时调整，此为初始值。低配 ARM64 设备建议 8-12：帧率越高 CPU 越高，引擎会按目标帧率自动降低 Chrome 端编码量与解码开销） |
+| `CPK_FPS` | `25` | 实时画面帧率上限（1-60；控制台「设置→帧率」可运行时调整，此为初始值。低配 ARM64 设备建议 8-12：引擎按目标帧率对 Chrome 端采集/编码做门控节流（ack 确认一帧才采下一帧），传输 CPU 大致正比帧率） |
+| `CPK_JPEG_QUALITY` | `50` | 实时画面 JPEG 质量（10-90）：质量越高编码 CPU 与带宽越大，弱机优先降 |
+| `CPK_STREAM_SCALE` | `100` | 采集分辨率百分比（30-100）：<100 时 Chrome 编码前先缩小，编码 CPU 与带宽按像素数近线性下降（如 75 ≈ 省 44%），触摸坐标不受影响。弱机推荐 75-90 |
 | `CPK_SELFTEST` | `0` | 自检模式（不启动 Chromium，CI 用） |
 | `CPK_SMOKE` / `CPK_SMOKE_SECONDS` | `0` / `60` | 冒烟模式（跑 N 秒按指标退出，CI 用） |
 

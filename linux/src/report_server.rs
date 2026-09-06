@@ -101,8 +101,6 @@ padding:12px 14px;overflow-y:auto;display:flex;flex-direction:column;gap:9px}
 #panel h2{font-size:11px;margin:4px 0 0;color:var(--dim);font-weight:600;
 letter-spacing:.08em;text-transform:uppercase}
 .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-input[type=text]{flex:1;min-width:120px;background:var(--bg);color:var(--txt);font-size:16px;
-border:1px solid var(--line);border-radius:6px;padding:7px 9px}
 button{background:var(--line);color:var(--txt);border:0;border-radius:6px;padding:7px 12px;
 cursor:pointer;font-size:13px}
 button:hover{background:#475569}
@@ -158,12 +156,7 @@ padding-bottom:calc(14px + env(safe-area-inset-bottom))}
 <div id="pstat"><i id="pdot"></i><span id="pst">连接中…</span></div>
 <div id="stats">—</div>
 <h2>输入</h2>
-<div class="row" id="kbrow" style="display:none">
-<input type="text" id="kbin" placeholder="输入/粘贴后自动发送到云机" autocomplete="off"
-autocapitalize="off" autocorrect="off" spellcheck="false">
-</div>
 <div class="row">
-<button id="kbt">键盘 关</button>
 <button onclick="doCopy()">复制</button>
 <button onclick="doPaste()">粘贴</button>
 </div>
@@ -194,7 +187,7 @@ autocapitalize="off" autocorrect="off" spellcheck="false">
 </div>
 <div class="row" style="color:#8aa;font-size:11px;line-height:1.5">
 <span class="lb" style="color:#8aa">提示</span>
-<span>帧率越高 CPU 越高；低配盒子建议 8~12。10fps 时引擎端自动降低编码量（Chrome 端每 6 合成器帧取 1），CPU 约降为 1/6。</span>
+<span>帧率越高 CPU 越高；低配盒子建议 8~12。引擎按目标帧率自动节流（Chrome 确认一帧后才采集下一帧），传输 CPU 大致正比帧率；更省可设环境变量 CPK_STREAM_SCALE=75（降分辨率）。</span>
 </div>
 </aside>
 <div id="mask"></div>
@@ -209,7 +202,6 @@ var IMG=document.getElementById('shot');
 var WRAP=document.getElementById('wrap');
 var TD=document.getElementById('tdot');
 var PANEL=document.getElementById('panel'),MASK=document.getElementById('mask');
-var KBIN=document.getElementById('kbin');
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){
 return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function U(p){var u=new URL(p,location.origin);if(TK)u.searchParams.set('token',TK);return u}
@@ -608,19 +600,9 @@ IMG.addEventListener('pointerup',function(ev){ptrUp(ev,'end')});
 IMG.addEventListener('pointercancel',function(ev){ptrUp(ev,'cancel')});
 
 // ══════════════════════════════════════════════════════════════
-// 键盘：物理键盘全键位直通（CDP Input.dispatchKeyEvent）；
-// 移动端「键盘」开关弹出输入框（IME 拼音/粘贴 → insertText 整段发送）
+// 键盘：物理键盘全键位直通（CDP Input.dispatchKeyEvent，常开无开关）；
+// 文本输入走云机 H5 自带软键盘（点击画面内输入框弹出）+ 本页粘贴按钮
 // ══════════════════════════════════════════════════════════════
-var KBON=false;
-function kbOn(on){
-KBON=on;
-document.getElementById('kbrow').style.display=on?'flex':'none';
-var b=document.getElementById('kbt');
-b.textContent=on?'键盘 开':'键盘 关';
-if(on){b.classList.add('acc')}else{b.classList.remove('acc')}
-if(on){KBIN.focus()}else{KBIN.blur()}
-}
-document.getElementById('kbt').addEventListener('click',function(){kbOn(!KBON)});
 function mods(ev){return (ev.altKey?1:0)|(ev.ctrlKey?2:0)|(ev.metaKey?4:0)|(ev.shiftKey?8:0)}
 function vkOf(ev){
 var k=ev.key,c=ev.code;
@@ -655,19 +637,12 @@ document.addEventListener('keydown',function(ev){
 var ae=document.activeElement,k=ev.key;
 if(ae&&ae.tagName==='SELECT')return;              // 用户正在操作下拉框
 if(ev.isComposing||k==='Process')return;          // IME 合成中间态
-var inKB=ae===KBIN;
-if(inKB){
-if(k&&k.length===1&&!ev.ctrlKey&&!ev.metaKey)return;   // 可打印字符留在输入框 → insertText
-if(k==='Backspace'){if(KBIN.value)return;ev.preventDefault();kdown(ev);return}
-if(k==='Enter'){ev.preventDefault();kdown(ev);return}
-// 方向键/修饰键/Ctrl 组合等继续直通远端
-}
 if(ev.ctrlKey||ev.metaKey){
 var lk=(k||'').toLowerCase();
 if(lk==='v'&&!ev.shiftKey&&!ev.altKey){
 // 粘贴：本机剪贴板 → 云机（insertText）。键本身不转发（远端剪贴板为空）。
+// 无 clipboard API（非安全上下文）时自然落入 document paste 监听转发。
 if(navigator.clipboard&&navigator.clipboard.readText){ev.preventDefault();doPaste()}
-else{KBIN.focus()}   // 非安全上下文：聚焦输入框让原生粘贴落入 → input 事件转发
 return;
 }
 if((lk==='c'||lk==='x')&&!ev.shiftKey&&!ev.altKey){
@@ -686,17 +661,7 @@ if(document.activeElement&&document.activeElement.tagName==='SELECT')return;
 kup(ev);
 });
 
-// —— 键盘输入框（移动端 IME / 粘贴落点）：内容即发即清 ——
-KBIN.addEventListener('input',function(ev){
-if(ev.isComposing||ev.inputType==='insertFromPaste')return;
-sendKbText();
-});
-KBIN.addEventListener('compositionend',function(){setTimeout(sendKbText,30)});
-function sendKbText(){
-var v=KBIN.value;
-if(v){iev({path:'/type',body:'text='+encodeURIComponent(v)});KBIN.value=''}
-}
-// 原生粘贴落入输入框：paste 事件统一接管（阻止本地插入，直接转发远端）
+// —— 原生粘贴事件兜底：无 clipboard API 时 Ctrl+V / 长按粘贴落入这里 ——
 document.addEventListener('paste',function(ev){
 ev.preventDefault();
 var t=ev.clipboardData?ev.clipboardData.getData('text/plain'):'';
@@ -734,9 +699,9 @@ navigator.clipboard.readText().then(function(t){
 if(!t){ping('本机剪贴板为空');return}
 iev({path:'/type',body:'text='+encodeURIComponent(t)});
 ping('已粘贴 '+t.length+' 字');
-}).catch(function(){kbOn(true);
-ping('无剪贴板权限：已弹出输入框，Ctrl+V 或长按粘贴')});
-}else{kbOn(true);ping('已弹出输入框：Ctrl+V 或长按粘贴')}
+}).catch(function(){
+ping('无剪贴板权限（需 HTTPS）：可长按画面粘贴')});
+}else{ping('当前环境不支持读剪贴板（需 HTTPS）：可 Ctrl+V / 长按画面粘贴')}
 }
 
 // —— 面板操作 ——
@@ -1646,7 +1611,13 @@ mod tests {
         // 带点形态会被 Chrome 拒绝——页面收不到 tap 收尾，「点击没反应」
         // 的直接根源）——控制页与引擎双保险
         assert!(body4.contains("tSend(isEnd?'end':'cancel','')"), "整组释放应恒空点");
-        assert!(body4.contains("id=\"kbin\""), "控制页缺键盘输入框");
+        // 键盘 UI 按需求移除：物理键盘直通常开，输入只留复制/粘贴
+        // （云机 H5 自带软键盘 + /type 粘贴；旧「键盘」开关与输入框不再提供）
+        assert!(!body4.contains("id=\"kbin\""), "键盘输入框应已移除（只留复制粘贴）");
+        assert!(!body4.contains("id=\"kbt\""), "键盘开关按钮应已移除");
+        assert!(!body4.contains("kbOn("), "键盘开关逻辑应已移除");
+        assert!(body4.contains("doCopy()"), "复制按钮应保留");
+        assert!(body4.contains("doPaste()"), "粘贴按钮应保留");
         assert!(!body4.contains("id=\"imode\""), "触控模式选择器应已移除（与 Windows 版一致）");
         assert!(!body4.contains("cpk_imode"), "触控模式 localStorage 残留应已移除");
         assert!(!body4.contains("id=\"fpsb\""), "fps 悬浮徽标应已移入状态面板");

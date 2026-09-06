@@ -656,6 +656,11 @@ struct Stats {
     nav_err_active: bool,
     nav_backoff: Duration,
     nav_next_retry: Option<Instant>,
+    /// 帧流统计窗口（30s）：起点 + 期初计数（收帧/字节/解码）。
+    /// 诊断「传输画面 CPU」用：收帧 fps ≈ 合成器实际出帧（everyNthFrame/
+    /// ack 门控是否生效的直接证据），解码 fps ≈ 推送给观看端的帧率。
+    cast_stat_at: Instant,
+    cast_stat_prev: (u64, u64, u64),
 }
 
 fn steady_loop(
@@ -677,6 +682,8 @@ fn steady_loop(
         nav_err_active: false,
         nav_backoff: Duration::from_secs(5),
         nav_next_retry: None,
+        cast_stat_at: Instant::now(),
+        cast_stat_prev: (0, 0, 0),
     };
     // 输入泵：慢 eval（tick 5s 超时/采样 8s 超时）的等待空窗里即时分发
     // 快通道请求（触摸/鼠标/键盘/导航/限帧），慢通道暂存由下方循环顶处理。
@@ -723,6 +730,29 @@ fn steady_loop(
                 rescue_log_at = Some(Instant::now());
                 logger.log(1, "sys", "实时流 6s 无帧，已 stop+start 重发 screencast 自愈（静态页无帧属正常）");
             }
+        }
+        // —— 帧流统计（30s 窗口，仅观看中采样；静默窗口不刷日志）——
+        // 收帧 = Chrome 实际采集+编码数（CPU 正相关；明显超目标帧率即
+        // everyNthFrame/ack 门控未生效的证据）；解码推送 = 观看端帧率。
+        if cdp.has_sinks() && stats.cast_stat_at.elapsed() >= Duration::from_secs(30) {
+            let (recv, bytes, decoded) = cdp.cast_stats();
+            let (pr, pb, pd) = stats.cast_stat_prev;
+            let secs = stats.cast_stat_at.elapsed().as_secs_f64().max(0.001);
+            if recv > pr {
+                logger.log(
+                    1,
+                    "sys",
+                    &format!(
+                        "实时流统计({:.0}s): Chrome 出帧 {:.1}/s {:.0}KB/s → 解码推送 {:.1}/s",
+                        secs,
+                        (recv - pr) as f64 / secs,
+                        (bytes - pb) as f64 / secs / 1024.0,
+                        (decoded - pd) as f64 / secs,
+                    ),
+                );
+            }
+            stats.cast_stat_at = Instant::now();
+            stats.cast_stat_prev = (recv, bytes, decoded);
         }
         // Chromium 进程退出
         match child.try_wait() {
@@ -1640,6 +1670,16 @@ fn attach_all(
     let mut cdp = Cdp::connect(port)?;
     // 帧率沿用 SharedState 当前值：控制面板改过的帧率跨 CDP 重建保留
     cdp.set_default_fps(shared.fps());
+    // cast 调优（静态配置直读）：JPEG 质量 + 采集分辨率缩放（CPK_JPEG_QUALITY /
+    // CPK_STREAM_SCALE，弱机降 CPU/带宽的两档旋钮；触摸坐标是 CSS 系不受影响）
+    let cast_max = if cfg.stream_scale_pct < 100 {
+        let w = ((cfg.width as u64 * cfg.stream_scale_pct as u64) / 100).max(1) as u32;
+        let h = ((cfg.height as u64 * cfg.stream_scale_pct as u64) / 100).max(1) as u32;
+        Some((w, h))
+    } else {
+        None
+    };
+    cdp.set_cast_tuning(cfg.jpeg_quality, cast_max);
     // 复用已有 page 目标（chrome-headless-shell 启动自带一个 about:blank）
     let targets = cdp.call("Target.getTargets", json!({}), None, 10000)?;
     let existing = targets
@@ -1807,6 +1847,8 @@ mod tests {
             frozen_reload: 3,
             beat_stale_sec: 180,
             fps: 25,
+            jpeg_quality: 50,
+            stream_scale_pct: 100,
             selftest: false,
             smoke: false,
             smoke_seconds: 60,
@@ -1878,6 +1920,8 @@ mod tests {
             frozen_reload: 3,
             beat_stale_sec: 180,
             fps: 25,
+            jpeg_quality: 50,
+            stream_scale_pct: 100,
             selftest: false,
             smoke: false,
             smoke_seconds: 60,
@@ -1927,6 +1971,8 @@ mod tests {
             frozen_reload: 3,
             beat_stale_sec: 180,
             fps: 25,
+            jpeg_quality: 50,
+            stream_scale_pct: 100,
             selftest: false,
             smoke: false,
             smoke_seconds: 60,
@@ -2012,6 +2058,8 @@ mod tests {
             frozen_reload: 3,
             beat_stale_sec: 180,
             fps: 25,
+            jpeg_quality: 50,
+            stream_scale_pct: 100,
             selftest: false,
             smoke: false,
             smoke_seconds: 60,

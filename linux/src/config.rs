@@ -59,6 +59,12 @@ pub struct Config {
     pub beat_stale_sec: u64,
     /// 实时画面目标帧率上限（控制面板 /fps 可运行时调整；此为初始值）
     pub fps: u32,
+    /// 实时画面 JPEG 质量（10..90，默认 50；弱机优先降质量——编码 CPU 与
+    /// 帧大小都随质量上升）
+    pub jpeg_quality: u32,
+    /// 实时画面采集分辨率百分比（30..100，默认 100；<100 时 Chrome 编码前
+    /// 先缩小，编码 CPU 与带宽按像素数近线性下降，触摸坐标不受影响）
+    pub stream_scale_pct: u32,
     pub selftest: bool,
     pub smoke: bool,
     pub smoke_seconds: u64,
@@ -164,6 +170,8 @@ impl Config {
             frozen_reload: i64_env("CPK_FROZEN_RELOAD", 3, 1, 100) as u32,
             beat_stale_sec: i64_env("CPK_BEAT_STALE_SEC", 180, 30, 3600) as u64,
             fps: i64_env("CPK_FPS", 25, 1, 60) as u32,
+            jpeg_quality: i64_env("CPK_JPEG_QUALITY", 50, 10, 90) as u32,
+            stream_scale_pct: i64_env("CPK_STREAM_SCALE", 100, 30, 100) as u32,
             selftest: bool_env("CPK_SELFTEST", false),
             smoke: bool_env("CPK_SMOKE", false),
             smoke_seconds: i64_env("CPK_SMOKE_SECONDS", 60, 10, 3600) as u64,

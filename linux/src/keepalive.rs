@@ -69,6 +69,8 @@ mod tests {
             frozen_reload: 3,
             beat_stale_sec: 180,
             fps: 25,
+            jpeg_quality: 50,
+            stream_scale_pct: 100,
             selftest: false,
             smoke: false,
             smoke_seconds: 60,

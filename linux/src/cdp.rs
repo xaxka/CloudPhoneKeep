@@ -58,6 +58,25 @@ pub struct Cdp {
     outstanding: HashMap<u64, String>,
     /// fire 类命令被 Chrome 拒绝的记录（引擎每监督周期取走落日志，上限 32 条防膨胀）
     error_replies: Vec<String>,
+    /// 待补发的 screencastFrameAck（ack 门控节流核心，本地实测：
+    /// Chrome 收到 ack 才继续采集/编码下一帧，不 ack 则 0 新帧）。
+    /// 帧落在软限帧窗口内时把 ack 压到窗口到期再发 → Chrome 端采集/编码
+    /// 空闲 → 传输 CPU 正比目标帧率而非合成器帧率（Chromium 官方 issue
+    /// 40934921：screencast 高 CPU 是已知设计缺陷，页面变化越多帧越多）。
+    /// (ack sessionId, 事件路由 session, 最晚发送时刻)。
+    /// 安全设计：单次持有上限 400ms（实测持有 3s 死流，陈旧 ack 补发无效，
+    /// stop+start 可复活——cast_rescue 兜底）；上限 2 条，挤满即补发最旧。
+    pending_acks: Vec<(Value, Option<String>, Instant)>,
+    /// JPEG 质量（startScreencast quality；引擎装配时从 CPK_JPEG_QUALITY 读入，
+    /// 默认 50——质量越高编码 CPU 与带宽越大，弱机优先降质量）
+    cast_quality: u32,
+    /// 采集分辨率上限（CPK_STREAM_SCALE<100 时启用：Chrome 编码前先缩小，
+    /// 编码 CPU 与带宽按像素数近线性下降；触摸坐标是 CSS 坐标系，不受影响）
+    cast_max: Option<(u32, u32)>,
+    /// 帧流统计（引擎 30s 窗口取差值落日志，诊断 CPU/帧率用）
+    cast_recv: u64,
+    cast_recv_bytes: u64,
+    cast_decoded: u64,
 }
 
 /// 「最新帧信箱」：生产者覆盖写入（旧帧直接作废，观看端永远拿到最新画面），
@@ -193,6 +212,12 @@ impl Cdp {
             last_cast_frame: None,
             outstanding: HashMap::new(),
             error_replies: Vec::new(),
+            pending_acks: Vec::new(),
+            cast_quality: 50,
+            cast_max: None,
+            cast_recv: 0,
+            cast_recv_bytes: 0,
+            cast_decoded: 0,
         })
     }
 
@@ -200,6 +225,42 @@ impl Cdp {
     /// 跨 CDP 重建保留）
     pub fn set_default_fps(&mut self, fps: u32) {
         self.screencast_fps = fps.clamp(1, 60);
+    }
+
+    /// startScreencast 参数（订阅/自愈/SetFps 重建三路径统一）：
+    /// - everyNthFrame = floor(60/fps)：Chrome 端编码节流（若该 build 生效）
+    /// - quality：CPK_JPEG_QUALITY（默认 50；曾按帧率分档 q55/q45/q35，
+    ///   在编码占大头的弱机上低帧率档反而抬 CPU——已回退为固定值可调）
+    /// - maxWidth/maxHeight：CPK_STREAM_SCALE<100 时启用，编码前缩小降 CPU/带宽
+    /// - maxFrameRate：实测无效，保留传参无害
+    fn screencast_params(&self) -> Value {
+        let mut p = json!({
+            "format": "jpeg",
+            "quality": self.cast_quality,
+            "everyNthFrame": every_nth_for_fps(self.screencast_fps),
+            "maxFrameRate": self.screencast_fps
+        });
+        if let Some((w, h)) = self.cast_max {
+            p["maxWidth"] = json!(w);
+            p["maxHeight"] = json!(h);
+        }
+        p
+    }
+
+    /// 引擎装配时注入 cast 调优（跨 CDP 重建从 Config 直读，无运行时修改）
+    pub fn set_cast_tuning(&mut self, quality: u32, max: Option<(u32, u32)>) {
+        self.cast_quality = quality.clamp(10, 90);
+        self.cast_max = max;
+    }
+
+    /// 帧流统计（引擎 30s 窗口取差落日志）：(收帧数, 收帧 base64 字节数, 解码数)
+    pub fn cast_stats(&self) -> (u64, u64, u64) {
+        (self.cast_recv, self.cast_recv_bytes, self.cast_decoded)
+    }
+
+    /// 是否有实时流观看者（引擎据此决定是否采样统计）
+    pub fn has_sinks(&self) -> bool {
+        !self.sinks.is_empty()
     }
 
     fn build_msg(&mut self, method: &str, params: Value, session: Option<&str>) -> (u64, String) {
@@ -282,6 +343,7 @@ impl Cdp {
             if Instant::now() >= deadline {
                 return Err(format!("{method} 命令超时({timeout_ms}ms)"));
             }
+            self.flush_due_acks(); // ack 门控节流：持有到期的 ack 补发（详回 pending_acks）
             let poll = Instant::now() + Duration::from_millis(200);
             match self.ws.read_message(poll) {
                 Ok(WsMessage::Text(t)) => {
@@ -358,32 +420,78 @@ impl Cdp {
     /// 类型不一（实测 152 为 int，协议文档写 string）——as_str() 会静默丢 ack，
     /// Chrome 发完首批帧后无限等待 → 实时画面掉到 ~1fps（曾长期误判为弱机性能）
     ///
-    /// 丢帧先于解码（弱机 CPU 优化的关键一环）：软件限帧窗口内的帧在
-    /// base64 解码前直接丢弃——每帧几十 KB 的解码在被丢弃的帧上是纯浪费
-    /// （低配 ARM64 盒子曾表现为「帧数一高 CPU 就高」）。ack 已先行，
-    /// Chromium 照常合成下一帧不受影响。
+    /// 丢帧先于解码 + ack 门控节流（弱机 CPU 优化的两支柱）：
+    /// ① 软限帧窗口内的帧在 base64 解码前直接丢弃（为注定丢弃的帧解码是
+    /// 纯浪费）；② 被【节流丢弃】的帧不立即 ack，而是持有到窗口到期再补发
+    /// （见 pending_acks）——Chrome 是 ack 门控的：收到 ack 才继续采集/编码
+    /// 下一帧，于是 Chrome 端的采集+编码频率被压到目标帧率附近，
+    /// 而不是合成器帧率（60fps）。「帧数一高 CPU 就高」的 Chrome 端主因。
     fn on_screencast_frame(&mut self, params: Value, session: Option<&str>) {
-        if let Some(fs) = params.get("sessionId").cloned() {
-            self.fire("Page.screencastFrameAck", json!({ "sessionId": fs }), session);
+        let now = Instant::now();
+        self.cast_recv += 1;
+        if let Some(b64len) = params.get("data").and_then(|x| x.as_str()).map(|s| s.len() as u64) {
+            self.cast_recv_bytes += b64len;
         }
-        if self.sinks.is_empty() {
-            if let Some(s) = session {
-                self.maybe_stop_screencast(s);
+        let ack_sid = params.get("sessionId").cloned();
+        let throttled =
+            !self.sinks.is_empty() && frame_throttled(self.last_frame_push, now, self.screencast_fps);
+        if let Some(fs) = ack_sid {
+            if self.sinks.is_empty() {
+                // 无人观看：立即 ack（配合 maybe_stop 关流，不留挂起帧）
+                self.fire("Page.screencastFrameAck", json!({ "sessionId": fs }), session);
+            } else if throttled {
+                // 节流丢帧：持有 ack 到窗口到期（Chrome 端因此空闲）
+                let deadline = ack_hold_deadline(self.last_frame_push, now, self.screencast_fps);
+                match deadline {
+                    Some(due) => self.push_pending_ack(fs, session.map(|s| s.to_string()), due),
+                    None => self.fire("Page.screencastFrameAck", json!({ "sessionId": fs }), session),
+                }
+            } else {
+                self.fire("Page.screencastFrameAck", json!({ "sessionId": fs }), session);
             }
-            return;
         }
-        if frame_throttled(self.last_frame_push, Instant::now(), self.screencast_fps) {
-            return;
-        }
-        if let Some(b64) = params.get("data").and_then(|x| x.as_str()) {
-            self.last_frame_push = Some(Instant::now());
-            let frame = util::base64_decode(b64);
-            for (_, box_) in &self.sinks {
-                box_.post(frame.clone());
+        if !throttled && !self.sinks.is_empty() {
+            if let Some(b64) = params.get("data").and_then(|x| x.as_str()) {
+                self.last_frame_push = Some(now);
+                self.cast_decoded += 1;
+                let frame = util::base64_decode(b64);
+                for (_, box_) in &self.sinks {
+                    box_.post(frame.clone());
+                }
             }
         }
         if let Some(s) = session {
             self.maybe_stop_screencast(s);
+        }
+    }
+
+    /// 持有一笔待补发 ack；队列挤满（>2，非门控 build 的异常场景）时最旧的
+    /// 立即补发，不无限堆积。
+    fn push_pending_ack(&mut self, sid: Value, session: Option<String>, due: Instant) {
+        if self.pending_acks.len() >= 2 {
+            let (old, old_sess, _) = self.pending_acks.remove(0);
+            self.fire("Page.screencastFrameAck", json!({ "sessionId": old }), old_sess.as_deref());
+        }
+        self.pending_acks.push((sid, session, due));
+    }
+
+    /// 补发到期的持有 ack（两个读循环每轮调用：粒度 ≤200ms）。
+    /// 陈旧 sessionId 的 ack 被 Chrome 忽略也无害（门控未开则零效果，
+    /// 开了则正常放行下一帧；死流由 cast_rescue 兜底复活）。
+    fn flush_due_acks(&mut self) {
+        let now = Instant::now();
+        for i in (0..self.pending_acks.len()).rev() {
+            if self.pending_acks[i].2 <= now {
+                let (sid, sess, _) = self.pending_acks.remove(i);
+                self.fire("Page.screencastFrameAck", json!({ "sessionId": sid }), sess.as_deref());
+            }
+        }
+    }
+
+    /// 全部持有 ack 立即补发（关流/重建 cast 前调用，不给 Chrome 留挂起帧）
+    fn flush_all_acks(&mut self) {
+        while let Some((sid, sess, _)) = self.pending_acks.pop() {
+            self.fire("Page.screencastFrameAck", json!({ "sessionId": sid }), sess.as_deref());
         }
     }
 
@@ -435,7 +543,7 @@ impl Cdp {
             for (i, b) in backoffs.iter().enumerate() {
                 match self.call_pumped(
                     "Page.startScreencast",
-                    screencast_params(self.screencast_fps),
+                    self.screencast_params(),
                     Some(session),
                     3000,
                     &mut *pump, // 重借用：循环多轮传递（按值 move 会耗尽 &mut）
@@ -494,6 +602,7 @@ impl Cdp {
 
     fn maybe_stop_screencast(&mut self, session: &str) {
         if self.screencast_active && self.sinks.is_empty() {
+            self.flush_all_acks();
             self.screencast_active = false;
             self.fire("Page.stopScreencast", json!({}), Some(session));
         }
@@ -505,7 +614,8 @@ impl Cdp {
     /// 直接重发会撞 Chrome「Screencast is already active」拒绝（用户日志
     /// 实证，重发失败等于没调）。同档内的微调只改软件限帧值，不重建
     /// （重建有毫秒级空窗，无谓）。旧注释「stop+start 重建也不改变发帧
-    /// 频率」针对的是无效的 maxFrameRate，与 everyNthFrame 机制无关。
+    /// 频率」针对的是无效的 maxFrameRate，与 everyNthFrame/ack 门控机制无关。
+    /// ack 门控节流无需重建：pending_acks 的到期时刻随 fps 即时变化。
     pub fn set_screencast_fps(&mut self, fps: u32, session: &str) {
         let fps = fps.clamp(1, 60);
         if fps == self.screencast_fps {
@@ -514,9 +624,10 @@ impl Cdp {
         let nth_changed = every_nth_for_fps(fps) != every_nth_for_fps(self.screencast_fps);
         self.screencast_fps = fps;
         if self.screencast_active && nth_changed && !self.sinks.is_empty() {
+            self.flush_all_acks();
             self.fire("Page.stopScreencast", json!({}), Some(session));
             let _ = self
-                .fire_checked("Page.startScreencast", screencast_params(fps), Some(session));
+                .fire_checked("Page.startScreencast", self.screencast_params(), Some(session));
             // 续期防 rescue 误判重建瞬间的无帧窗口
             self.last_cast_frame = Some(Instant::now());
         }
@@ -564,6 +675,7 @@ impl Cdp {
             if Instant::now() >= deadline {
                 return Ok(());
             }
+            self.flush_due_acks(); // ack 门控节流：持有到期的 ack 补发
             let poll = (Instant::now() + Duration::from_millis(50)).min(deadline);
             match self.ws.read_message(poll) {
                 Ok(WsMessage::Text(t)) => {
@@ -616,9 +728,10 @@ impl Cdp {
         // 先续期再重发：若重发被拒（Not attached），下个监督周期（~秒级）
         // 再试——每 6s 最多一次，不会打搭 CDP 通道
         self.last_cast_frame = Some(Instant::now());
+        self.flush_all_acks();
         self.fire("Page.stopScreencast", json!({}), Some(session));
         self
-            .fire_checked("Page.startScreencast", screencast_params(self.screencast_fps), Some(session))
+            .fire_checked("Page.startScreencast", self.screencast_params(), Some(session))
             .is_ok()
     }
 }
@@ -662,33 +775,30 @@ fn frame_throttled(last: Option<Instant>, now: Instant, fps: u32) -> bool {
 
 /// Chrome 端编码节流（Page.startScreencast 的 everyNthFrame）：合成器基准
 /// 60fps，取 floor(60/fps)——floor 保证 Chrome 端出帧率不低于目标（页面
-/// 动画只有 30fps 时按 30fps 出帧不受影响）；fps=10 → N=6，Chrome 的 JPEG
-/// 编码量降为 1/6。此前 everyNthFrame 恒为 1：合成器每一帧都编码，而软件
-/// 限帧丢帧发生在【编码完成之后】——被丢弃的帧白耗了编码 CPU，低配
-/// ARM64 盒子表现为「帧数一高 CPU 就高」。
-/// （maxFrameRate 实测 Chrome 152 无视，与 everyNthFrame 是两回事：前者
-/// 不传、后者才真正生效；帧率精确性仍由软件限帧兑底。pub 供单测与引擎。）
+/// 动画只有 30fps 时按 30fps 出帧不受影响）；fps=10 → N=6，若 build 生效
+/// 则 Chrome 的 JPEG 编码量降为 1/6（与 ack 门控节流互为双保险：
+/// everyNthFrame 部分版本无效，ack 门控本地实测确认成立）。
+/// （maxFrameRate 实测 Chrome 152 无视；帧率精确性仍由软件限帧兜底。
+/// pub 供单测。）
 pub fn every_nth_for_fps(fps: u32) -> u32 {
     (60 / fps.clamp(1, 60)).max(1)
 }
 
-/// startScreencast 参数（订阅/自愈/SetFps 重建三路径统一）：
-/// quality 随帧率联动——低帧率时编码次数少，把画质补回来；高帧率时
-/// 降画质换编码速度（弱机 CPU 与带宽双省）。
-fn screencast_params(fps: u32) -> Value {
-    let q = if fps <= 15 {
-        55
-    } else if fps <= 30 {
-        45
-    } else {
-        35
-    };
-    json!({
-        "format": "jpeg",
-        "quality": q,
-        "everyNthFrame": every_nth_for_fps(fps),
-        "maxFrameRate": fps
-    })
+/// ack 持有时刻决策（纯函数，可单测）：帧被软限帧拦截时返回 Some(due)
+/// = ack 持有到 due 再补发；None = 立即 ack。
+/// 规则：due = 上次推送 + 限帧窗口（窗口到期时下一帧将被放行）；
+/// 单次持有上限 400ms（实测持有 3s 死流、陈旧 ack 补发无效——退化为
+/// 立即 ack + 丢帧，安全第一；低帧率档 Chrome 端降为 2.5 次/s 采集）。
+const ACK_HOLD_MAX_MS: u64 = 400;
+fn ack_hold_deadline(last_push: Option<Instant>, now: Instant, fps: u32) -> Option<Instant> {
+    let t0 = last_push?;
+    let window = Duration::from_millis(1000 / fps.clamp(1, 60) as u64);
+    let due = t0 + window;
+    if due <= now {
+        return None; // 窗口已过（不该发生）：立即 ack
+    }
+    let cap = now + Duration::from_millis(ACK_HOLD_MAX_MS);
+    Some(due.min(cap))
 }
 
 /// startScreencast/captureScreenshot 的瞬态错误判定（纯函数，可单测；引擎
@@ -740,7 +850,7 @@ fn track_touch_points(
 
 #[cfg(test)]
 mod tests {
-    use super::{every_nth_for_fps, frame_throttled, is_transient_cast_error, track_touch_points, FramePoll, FrameSlot, Cdp};
+    use super::{ack_hold_deadline, every_nth_for_fps, frame_throttled, is_transient_cast_error, track_touch_points, FramePoll, FrameSlot, Cdp};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
@@ -848,6 +958,38 @@ mod tests {
         // 乱序值 clamp 不 panic
         assert_eq!(every_nth_for_fps(0), 60);
         assert_eq!(every_nth_for_fps(999), 1);
+    }
+
+    /// ack 门控节流的持有决策：10fps（窗口 100ms）下帧到达于推送后 40ms
+    /// → 持有到窗口到期（60ms 后）；到达于窗口外 → None 立即 ack；
+    /// 1fps（窗口 1000ms 超 400ms 上限）→ 持有被截到 400ms；无推送基准 → None。
+    #[test]
+    fn ack_hold_deadline_decision() {
+        let t0 = Instant::now();
+        // 10fps：推送后 40ms 到达的节流帧 → due = t0+100ms
+        let now = t0 + Duration::from_millis(40);
+        let due = ack_hold_deadline(Some(t0), now, 10).expect("应持有");
+        assert_eq!(due, t0 + Duration::from_millis(100), "持有到窗口到期");
+        // 窗口已过（不该出现）：None
+        assert!(ack_hold_deadline(Some(t0), t0 + Duration::from_millis(150), 10).is_none());
+        // 首帧（无基准）：None
+        assert!(ack_hold_deadline(None, now, 10).is_none());
+        // 1fps：窗口 1000ms > 400ms 上限 → 截断到 now+400ms
+        let now1 = t0 + Duration::from_millis(50);
+        let due1 = ack_hold_deadline(Some(t0), now1, 1).expect("低帧率也应持有（截断）");
+        assert_eq!(due1, now1 + Duration::from_millis(400), "持有上限 400ms");
+        // 2fps：窗口 500ms > 400ms → 同样截断
+        let now2 = t0 + Duration::from_millis(30);
+        assert_eq!(
+            ack_hold_deadline(Some(t0), now2, 2).expect("2fps 截断"),
+            now2 + Duration::from_millis(400)
+        );
+        // 3fps：窗口 333ms < 400ms → 不截断
+        let now3 = t0 + Duration::from_millis(10);
+        assert_eq!(
+            ack_hold_deadline(Some(t0), now3, 3).expect("3fps 不截断"),
+            t0 + Duration::from_millis(333)
+        );
     }
 
     /// 触点跟踪语义（协议规定 touchEnd/touchCancel 不得携带触点）：
