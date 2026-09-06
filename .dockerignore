@@ -9,3 +9,4 @@ linux/*
 !shared
 shared/*
 !shared/keepalive.inject.js
+!shared/control_page.html

@@ -23,7 +23,8 @@ WORKDIR /build
 COPY linux/Cargo.toml linux/Cargo.lock ./
 COPY linux/src ./src
 # include_str!("../../shared/…") 相对 /build/src 解析到 /shared
-COPY shared/keepalive.inject.js /shared/keepalive.inject.js
+# （keepalive.inject.js + control_page.html 控制页模板）
+COPY shared /shared
 # rust-lld 链接 + test -s 产物断言（二进制缺失时构建立刻失败，防静默空镜像）
 # 双架构构建并行共享 cargo 缓存挂载：cargo 自带 target 目录文件锁，天然串行安全
 RUN --mount=type=cache,target=/build/target \
