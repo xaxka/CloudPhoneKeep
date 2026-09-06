@@ -46,9 +46,6 @@ padding:6px 8px;font-size:13px}
 background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
 #pstat i{width:8px;height:8px;border-radius:50%;background:#64748b;flex:none}
 #pstat i.ok{background:#22c55e}#pstat i.bad{background:#ef4444}#pstat i.warn{background:#f59e0b}
-#stats{font-size:12px;color:var(--dim);line-height:1.65;word-break:break-all}
-#stats b{color:var(--txt);font-weight:600}
-#stats .warn{color:#f87171}
 #toast{position:fixed;bottom:70px;left:50%;transform:translateX(-50%);background:var(--line);
 padding:6px 14px;border-radius:8px;opacity:0;transition:opacity .3s;pointer-events:none;font-size:13px}
 /* —— 移动端：iOS 风格圆点（home indicator）呼出底部抽屉 —— */
@@ -90,7 +87,6 @@ padding-bottom:calc(14px + env(safe-area-inset-bottom))}
 <aside id="panel">
 <h2>状态</h2>
 <div id="pstat"><i id="pdot"></i><span id="pst">连接中…</span></div>
-<div id="stats">—</div>
 <h2>输入</h2>
 <div class="row">
 <button onclick="doCopy()">复制</button>
@@ -140,10 +136,6 @@ padding-bottom:calc(14px + env(safe-area-inset-bottom))}
 <option value="60">60</option>
 <option value="50">50 省CPU</option>
 </select>
-</div>
-<div class="row" style="color:#8aa;font-size:11px;line-height:1.5">
-<span class="lb" style="color:#8aa">提示</span>
-<span>帧率越高 CPU 越高（默认 10 已够用）；低配盒子可降分辨率/画质。三项都在此面板即时调整，引擎按目标帧率自动节流（Chrome 确认一帧后才采集下一帧）。环境变量 CPK_FPS / CPK_JPEG_QUALITY / CPK_STREAM_SCALE 为初始值。</span>
 </div>
 </aside>
 <div id="mask"></div>
@@ -215,18 +207,6 @@ if(!HLTH.platform){
 if(live.mode!=='idle-plat'){stopLive();live.mode='idle-plat';
 ov('请选择云手机平台','菜单/侧栏 → 设置 → 平台 → 移动/联通')}
 }else if(live.mode==='idle-plat'){ov(null);startLive()}
-document.getElementById('stats').innerHTML=
-'<b>'+esc(j.account||'')+' · '+esc(j.platformLabel||'未选择')+' · '+pt(j.page)+
-(j.exited?' · 已退出云机!':'')+'</b>'+
-'<br><b>浏览器</b> '+esc(j.browser)+
-(j.title?'<br><b>页面</b> '+esc(String(j.title).slice(0,40)):'')+
-'<br><b>ticks</b> '+j.ticks+' · <b>clicks</b> '+j.clicks+' · <b>弹窗</b> '+j.dialogs+
-'<br><b>重启</b> '+j.restarts+' · <b>重载</b> '+j.reloads+
-' · <b>心跳</b> '+(j.lastBeatAge==null?'—':j.lastBeatAge+'s')+
-'<br><b>URL</b> '+esc((j.pageUrl||'').slice(0,80))+
-(j.lastError?'<br><span class="warn"><b>错误</b> '+
-esc(String(j.lastError).slice(0,100))+'</span>':'')+
-(j.exited?'<br><span class="warn">已退出云机！</span>':'');
 // 首次 poll 决定是否开流（引擎待机时不自寻 500）
 if(live.mode==='none'){
 if(HLTH.platform){startLive()}

@@ -980,6 +980,14 @@ mod tests {
         assert!(!body4.contains("id=\"imode\""), "触控模式选择器应已移除（与 Windows 版一致）");
         assert!(!body4.contains("cpk_imode"), "触控模式 localStorage 残留应已移除");
         assert!(!body4.contains("id=\"fpsb\""), "fps 悬浮徽标应已移入状态面板");
+        // 面板精简（用户要求）：诊断明细 stats 区与「提示」说明行不再展示——
+        // ticks/clicks/浏览器版本/URL 等是开发诊断数据，对使用者零价值；
+        // 状态信息由 pstat 单行收纳（色点+页面状态+实测/上限帧率）
+        assert!(!body4.contains("id=\"stats\""), "诊断明细区应已移除（pstat 单行收纳）");
+        assert!(!body4.contains("ticks"), "内部计数器展示应已移除");
+        assert!(!body4.contains("帧率越高 CPU 越高"), "设置区说明文字应已移除");
+        assert!(!body4.contains("CPK_JPEG_QUALITY / CPK_STREAM_SCALE"), "环境变量说明应已移除");
+        assert!(body4.contains("id=\"pstat\""), "状态单行应保留");
         assert!(body4.contains("pointer-events:none"), "提示层不应挡触摸");
         assert!(!body4.contains("上滑"), "方向滑动按钮应已删除");
         assert!(!body4.contains("sendKey"), "旧按键按钮应已删除");
@@ -992,7 +1000,7 @@ mod tests {
         let (port, _shared, _tx) = start_server("");
         let (st, _) = http(port, "POST /addr HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         assert_eq!(st, 404);
-        // 控制页不再有地址栏接线（防回归）；状态转换通知/页面标题保留
+        // 控制页不再有地址栏接线（防回归）；状态转换通知保留
         let (port2, _shared2, _tx2) = start_server("s3cret");
         let (st3, body3) = http(port2, "GET /?token=s3cret HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
         assert_eq!(st3, 200);
@@ -1002,7 +1010,8 @@ mod tests {
         assert!(body3.contains("statNotify"), "控制页缺状态转换通知");
         assert!(body3.contains("Notification.permission"), "控制页缺系统通知权限申请");
         assert!(body3.contains("lastStatus"), "控制页未消费 lastStatus");
-        assert!(body3.contains("j.title"), "控制页未显示页面标题");
+        // 页面标题/账号等诊断明细已随 stats 区移除（画面本身可见页面内容）
+        assert!(!body3.contains("j.title"), "页面标题展示应已移除");
     }
 
     #[test]
