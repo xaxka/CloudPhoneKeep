@@ -8,6 +8,7 @@
 use crate::util;
 use crate::ws::{WsClient, WsMessage};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -37,6 +38,13 @@ pub struct Cdp {
     /// （设 5 仍以合成器帧率 ~30fps 发帧），帧率上限由本侧丢帧实现：
     /// 距上次推送不足 1000/fps ms 的帧直接丢弃（ack 照发，Chrome 不受影响）
     last_frame_push: Option<Instant>,
+    /// 在按触点状态（id → 最近坐标）。Chromium 的 tap 手势合成
+    /// （touchend 后自动合成 mousedown/mouseup/click）从 touchEnd 事件的
+    /// 触点列表取合成落点——空列表会让合成的鼠标/点击事件全部落在 (0,0)
+    /// （实测 Chrome 151/152：轻点全部打在页面左上角元素，远端 H5 表现为
+    /// 「点击没效果」）。引擎侧跟踪在按触点，end/cancel 空点时自动补全，
+    /// 保证合成点击落在真实抬起位置。BTreeMap：多点释放顺序确定可重现。
+    touch_active: BTreeMap<i64, (f64, f64)>,
 }
 
 /// 「最新帧信箱」：生产者覆盖写入（旧帧直接作废，观看端永远拿到最新画面），
@@ -168,6 +176,7 @@ impl Cdp {
             screencast_active: false,
             screencast_fps: 25,
             last_frame_push: None,
+            touch_active: BTreeMap::new(),
         })
     }
 
@@ -370,6 +379,31 @@ impl Cdp {
         self.screencast_fps = fps.clamp(1, 60);
     }
 
+    /// 触摸事件统一分发（引擎侧触点跟踪）。所有 /touch 输入与 tap/swipe
+    /// 手势都走这里：start/move 记录在按触点；end/cancel 空点时自动补全为
+    /// 跟踪到的触点——否则 Chromium 的 tap 手势合成（touchend 后合成
+    /// mousedown/mouseup/click）会把落点取成 (0,0)，轻点全打在页面左上角
+    /// （远端 H5「点击没效果」的根因）。发后即忘（应答无信息量，同 dispatch_input）。
+    pub fn dispatch_touch(
+        &mut self,
+        phase: &str,
+        points: &[(f64, f64, i64)],
+        session: &str,
+    ) -> Result<(), String> {
+        let typ = match phase {
+            "start" => "touchStart",
+            "move" => "touchMove",
+            "end" => "touchEnd",
+            _ => "touchCancel",
+        };
+        let completed = complete_touch_points(phase, points, &mut self.touch_active);
+        let pts: Vec<Value> = completed
+            .iter()
+            .map(|(x, y, id)| json!({ "x": x, "y": y, "id": id }))
+            .collect();
+        self.fire_checked("Input.dispatchTouchEvent", json!({ "type": typ, "touchPoints": pts }), Some(session))
+    }
+
     /// 稳态循环空闲期泵取并分发 WS 消息（实时画面帧/事件）——
     /// 空闲睡眠的替代：预算内持续处理到达的消息，poll 空窗即返回。
     /// 每个泵周期向订阅信箱发心跳（消费侧据此判活/关流重连）。
@@ -447,10 +481,44 @@ fn frame_throttled(last: Option<Instant>, now: Instant, fps: u32) -> bool {
     }
 }
 
+/// 触点补全（纯函数，可单测）：start/move 记录触点坐标；end/cancel 带点 =
+/// 释放该点（从在按集合移除）；空点 = 整组释放——用跟踪到的在按触点补全
+/// （Chromium tap 合成的 mousedown/up/click 落点收自 touchEnd 触点列表，
+/// 空列表 → 合成事件落在 (0,0) → 轻点全部打在页面左上角元素）。
+fn complete_touch_points(
+    phase: &str,
+    points: &[(f64, f64, i64)],
+    active: &mut BTreeMap<i64, (f64, f64)>,
+) -> Vec<(f64, f64, i64)> {
+    match phase {
+        "start" | "move" => {
+            for (x, y, id) in points {
+                active.insert(*id, (*x, *y));
+            }
+            points.to_vec()
+        }
+        _ => {
+            if points.is_empty() {
+                // 整组释放：补全为全部在按触点（id 升序，多点释放顺序确定）
+                let out: Vec<(f64, f64, i64)> =
+                    active.iter().map(|(id, (x, y))| (*x, *y, *id)).collect();
+                active.clear();
+                out
+            } else {
+                for (_, _, id) in points {
+                    active.remove(id);
+                }
+                points.to_vec()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{frame_throttled, FramePoll, FrameSlot, Cdp};
+    use super::{complete_touch_points, frame_throttled, FramePoll, FrameSlot, Cdp};
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -538,6 +606,38 @@ mod tests {
         assert!(frame_throttled(Some(t0), t0 + Duration::from_millis(300), 0));
         assert!(!frame_throttled(Some(t0), t0 + Duration::from_millis(1100), 0));
         assert!(!frame_throttled(Some(t0), t0 + Duration::from_millis(300), 999));
+    }
+
+    /// 触点补全（tap 合成落点修复的核心）：
+    /// 空点 end 必须补全为跟踪到的在按触点（含最近 move 坐标），
+    /// 带点 end 只释放该点；cancel 同路径；start/move 记录坐标。
+    #[test]
+    fn touch_point_completion_semantics() {
+        let mut active = BTreeMap::new();
+        // start 记录触点
+        let out = complete_touch_points("start", &[(207.0, 680.0, 1)], &mut active);
+        assert_eq!(out, vec![(207.0, 680.0, 1)]);
+        assert_eq!(active.get(&1), Some(&(207.0, 680.0)));
+        // move 更新坐标
+        complete_touch_points("move", &[(200.0, 500.0, 1)], &mut active);
+        assert_eq!(active.get(&1), Some(&(200.0, 500.0)));
+        // 空点 end：补全为最近坐标（不能是 (0,0)——tap 合成 click 落点）
+        let out = complete_touch_points("end", &[], &mut active);
+        assert_eq!(out, vec![(200.0, 500.0, 1)], "空点 end 应补全为跟踪坐标");
+        assert!(active.is_empty(), "整组释放应清空在按集合");
+        // 带点 end：只释放该点，不动其他在按触点（双指中途抬一指）
+        complete_touch_points("start", &[(100.0, 100.0, 1), (300.0, 300.0, 2)], &mut active);
+        let out = complete_touch_points("end", &[(100.0, 100.0, 1)], &mut active);
+        assert_eq!(out, vec![(100.0, 100.0, 1)]);
+        assert_eq!(active.get(&2), Some(&(300.0, 300.0)), "另一指应仍在按");
+        // cancel 空点同样补全（手势取消也带真实坐标）
+        let out = complete_touch_points("cancel", &[], &mut active);
+        assert_eq!(out, vec![(300.0, 300.0, 2)]);
+        assert!(active.is_empty());
+        // 多点释放顺序确定（BTreeMap 按 id 升序）
+        complete_touch_points("start", &[(50.0, 60.0, 2), (10.0, 20.0, 1)], &mut active);
+        let out = complete_touch_points("end", &[], &mut active);
+        assert_eq!(out, vec![(10.0, 20.0, 1), (50.0, 60.0, 2)]);
     }
 
     #[test]

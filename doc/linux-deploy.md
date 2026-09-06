@@ -21,7 +21,8 @@ docker run -d --name cpk-138xxxx1234 \
   --shm-size 128m --init --restart unless-stopped \
   ghcr.io/xaxka/cloudphonekeep:latest
 
-# 4. 首次登录（浏览器打开控制页：先选平台（移动/联通），画面即触屏）
+# 4. 首次登录（启动后平台留空无弹窗：控制页「设置→平台」选移动/联通，
+#    引擎即加载页面（约 10 秒），画面即触屏）
 #    http://127.0.0.1:8088/
 #    登录一次后 Cookie/LocalStorage 持久化在 volume，之后自动保活
 

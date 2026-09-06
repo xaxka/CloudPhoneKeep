@@ -96,16 +96,28 @@ fn sanitize(s: &str) -> String {
 
 impl Config {
     pub fn from_env() -> Config {
-        // 平台不由环境变量定死（CPK_PLATFORM 已移除）：容器按默认 mobile 启动，
-        // 打开控制页时由用户选择平台（POST /platform 运行时切换，实例按需重启；
-        // Profile 保留双平台登录态，切回已登过的平台无需重登）
-        let (platform, platform_label, default_url, w, h) = (
-            "mobile".to_string(),
-            PLATFORM_MOBILE_LABEL.to_string(),
-            PLATFORM_MOBILE_URI.to_string(),
-            PLATFORM_MOBILE_W as i64,
-            PLATFORM_MOBILE_H as i64,
-        );
+        // 平台留空启动（无弹窗、不加载页面）：容器启动后引擎待机，
+        // 打开控制页在「设置→平台」选移动/联通后才启动 Chromium 并加载页面
+        // （Profile 保留双平台登录态，切回已登过的平台无需重登）。
+        // CPK_URL 显式指定时视为明确要自动启动（CI 冒烟/自定义 H5），
+        // 按 mobile 视口直接起
+        let explicit_url = envs("CPK_URL");
+        let (platform, platform_label, default_url, w, h) = match &explicit_url {
+            Some(u) => (
+                "mobile".to_string(),
+                PLATFORM_MOBILE_LABEL.to_string(),
+                u.clone(),
+                PLATFORM_MOBILE_W as i64,
+                PLATFORM_MOBILE_H as i64,
+            ),
+            None => (
+                String::new(),
+                "未选择".to_string(),
+                String::new(),
+                PLATFORM_MOBILE_W as i64,
+                PLATFORM_MOBILE_H as i64,
+            ),
+        };
         let account = envs("CPK_ACCOUNT").unwrap_or_else(|| "account1".into());
         let data_dir = PathBuf::from(envs("CPK_DATA_DIR").unwrap_or_else(|| "/data".into()));
         let profile_dir = match envs("CPK_PROFILE_DIR") {
@@ -117,7 +129,7 @@ impl Config {
             account,
             platform,
             platform_label,
-            url: envs("CPK_URL").unwrap_or(default_url),
+            url: default_url,
             width: i64_env("CPK_WIDTH", w, 200, 4096) as u32,
             height: i64_env("CPK_HEIGHT", h, 200, 8192) as u32,
             data_dir,
@@ -159,14 +171,14 @@ mod tests {
     #[test]
     fn env_parsing_and_defaults() {
         let k = std::env::var("CPK_PLATFORM");
-        // 默认：mobile + 414x896 + 5s 周期（平台打开控制页时选，不由环境变量定死）
+        // 默认：平台留空（待机，控制页选择后启动）+ 414x896 + 5s 周期
         for name in ["CPK_PLATFORM", "CPK_DATA_DIR", "CPK_ACCOUNT", "CPK_URL"] {
             std::env::remove_var(name);
         }
         let cfg = Config::from_env();
-        assert_eq!(cfg.platform, "mobile");
-        assert_eq!(cfg.platform_label, "移动云手机");
-        assert_eq!(cfg.url, PLATFORM_MOBILE_URI);
+        assert_eq!(cfg.platform, "", "默认平台应留空（待机待选）");
+        assert_eq!(cfg.platform_label, "未选择");
+        assert_eq!(cfg.url, "");
         assert_eq!(cfg.width, 414);
         assert_eq!(cfg.height, 896);
         assert_eq!(cfg.interval_ms, 5000);
@@ -177,7 +189,7 @@ mod tests {
         assert_eq!(cfg.chrome_bin, "chrome-headless-shell");
         assert!(cfg.profile_dir.to_string_lossy().contains("profile-account1"));
 
-        // 覆盖：自定义 URL + 分辨率 + 周期（平台不随环境变量变）
+        // 覆盖：显式 CPK_URL → 自动启动（mobile 视口）；自定义分辨率/周期
         std::env::set_var("CPK_ACCOUNT", "18612341234");
         std::env::set_var("CPK_URL", "https://example.com/h5");
         std::env::set_var("CPK_WIDTH", "405");
@@ -186,7 +198,8 @@ mod tests {
         std::env::set_var("CPK_KEEP_ALIVE", "no");
         std::env::set_var("CPK_REPORT_PORT", "9090");
         let cfg = Config::from_env();
-        assert_eq!(cfg.platform, "mobile");
+        assert_eq!(cfg.platform, "mobile", "显式 CPK_URL 应自动启动");
+        assert_eq!(cfg.platform_label, "移动云手机");
         assert_eq!(cfg.url, "https://example.com/h5");
         assert_eq!(cfg.width, 405);
         assert_eq!(cfg.interval_ms, 8000);
@@ -208,6 +221,11 @@ mod tests {
         assert_eq!(cfg.interval_ms, 5000);
         assert_eq!(cfg.tick_fail_reload, 600);
         assert_eq!(cfg.ua_mode, "windows");
+
+        // 去掉 CPK_URL 后回到待机默认（防回归：URL 不残留影响留空判定）
+        std::env::remove_var("CPK_URL");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.platform, "", "无 CPK_URL 应回到待机");
 
         std::env::remove_var("CPK_PLATFORM");
         std::env::remove_var("CPK_ACCOUNT");

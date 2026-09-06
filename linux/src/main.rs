@@ -67,10 +67,14 @@ fn main() {
         0,
         "sys",
         &format!(
-            "账号={} 平台={}({})（打开控制页时可选/可切换） 分辨率={}x{} 动作周期={}ms 保活={} 模拟空闲活动={} 驱动=宿主CDP看门狗",
+            "账号={} 平台={}（{}） 分辨率={}x{} 动作周期={}ms 保活={} 模拟空闲活动={} 驱动=宿主CDP看门狗",
             cfg.account,
-            cfg.platform,
-            cfg.platform_label,
+            if cfg.platform.is_empty() { "未选择" } else { &cfg.platform },
+            if cfg.platform.is_empty() {
+                "引擎待机：控制页「设置→平台」选择后加载页面"
+            } else {
+                "控制页可随时切换"
+            },
             cfg.width,
             cfg.height,
             cfg.interval_ms,

@@ -129,18 +129,8 @@ transition:background .15s}
 #homei:active::after{background:rgba(255,255,255,.9)}
 #mask{display:none;position:fixed;inset:0;background:#000a;z-index:20}
 #mask.on{display:block}
-/* 平台首选层：打开页面时选平台（选过即记住，可随时在「设置→平台」切换） */
-#pick{position:fixed;inset:0;background:#0f172af2;z-index:50;display:flex;
-align-items:center;justify-content:center;padding:24px}
-#pick.hidden{display:none}
-.pk-card{background:var(--panel);border:1px solid var(--line);border-radius:16px;
-padding:22px;width:100%;max-width:330px;display:flex;flex-direction:column;gap:10px;
-box-shadow:0 18px 60px #000c}
-.pk-t{font-size:17px;font-weight:600;text-align:center}
-.pk-s{font-size:12px;color:var(--dim);text-align:center;margin:2px 0 8px}
-.pk-b{display:flex;flex-direction:column;align-items:flex-start;gap:3px;padding:12px 16px}
-.pk-b b{font-size:15px}
-.pk-b span{font-size:12px;color:var(--dim)}
+/* 平台首选弹窗已按需求移除（启动无弹窗）：平台留空待选，控制页「设置→平台」
+ * 选择后引擎才加载页面；画面区用 overlay 提示（见 poll 的 idle-plat 分支） */
 @media (max-width:820px){
 #stage{padding:6px 6px calc(46px + env(safe-area-inset-bottom))}
 #wrap{height:auto;width:100%;max-height:100%}
@@ -186,6 +176,7 @@ autocapitalize="off" autocorrect="off" spellcheck="false">
 <div class="row">
 <span class="lb">平台</span>
 <select id="psel">
+<option value="">选择平台…</option>
 <option value="mobile">移动云手机</option>
 <option value="unicom">联通云手机</option>
 </select>
@@ -203,14 +194,6 @@ autocapitalize="off" autocorrect="off" spellcheck="false">
 </div>
 </aside>
 <div id="mask"></div>
-<div id="pick">
-<div class="pk-card">
-<div class="pk-t">选择云手机平台</div>
-<div class="pk-s">首次使用选一次即可；之后可随时在「设置 → 平台」切换</div>
-<button class="pk-b" data-p="mobile"><b>移动云手机</b><span>中国移动 · 414×896</span></button>
-<button class="pk-b" data-p="unicom"><b>联通云手机</b><span>中国联通 · 405×720</span></button>
-</div>
-</div>
 <button id="homei" aria-label="控制台菜单"></button>
 <div id="toast"></div>
 <script>
@@ -256,7 +239,7 @@ if(document.hidden)return;   // 切后台不轮询（省唤醒）
 fetch(U('/healthz')).then(function(r){return r.json()}).then(function(j){
 VW=j.vw||414;VH=j.vh||896;
 WRAP.style.aspectRatio=VW+'/'+VH;
-HLTH={ok:!!j.ok,page:j.page||'',exited:!!j.exited,platform:j.platform||''};
+HLTH={ok:!!j.ok,page:j.page||'',exited:!!j.exited,platform:j.platform||'',fps:j.fps||25};
 statNotify(j);
 document.getElementById('pdot').className=
 j.ok?(j.page==='nav-error'?'warn':'ok'):'bad';
@@ -266,10 +249,14 @@ if(j.page==='nav-error'){PB.style.display='block';
 PB.textContent='首页导航失败·引擎自动重试中'}else{PB.style.display='none'}
 syncFpsSel(j.fps);
 syncPlatSel(j.platform);
-// 上次选择的平台与引擎当前平台不一致（如容器重启回默认）→ 自动切回，无需再选
-if(PLTSTORED&&HLTH.platform&&HLTH.platform!==PLTSTORED&&!PLTAP)wantPlatform(PLTSTORED,true);
+// 平台留空（引擎待机）：不连流，画面区提示选择；选择后（healthz 回显平台）
+// 自动开流——「选择好了再加载页面」
+if(!HLTH.platform){
+if(live.mode!=='idle-plat'){stopLive();live.mode='idle-plat';
+ov('请选择云手机平台','菜单/侧栏 → 设置 → 平台 → 移动/联通')}
+}else if(live.mode==='idle-plat'){ov(null);startLive()}
 document.getElementById('stats').innerHTML=
-'<b>'+esc(j.account||'')+' · '+esc(j.platformLabel||'')+' · '+pt(j.page)+
+'<b>'+esc(j.account||'')+' · '+esc(j.platformLabel||'未选择')+' · '+pt(j.page)+
 (j.exited?' · 已退出云机!':'')+'</b>'+
 '<br><b>浏览器</b> '+esc(j.browser)+
 (j.title?'<br><b>页面</b> '+esc(String(j.title).slice(0,40)):'')+
@@ -280,11 +267,15 @@ document.getElementById('stats').innerHTML=
 (j.lastError?'<br><span class="warn"><b>错误</b> '+
 esc(String(j.lastError).slice(0,100))+'</span>':'')+
 (j.exited?'<br><span class="warn">已退出云机！</span>':'');
+// 首次 poll 决定是否开流（引擎待机时不自寻 500）
+if(live.mode==='none'){
+if(HLTH.platform){startLive()}
+else{live.mode='idle-plat';ov('请选择云手机平台','菜单/侧栏 → 设置 → 平台 → 移动/联通')}}
 }).catch(function(){document.getElementById('pdot').className='bad'});
 }
 poll();setInterval(poll,3000);
 
-// —— 帧率设置：引擎侧 Page.startScreencast maxFrameRate 即刻生效 ——
+// —— 帧率设置：引擎侧软件限帧即刻生效；状态行同步显示「实测/上限」——
 var FPSEL=document.getElementById('fpsel');
 function syncFpsSel(fps){
 if(!fps||FPSEL._t)return;
@@ -295,43 +286,30 @@ FPSEL.value=String(fps);
 }
 FPSEL.addEventListener('change',function(){
 var v=parseInt(this.value,10)||25;this._t=1;this.blur();
-post('/fps','value='+v).then(function(){ping('帧率已设为 '+v+' fps')})
+post('/fps','value='+v).then(function(){ping('帧率上限已设为 '+v+' fps（画面静止时按页面更新推送）')})
 .catch(function(){ping('帧率设置失败')});
 });
 
-// —— 平台切换（移动/联通）：healthz 同步 + POST /platform；
-// 引擎换首页/视口/保活脚本后重启云机实例（约 10 秒），流自动重连
+// —— 平台选择（启动无弹窗：平台留空待选，此处选好后引擎加载页面）——
+// healthz 同步 + POST /platform；引擎按新平台（首页/视口/保活脚本）启动或
+// 重启实例（冷启动约 10 秒），流自动重连
 var PLSEL=document.getElementById('psel');
 function syncPlatSel(p){
 if(!p||PLSEL._t)return;
-PLSEL.value=(p==='unicom')?'unicom':'mobile';
+PLSEL.value=(p==='unicom')?'unicom':(p==='mobile'?'mobile':'');
 }
-PLSEL.addEventListener('change',function(){
-var v=this.value;this._t=1;this.blur();
-wantPlatform(v,false);
-});
-
-// —— 平台首选（CPK_PLATFORM 环境变量已移除）：打开页面时选 ——
-// 首次打开弹选择层，选过即记住（localStorage）；之后打开若引擎平台与
-// 上次选择不同（如容器重启回默认）自动切回。手动切换也走同一入口
-var PICK=document.getElementById('pick');
-var PLTSTORED=localStorage.getItem('cpk_platform')||'';
 var PLTAP=false;
 function platLabel(v){return v==='unicom'?'联通云手机':'移动云手机'}
 function wantPlatform(v,silent){
-localStorage.setItem('cpk_platform',v);
-PICK.classList.add('hidden');
 if(PLTAP)return;PLTAP=true;
-var cur=HLTH.platform||'mobile';   // 引擎状态未知时按默认 mobile 判定
-if(cur!==v){
-post('/platform','value='+v).then(function(){ping('平台切换中：'+platLabel(v)+'（云机实例重启约 10 秒）',5000)})
-.catch(function(){ping('平台切换失败（引擎忙/重启中）');
-setTimeout(function(){PLTAP=false},8000)});
-}else if(!silent){ping('已选择 '+platLabel(v))}
+post('/platform','value='+v).then(function(){PLTAP=false;
+if(!silent)ping('已选择 '+platLabel(v)+'，云机启动中（约 10 秒）',5000)})
+.catch(function(){PLTAP=false;ping('平台选择失败（引擎忙/重启中）')});
 }
-if(PLTSTORED)PICK.classList.add('hidden');
-Array.prototype.forEach.call(document.querySelectorAll('.pk-b'),function(b){
-b.addEventListener('click',function(){wantPlatform(b.getAttribute('data-p'),false)});
+PLSEL.addEventListener('change',function(){
+var v=this.value;this._t=1;this.blur();
+if(!v){ping('请选择移动云手机或联通云手机');syncPlatSel(HLTH.platform);return}
+wantPlatform(v,false);
 });
 
 // —— 实时画面：fetch MJPEG 流 → JPEG SOI/EOI 切帧 → Blob 直显 ——
@@ -412,17 +390,19 @@ document.addEventListener('visibilitychange',function(){
 // 切后台/锁屏即断流：连接关闭 → 引擎最后一个订阅者离开 → 自动 stopScreencast
 // （无人观看＝零 JPEG 编码开销，CPU 即降）；回前台自动重连（画面新鲜不闪提示）
 if(document.hidden){stopLive();live.mode='paused'}
-else if(live.mode!=='live'){startLive()}
+else if(live.mode!=='live'&&live.mode!=='idle-plat'&&HLTH.platform){startLive()}
 });
-if(!document.hidden)startLive();  // 后台打开的标签页：回前台再连，落地即省 CPU
-// —— 状态行（fps 已收纳于此）：每秒刷新 fps/连接模式/页面状态 ——
+// 首连由首次 poll 决定（引擎待机时不自寻 500）；后台打开的标签页回前台再连
+// —— 状态行：每秒刷新实测/上限帧率/连接模式/页面状态 ——
+// 上限 = 引擎设置值（healthz.fps，/fps 可调）；实测 = 本秒收到的帧数——
+// 静止页面 Chrome 按内容更新出帧（可能远低于上限，属正常省流而非设置失效）
 setInterval(function(){
 var f=0,stale=false;
 if(live.mode==='live'){f=live.frames-live.last;live.last=live.frames;
 stale=Date.now()-lastFrameAt>3000}
-var mode=live.mode==='live'?'实时':live.mode==='shot'?'截图':live.mode==='paused'?'已暂停':'连接中';
-var fpsTxt=live.mode==='live'?(stale?'等帧…':f+' fps'):mode;
-document.getElementById('pst').textContent=pt(HLTH.page||'')+' · '+fpsTxt+' · '+mode;
+var mode=live.mode==='live'?'实时':live.mode==='shot'?'截图':live.mode==='paused'?'已暂停':live.mode==='idle-plat'?'待选平台':'连接中';
+var mtxt=live.mode==='live'?(stale?'等帧…':'实测 '+f):mode;
+document.getElementById('pst').textContent=pt(HLTH.page||'')+' · '+mtxt+' · 上限 '+(HLTH.fps||'—')+' fps';
 var dot=document.getElementById('pdot');
 if(!HLTH.ok&&HLTH.page){dot.className='bad'}
 else if(HLTH.page==='nav-error'||stale){dot.className='warn'}
@@ -506,8 +486,12 @@ var isEnd=phase==='end';
 if(PTR.size===0){
 TD.style.display='none';
 var gap=Date.now()-pt.at;
+// 整组释放也带最后触点：Chromium 的 tap 手势合成（touchend 后自动合成
+// mousedown/up/click）从 touchEnd 触点列表取落点——空列表会让合成 click
+// 落在 (0,0)，远端 H5 轻点全打在页面左上角（「点击没效果」根因；
+// 引擎侧 dispatch_touch 亦会补全，此处双保险）
 function fin(){if(flushEnd!==fin)return;flushEnd=null;
-tSend(isEnd?'end':'cancel','')}     // 全部抬起：空点=整组释放（久经验证路径）
+tSend(isEnd?'end':'cancel',fmtPt(pt))}
 // 轻点补足 ≥60ms 按下时长：贴近真实触摸节奏，保证 tap 手势识别（合成 click）
 if(GT===1&&isEnd&&gap<60){flushEnd=fin;setTimeout(fin,60-gap)}else{fin()}
 GT=0;
@@ -1102,10 +1086,16 @@ fn route(
                         )
                     }
                 }
-            } else {
+            } else if matches!(phase.as_str(), "start" | "move") {
+                // 单点兼容：phase + x/y（仅限按下/移动）。end/cancel 空点必须
+                // 走空点列表=整组释放——若在此造 x/y 缺省的 (0,0) 假点，会把
+                // 引擎跟踪的真实抬起坐标覆盖成 (0,0)，tap 合成 click 全打左上角
                 let x = num(&req.query, &req.form, "x");
                 let y = num(&req.query, &req.form, "y");
                 vec![TouchPoint { x, y, id: 1 }]
+            } else {
+                // end/cancel 无 ps：空点=整组释放（引擎侧补全在按触点坐标）
+                Vec::new()
             };
             control_void(ctrl, move |reply| ControlRequest::Touch { phase, points, reply })
         }
@@ -1605,6 +1595,12 @@ mod tests {
         assert!(body4.contains("homei"), "控制页缺移动端圆点菜单");
         assert!(body4.contains("id=\"pstat\""), "控制页缺状态面板（fps 收纳处）");
         assert!(body4.contains("id=\"fpsel\""), "控制页缺帧率设置");
+        // fps 状态行实测+上限双指标（静止页实测远低于上限不再误读为设置失效）
+        assert!(body4.contains("实测 "), "状态行缺实测帧率");
+        assert!(body4.contains("上限 "), "状态行缺帧率上限");
+        // 触摸整组释放带触点：空点 touchEnd 会让 Chromium tap 合成的 click
+        // 落在 (0,0)（远端 H5「点击没效果」根因）——控制页与引擎双保险
+        assert!(body4.contains("tSend(isEnd?'end':'cancel',fmtPt(pt))"), "整组释放应带触点");
         assert!(body4.contains("id=\"kbin\""), "控制页缺键盘输入框");
         assert!(!body4.contains("id=\"imode\""), "触控模式选择器应已移除（与 Windows 版一致）");
         assert!(!body4.contains("cpk_imode"), "触控模式 localStorage 残留应已移除");
@@ -1656,17 +1652,20 @@ mod tests {
             "POST /platform HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\nConnection: close\r\n\r\nvalue=unicom",
         );
         assert_eq!(st2, 403);
-        // 控制页接线：平台选择器 + healthz 同步 + POST
+        // 控制页接线：平台选择器（留空占位项）+ healthz 同步 + POST
         let (st3, body3) = http(port2, "GET /?token=s3cret HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
         assert_eq!(st3, 200);
         assert!(body3.contains("id=\"psel\""), "控制页缺平台选择器");
         assert!(body3.contains(">联通云手机</option>"), "控制页缺联通选项");
+        assert!(body3.contains("选择平台…</option>"), "控制页缺留空占位项");
         assert!(body3.contains("syncPlatSel"), "控制页缺平台同步逻辑");
         assert!(body3.contains("/platform"), "控制页缺平台切换接线");
-        // 平台首选：打开页面时选择（CPK_PLATFORM 环境变量已移除）
-        assert!(body3.contains("id=\"pick\""), "控制页缺平台首选层");
-        assert!(body3.contains("wantPlatform"), "控制页缺平台首选接线");
-        assert!(body3.contains("cpk_platform"), "控制页缺平台记忆");
+        // 启动无弹窗（平台留空待选）：无首选层/无 localStorage 记忆/无自动切回
+        assert!(!body3.contains("id=\"pick\""), "平台首选弹窗应已移除（启动无弹窗）");
+        assert!(!body3.contains("cpk_platform"), "平台 localStorage 记忆应已移除");
+        // 待选平台模式：引擎待机时画面区提示选择，选好后自动开流
+        assert!(body3.contains("idle-plat"), "控制页缺待选平台分支");
+        assert!(body3.contains("请选择云手机平台"), "控制页缺待选提示");
     }
 
     #[test]

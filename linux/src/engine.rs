@@ -373,24 +373,29 @@ enum SteadyOutcome {
 /// 表现为「点了回首页后再也点不动」。
 fn drain_ctrl_fail(ctrl_rx: &Receiver<ControlRequest>, reason: &str) {
     while let Ok(req) = ctrl_rx.try_recv() {
-        let r = reason.to_string();
-        match req {
-            ControlRequest::Screenshot { reply } => { let _ = reply.send(Err(r)); }
-            ControlRequest::Tap { reply, .. } => { let _ = reply.send(Err(r)); }
-            ControlRequest::Swipe { reply, .. } => { let _ = reply.send(Err(r)); }
-            ControlRequest::Touch { reply, .. } => { let _ = reply.send(Err(r)); }
-            ControlRequest::Mouse { reply, .. } => { let _ = reply.send(Err(r)); }
-            ControlRequest::KeyEvent { reply, .. } => { let _ = reply.send(Err(r)); }
-            ControlRequest::ClipGet { reply } => { let _ = reply.send(Err(r)); }
-            ControlRequest::SetFps { reply, .. } => { let _ = reply.send(Err(r)); }
-            ControlRequest::SetPlatform { reply, .. } => { let _ = reply.send(Err(r)); }
-            ControlRequest::TypeText { reply, .. } => { let _ = reply.send(Err(r)); }
-            ControlRequest::Key { reply, .. } => { let _ = reply.send(Err(r)); }
-            ControlRequest::Navigate { reply, .. } => { let _ = reply.send(Err(r)); }
-            ControlRequest::Reload { reply } => { let _ = reply.send(Err(r)); }
-            ControlRequest::ScreencastAttach { reply } => { let _ = reply.send(Err(r)); }
-            ControlRequest::ScreencastDetach { reply, .. } => { let _ = reply.send(Err(r)); }
-        }
+        fail_request(req, reason);
+    }
+}
+
+/// 单个控制请求快速失败（drain 与待机循环共用）：按变体回 Err
+fn fail_request(req: ControlRequest, reason: &str) {
+    let r = reason.to_string();
+    match req {
+        ControlRequest::Screenshot { reply } => { let _ = reply.send(Err(r)); }
+        ControlRequest::Tap { reply, .. } => { let _ = reply.send(Err(r)); }
+        ControlRequest::Swipe { reply, .. } => { let _ = reply.send(Err(r)); }
+        ControlRequest::Touch { reply, .. } => { let _ = reply.send(Err(r)); }
+        ControlRequest::Mouse { reply, .. } => { let _ = reply.send(Err(r)); }
+        ControlRequest::KeyEvent { reply, .. } => { let _ = reply.send(Err(r)); }
+        ControlRequest::ClipGet { reply } => { let _ = reply.send(Err(r)); }
+        ControlRequest::SetFps { reply, .. } => { let _ = reply.send(Err(r)); }
+        ControlRequest::SetPlatform { reply, .. } => { let _ = reply.send(Err(r)); }
+        ControlRequest::TypeText { reply, .. } => { let _ = reply.send(Err(r)); }
+        ControlRequest::Key { reply, .. } => { let _ = reply.send(Err(r)); }
+        ControlRequest::Navigate { reply, .. } => { let _ = reply.send(Err(r)); }
+        ControlRequest::Reload { reply } => { let _ = reply.send(Err(r)); }
+        ControlRequest::ScreencastAttach { reply } => { let _ = reply.send(Err(r)); }
+        ControlRequest::ScreencastDetach { reply, .. } => { let _ = reply.send(Err(r)); }
     }
 }
 
@@ -406,6 +411,38 @@ fn sleep_drain(dur: Duration, ctrl_rx: &Receiver<ControlRequest>, reason: &str) 
         thread::sleep(left.min(Duration::from_millis(200)));
     }
     drain_ctrl_fail(ctrl_rx, reason);
+}
+
+/// 平台待机等待（启动时平台留空）：不启动 Chromium，直到控制页经 /platform
+/// 选择平台。期间其他控制请求（截图/触摸/流订阅…）快速失败并明确提示
+/// 先选平台，而不是挂 20s 超时。
+/// 返回 true = 平台已选择（外层重启循环按新平台启动）；false = 停止信号。
+fn wait_platform(
+    shared: &Arc<SharedState>,
+    ctrl_rx: &Receiver<ControlRequest>,
+    logger: &Arc<Logger>,
+) -> bool {
+    loop {
+        if shared.stopping() {
+            return false;
+        }
+        while let Ok(req) = ctrl_rx.try_recv() {
+            match req {
+                ControlRequest::SetPlatform { platform, reply } => {
+                    if shared.set_platform(&platform) {
+                        logger.log(0, "sys", &format!("平台已选择 → {platform}，启动云机实例"));
+                        let _ = reply.send(Ok(()));
+                        return true;
+                    }
+                    let _ = reply.send(Err(format!("未知平台：{platform}")));
+                }
+                other => {
+                    fail_request(other, "平台未选择：请先在控制页「设置→平台」选择移动/联通");
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
 }
 
 fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<SharedState>, ctrl_rx: Receiver<ControlRequest>) {
@@ -424,6 +461,24 @@ fn engine_loop(cfg: &Config, report_port: u16, logger: Arc<Logger>, shared: Arc<
         // 每轮取当前平台全貌：/platform 切换后重启路径据此换视口/脚本/首页
         // （cfg 仅提供启动初值；SharedState 为运行时单一事实源）
         let cur = shared.platform();
+
+        // —— 0. 平台未选择：待机（不启动 Chromium；控制页「设置→平台」
+        //    选择后经 /platform 唤醒 → 回到循环顶按新平台全貌启动）——
+        if cur.platform.is_empty() {
+            shared.set_browser("idle");
+            shared.set_page("");
+            logger.log(
+                0,
+                "sys",
+                "平台未选择，引擎待机（不加载页面；控制页「设置→平台」选择移动/联通后自动启动）",
+            );
+            if wait_platform(&shared, &ctrl_rx, &logger) {
+                continue 'outer;
+            }
+            kill_child(&mut child, &logger);
+            return;
+        }
+
         let script = keepalive::build_init_script_for(&cur.platform, &cur.url, cfg, report_port);
 
         // —— 1. Chromium 进程 ——
@@ -1173,29 +1228,17 @@ fn dispatch_input(
 ) -> Result<(), String> {
     match req {
         ControlRequest::Touch { phase, points, reply } => {
-            // fire 即发即答：Input.dispatchTouchEvent 的应答无信息量，同步等 CDP
-            // 应答曾在弱机上占 1-5s（tap 手势窗口 ~300ms 早过了，轻点直接失效；
-            // 拖动点大量积压“不跟手”）——发后即忘，事件在 WS 管道保序，Chrome
-            // 按序消化，引擎线程占用 <0.1ms；WS 断裂由下轮 tick 的同步 call 发现
-            // （触摸指令在 HTTP 层已校验 phase）
-            let typ = match phase.as_str() {
-                "start" => "touchStart",
-                "move" => "touchMove",
-                "end" => "touchEnd",
-                _ => "touchCancel",
-            };
-            let pts: Vec<Value> = points
-                .iter()
-                .map(|p| json!({ "x": p.x, "y": p.y, "id": p.id }))
-                .collect();
+            // fire 即发即答（统一走 Cdp::dispatch_touch 的触点跟踪：
+            // 空点 end 自动补全在按触点，保证 Chromium tap 手势合成的
+            // mousedown/up/click 落在真实抬起位置而非 (0,0)——否则远端
+            // H5 轻点全打在页面左上角元素，表现为「点击没效果」）；
+            // move 高频，仅按下留日志、超时收紧防积压（渲染卡顿时移动点
+            // 丢弃链路继续，不占引擎 5s）
             if phase == "start" && !points.is_empty() {
                 logger.log(1, "click", &format!("触摸按下 ({:.0},{:.0}) id={}（在按 {} 点）", points[0].x, points[0].y, points[0].id, points.len()));
             }
-            cdp.fire_checked(
-                "Input.dispatchTouchEvent",
-                json!({ "type": typ, "touchPoints": pts }),
-                Some(session),
-            )?;
+            let pts: Vec<(f64, f64, i64)> = points.iter().map(|p| (p.x, p.y, p.id)).collect();
+            cdp.dispatch_touch(&phase, &pts, session)?;
             let _ = reply.send(Ok(()));
         }
         ControlRequest::Mouse { action, x, y, button, buttons, click_count, dx, dy, modifiers, reply } => {
@@ -1304,36 +1347,24 @@ fn dispatch_input(
     Ok(())
 }
 
-fn touch_event(
-    cdp: &mut Cdp,
-    session: &str,
-    typ: &str,
-    points: Value,
-) -> Result<(), String> {
-    // fire 即发：Input 事件应答无信息量，同步等会占引擎线程（与 /touch 同理由）
-    cdp.fire_checked(
-        "Input.dispatchTouchEvent",
-        json!({ "type": typ, "touchPoints": points }),
-        Some(session),
-    )
-}
 
 fn tap(cdp: &mut Cdp, session: &str, x: f64, y: f64) -> Result<(), String> {
-    touch_event(cdp, session, "touchStart", json!([{ "x": x, "y": y, "id": 1 }]))?;
+    // 抬起带触点（空点 touchEnd 会让 Chromium tap 合成的 click 落在 (0,0)）
+    cdp.dispatch_touch("start", &[(x, y, 1)], session)?;
     thread::sleep(Duration::from_millis(80));
-    touch_event(cdp, session, "touchEnd", json!([]))
+    cdp.dispatch_touch("end", &[(x, y, 1)], session)
 }
 
 fn swipe(cdp: &mut Cdp, session: &str, x1: f64, y1: f64, x2: f64, y2: f64) -> Result<(), String> {
-    touch_event(cdp, session, "touchStart", json!([{ "x": x1, "y": y1, "id": 1 }]))?;
+    cdp.dispatch_touch("start", &[(x1, y1, 1)], session)?;
     for i in 1..=8 {
         let t = i as f64 / 8.0;
         let xi = x1 + (x2 - x1) * t;
         let yi = y1 + (y2 - y1) * t;
-        touch_event(cdp, session, "touchMove", json!([{ "x": xi, "y": yi, "id": 1 }]))?;
+        cdp.dispatch_touch("move", &[(xi, yi, 1)], session)?;
         thread::sleep(Duration::from_millis(16));
     }
-    touch_event(cdp, session, "touchEnd", json!([]))
+    cdp.dispatch_touch("end", &[(x2, y2, 1)], session)
 }
 
 fn key_event(cdp: &mut Cdp, session: &str, key: &str) -> Result<(), String> {
