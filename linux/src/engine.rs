@@ -436,6 +436,13 @@ fn wait_platform(
                     }
                     let _ = reply.send(Err(format!("未知平台：{platform}")));
                 }
+                ControlRequest::SetFps { fps, reply } => {
+                    // 待机期同样接受帧率设置：值入共享状态（下次 CDP 装配
+                    // 恢复 + 稳态循环每周期同步）——不再因引擎待机被拒
+                    shared.set_fps(fps);
+                    logger.log(1, "sys", &format!("实时画面帧率设为 {fps}（引擎待机，启动后生效）"));
+                    let _ = reply.send(Ok(()));
+                }
                 other => {
                     fail_request(other, "平台未选择：请先在控制页「设置→平台」选择移动/联通");
                 }
@@ -681,6 +688,7 @@ fn steady_loop(
         logger,
         session,
         pending: VecDeque::new(),
+        tap_probe: None,
     };
     let mut next_tick = Instant::now();
     let mut next_sample = Instant::now() + Duration::from_secs(5);
@@ -691,6 +699,14 @@ fn steady_loop(
     loop {
         if shared.stopping() {
             return SteadyOutcome::Stop;
+        }
+        // 软限帧值同步：/fps 现由 HTTP 层直写共享状态，引擎每周期拉齐
+        // CDP（即使通知请求在待机/重启窗口丢失，也在 1 个周期内生效）
+        cdp.set_screencast_fps(shared.fps(), session);
+        // fire 类命令被 Chrome 拒绝的留痕（此前被当「无关应答」静默丢弃：
+        // startScreencast 导航窗口被拒、dispatchTouchEvent 点列表违规被拒等）
+        for e in cdp.take_error_replies() {
+            logger.log(0, "error", &e);
         }
         // Chromium 进程退出
         match child.try_wait() {
@@ -730,6 +746,24 @@ fn steady_loop(
         }
         if platform_switched {
             return SteadyOutcome::PlatformRestart;
+        }
+
+        // —— 点击命中探针（诊断）：最近一次触摸按下坐标 → elementFromPoint
+        //    探落点元素落日志。「点击没反应」时日志直接给出命中目标（骨架
+        //    屏/透明弹层/真实按钮），不再盲猜。连点合并为最新一次；eval
+        //    慢（真实云机页常态秒级）时失败静默（系统性故障另有错误留痕）——
+        //    等待期间继续泵输入，不占触摸通道 ——
+        if let Some((px, py)) = pump.tap_probe.take() {
+            let expr = String::from("(function(){try{var e=document.elementFromPoint(")
+                + &px.to_string()
+                + ","
+                + &py.to_string()
+                + ");var s=e?e.tagName+(e.id?'#'+e.id:'')+'.'+String(e.className).slice(0,70):'null';return 'hit:'+s}catch(_){return 'hit:err'}})()";
+            if let Ok(h) = eval_string_pumped(cdp, session, &expr, 3000, &mut pump) {
+                if !h.is_empty() {
+                    logger.log(1, "click", &format!("({:.0},{:.0}) → {}", px, py, h));
+                }
+            }
         }
 
         let now = Instant::now();
@@ -1051,6 +1085,9 @@ struct InputPump<'a> {
     logger: &'a Arc<Logger>,
     session: &'a str,
     pending: VecDeque<ControlRequest>,
+    /// 待探针的最近触摸按下坐标（诊断：elementFromPoint 看点击命中元素，
+    /// 稳态循环采样落日志——「点击没反应」时直接给出落点目标）
+    tap_probe: Option<(f64, f64)>,
 }
 
 impl<'a> InputPump<'a> {
@@ -1064,7 +1101,7 @@ impl<'a> InputPump<'a> {
                 self.pending.push_back(req);
                 continue;
             }
-            if let Err(e) = dispatch_input(cdp, self.session, self.shared, req, self.logger) {
+            if let Err(e) = dispatch_input(cdp, self.session, self.shared, req, self.logger, &mut self.tap_probe) {
                 self.logger.log(0, "error", &format!("输入泵分发失败：{e}"));
             }
         }
@@ -1110,7 +1147,7 @@ fn handle_control(
 ) -> Result<bool, String> {
     // 快通道分流：fire 即发（稳态循环直接调用与 eval 等待空窗泵入共用本入口）
     if is_fast(&req) {
-        dispatch_input(cdp, session, shared, req, logger)?;
+        dispatch_input(cdp, session, shared, req, logger, &mut pump.tap_probe)?;
         return Ok(false);
     }
     match req {
@@ -1156,7 +1193,7 @@ fn handle_control(
             let _ = reply.send(Ok(cut));
         }
         ControlRequest::ScreencastAttach { reply } => {
-            match cdp.screencast_subscribe(session) {
+            match cdp.screencast_subscribe_pumped(session, &mut |c| pump.drain(c)) {
                 Ok(sub) => {
                     // 先应答后补帧：HTTP 层零等待；弱机/引擎忙时截图再慢也只影响首帧
                     // 到达时刻，不影响连接建立（TTFB）
@@ -1181,7 +1218,7 @@ fn handle_control(
                                 return Err(e);
                             }
                             // 命令级失败（页面忙等）：screencast 事件帧照常会到，仅记日志
-                            logger.log(1, "sys", &format!("实时流首帧兑底截图未成：{e}"));
+                            logger.log(1, "sys", &format!("实时流首帧兜底截图未成：{e}"));
                         }
                     }
                 }
@@ -1225,17 +1262,18 @@ fn dispatch_input(
     shared: &Arc<SharedState>,
     req: ControlRequest,
     logger: &Arc<Logger>,
+    tap_probe: &mut Option<(f64, f64)>,
 ) -> Result<(), String> {
     match req {
         ControlRequest::Touch { phase, points, reply } => {
-            // fire 即发即答（统一走 Cdp::dispatch_touch 的触点跟踪：
-            // 空点 end 自动补全在按触点，保证 Chromium tap 手势合成的
-            // mousedown/up/click 落在真实抬起位置而非 (0,0)——否则远端
-            // H5 轻点全打在页面左上角元素，表现为「点击没效果」）；
-            // move 高频，仅按下留日志、超时收紧防积压（渲染卡顿时移动点
-            // 丢弃链路继续，不占引擎 5s）
+            // 协议规定 touchEnd/touchCancel 不得携带触点（整组释放，引擎侧
+            // track_touch_points 保证）；move 只回放已跟踪触点。fire 即发即答；
+            // move 高频仅按下留日志（错误应答由 error_replies 通道留痕）
             if phase == "start" && !points.is_empty() {
-                logger.log(1, "click", &format!("触摸按下 ({:.0},{:.0}) id={}（在按 {} 点）", points[0].x, points[0].y, points[0].id, points.len()));
+                logger.log(1, "click", &format!("触摸按下 ({:.0},{:.0}) id={}", points[0].x, points[0].y, points[0].id));
+                // 诊断探针：记下按下坐标，稳态循环用 elementFromPoint
+                // 探落点元素（点击无反应时日志直接给出命中目标）
+                *tap_probe = Some((points[0].x, points[0].y));
             }
             let pts: Vec<(f64, f64, i64)> = points.iter().map(|p| (p.x, p.y, p.id)).collect();
             cdp.dispatch_touch(&phase, &pts, session)?;
@@ -1349,10 +1387,11 @@ fn dispatch_input(
 
 
 fn tap(cdp: &mut Cdp, session: &str, x: f64, y: f64) -> Result<(), String> {
-    // 抬起带触点（空点 touchEnd 会让 Chromium tap 合成的 click 落在 (0,0)）
+    // 规范形态（puppeteer 同款）：start 带点、短按、end 空点整组释放
+    // （协议规定 touchEnd/touchCancel 不得携带触点）
     cdp.dispatch_touch("start", &[(x, y, 1)], session)?;
     thread::sleep(Duration::from_millis(80));
-    cdp.dispatch_touch("end", &[(x, y, 1)], session)
+    cdp.dispatch_touch("end", &[], session)
 }
 
 fn swipe(cdp: &mut Cdp, session: &str, x1: f64, y1: f64, x2: f64, y2: f64) -> Result<(), String> {
@@ -1364,7 +1403,7 @@ fn swipe(cdp: &mut Cdp, session: &str, x1: f64, y1: f64, x2: f64, y2: f64) -> Re
         cdp.dispatch_touch("move", &[(xi, yi, 1)], session)?;
         thread::sleep(Duration::from_millis(16));
     }
-    cdp.dispatch_touch("end", &[(x2, y2, 1)], session)
+    cdp.dispatch_touch("end", &[], session)
 }
 
 fn key_event(cdp: &mut Cdp, session: &str, key: &str) -> Result<(), String> {
@@ -1669,6 +1708,75 @@ fn kill_child(child: &mut Option<Child>, logger: &Arc<Logger>) {
 mod tests {
     use super::*;
 
+    fn test_cfg() -> crate::config::Config {
+        crate::config::Config {
+            account: "t".into(),
+            platform: "mobile".into(),
+            platform_label: "移动云手机".into(),
+            url: "https://x".into(),
+            width: 414,
+            height: 896,
+            data_dir: "/data".into(),
+            profile_dir: "/data/profile-t".into(),
+            log_dir: "/data/logs".into(),
+            keep_alive: true,
+            interval_ms: 5000,
+            simulate_activity: true,
+            block_context_menu: true,
+            page_timer: false,
+            report_port: 8088,
+            bind: "0.0.0.0".into(),
+            control_token: String::new(),
+            cdp_port: 0,
+            chrome_bin: "chrome-headless-shell".into(),
+            no_sandbox: true,
+            ua_mode: "windows".into(),
+            lang: "zh-CN".into(),
+            tz: "Asia/Shanghai".into(),
+            extra_chrome_args: String::new(),
+            tick_fail_reload: 10,
+            frozen_reload: 3,
+            beat_stale_sec: 180,
+            fps: 25,
+            selftest: false,
+            smoke: false,
+            smoke_seconds: 60,
+        }
+    }
+
+    #[test]
+    fn wait_platform_accepts_fps_and_wakes_on_platform() {
+        // 平台待机期（启动时平台留空）：
+        // - SetFps 被接受（不再快速失败）：值入共享状态，下次装配恢复 +
+        //   稳态周期同步——「引擎待机时设帧率被拒但控制页报成功」的修复回归
+        // - 其他控制请求仍快速失败并提示先选平台
+        // - SetPlatform 唤醒待机循环（返回 true = 引擎按新平台启动）
+        let cfg = test_cfg();
+        let shared = SharedState::new(&cfg);
+        assert_eq!(shared.fps(), 25);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sh = shared.clone();
+        let log_dir = std::env::temp_dir().join(format!("cpk-wp-{}", std::process::id()));
+        let logger = std::sync::Arc::new(crate::logger::Logger::new(log_dir.clone()));
+        let h = std::thread::spawn(move || wait_platform(&sh, &rx, &logger));
+        // 待机期设帧率：被接受且生效
+        let (rtx, rrx) = std::sync::mpsc::channel();
+        tx.send(ControlRequest::SetFps { fps: 10, reply: rtx }).unwrap();
+        assert!(rrx.recv_timeout(std::time::Duration::from_secs(2)).unwrap().is_ok(), "待机期 SetFps 应被接受");
+        assert_eq!(shared.fps(), 10, "帧率应写入共享状态");
+        // 其他控制请求：快速失败 + 明确提示
+        let (rtx2, rrx2) = std::sync::mpsc::channel();
+        tx.send(ControlRequest::Reload { reply: rtx2 }).unwrap();
+        let e = rrx2.recv_timeout(std::time::Duration::from_secs(2)).unwrap().unwrap_err();
+        assert!(e.contains("平台未选择"), "提示应含平台未选择：{e}");
+        // 平台选择 → 唤醒
+        let (rtx3, rrx3) = std::sync::mpsc::channel();
+        tx.send(ControlRequest::SetPlatform { platform: "mobile".into(), reply: rtx3 }).unwrap();
+        assert!(rrx3.recv_timeout(std::time::Duration::from_secs(2)).unwrap().is_ok());
+        assert!(h.join().unwrap(), "平台选择后待机循环应唤醒");
+        assert_eq!(shared.platform().platform, "mobile");
+        let _ = std::fs::remove_dir_all(&log_dir);
+    }
     #[test]
     fn health_json_exposes_title_and_last_status() {
         // 对齐 Windows 版：页面标题 + 上报状态暴露给控制页（标题显示/状态迁移通知）

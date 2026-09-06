@@ -210,9 +210,11 @@ fn selftest(cfg: &config::Config, logger: &Arc<Logger>) -> i32 {
             checks.push(("server: healthz title/lastStatus 字段", false));
         }
     }
-    // 实时画面流端点：自检无引擎 → 订阅 8s 宽限后 504（证明端点与控制通道已接线；
-    // 宽限覆盖引擎线程慢 eval/启动窗口，见 stream_mjpeg 注释）
-    match util::http_get(p, "/stream.mjpg", 12000) {
+    // 实时画面流端点：自检无引擎 → 订阅 20s 宽限后 504（证明端点与控制通道已
+    // 接线；宽限覆盖平台冷启动全程 ~13s，见 stream_mjpeg 注释）。selftest 的
+    // http_get 每次读超时上限 10s，但按总 deadline 循环重读——预算给足 25s
+    // 确保 20s 的 504 能被收到（曾用 12s 预算与 20s 宽限不匹配而误判失败）
+    match util::http_get(p, "/stream.mjpg", 25000) {
         Ok((st, body)) if st == 500 || st == 504 => {
             checks.push((
                 "server: 实时画面流端点",

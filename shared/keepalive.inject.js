@@ -145,6 +145,27 @@
   if ('ontouchstart' in window) {
     tsOn = true;
     var tsEl = null, tsDown = false;
+    // —— 防双发（Linux 无头版实测根因）——
+    // 宿主经 CDP 派发的真实触摸轻点（touchstart→touchend）后，Chrome 按
+    // 规范自动合成鼠标仿真事件（mousedown/mouseup/click）。若不识别这批
+    // 「由触摸合成的鼠标事件」，下方 mousedown→touchstart 转换会把它们
+    // 再转一轮触摸 → 页面每次轻点收到两套 touchstart/touchend，开/关型
+    // 操作被二次触发相互抵消，表现为「点击没反应」（Windows 版输入源是
+    // 鼠标、单次转换无此问题；Linux 版输入源是真实触摸，必须防双发）。
+    // 识别：真实（isTrusted）touchend/touchcancel 在 window 捕获层记时；
+    // 其后 80ms 内的 mousedown/mouseup 即该次轻点的鼠标仿真事件，跳过转换。
+    // isTrusted 同时把本模拟器自派的合成 touchend 排除在外（否则真实鼠标
+    // 快速连击会被误判跳过）。
+    var tsLastRealEnd = 0;
+    window.addEventListener('touchend', function(ev){
+      if (ev.isTrusted) tsLastRealEnd = Date.now();
+    }, true);
+    window.addEventListener('touchcancel', function(ev){
+      if (ev.isTrusted) tsLastRealEnd = Date.now();
+    }, true);
+    function tsFromTouchSynth(){
+      return tsLastRealEnd && (Date.now() - tsLastRealEnd) < 80;
+    }
     // 豁免区保持原生鼠标行为：页面约定的 [data-no-touch-simulate] +
     // 表单/可编辑元素（输入框需要原生焦点与选字）
     function tsSkip(el){
@@ -189,6 +210,8 @@
     function tsHandler(type){
       return function(me){
         try {
+          // 触摸轻点合成的鼠标事件：不再转回触摸（防双发，见上方说明）
+          if (tsFromTouchSynth()) return;
           if (me.button !== undefined && me.button !== 0) return; // 只处理左键
           if (me.type === 'mousedown') tsDown = true;
           if (me.type === 'mouseup') tsDown = false;

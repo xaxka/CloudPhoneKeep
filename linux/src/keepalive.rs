@@ -105,6 +105,17 @@ mod tests {
     }
 
     #[test]
+    fn touch_double_fire_guard_present() {
+        // 防双发守卫（Linux 点击无反应的另一半根因）：真实触摸轻点后
+        // Chrome 合成的 mousedown/mouseup 不得再被模拟器转一轮触摸
+        // （页面收到双套 touch → 开/关型操作二次触发相互抵消）
+        let s = build_init_script(&cfg(), 8088);
+        assert!(s.contains("tsFromTouchSynth"), "缺防双发判定函数");
+        assert!(s.contains("ev.isTrusted"), "缺 isTrusted 真实事件判别");
+        assert!(s.contains("tsLastRealEnd"), "缺真实触摸时间戳跟踪");
+    }
+
+    #[test]
     fn port_injected() {
         let s = build_init_script(&cfg(), 1234);
         assert!(s.contains("\"port\":1234"));

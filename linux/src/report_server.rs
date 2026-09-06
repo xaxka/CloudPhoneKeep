@@ -211,7 +211,13 @@ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function U(p){var u=new URL(p,location.origin);if(TK)u.searchParams.set('token',TK);return u}
 function HDR(){return TK?{'x-cpk-token':TK}:{}}
 function post(p,body){return fetch(U(p),{method:'POST',
-headers:Object.assign({'content-type':'application/x-www-form-urlencoded'},HDR()),body:body})}
+headers:Object.assign({'content-type':'application/x-www-form-urlencoded'},HDR()),body:body})
+.then(function(r){
+// 非 2xx 转为 reject：否则 .then 成功分支对 500（引擎忙/待机）也报
+// 「已设为/已回首页」——谎报成功掩盖真实故障（fps 设置实测踩坑）
+if(!r.ok)return r.text().catch(function(){return ''}).then(function(t){
+throw new Error((t&&t.slice(0,120))||('HTTP '+r.status))});
+return r})}
 function ping(t,dur){var el=document.getElementById('toast');el.textContent=t;el.style.opacity=1;
 setTimeout(function(){el.style.opacity=0},dur||1500)}
 function ov(t,s){var o=document.getElementById('overlay');
@@ -287,7 +293,7 @@ FPSEL.value=String(fps);
 FPSEL.addEventListener('change',function(){
 var v=parseInt(this.value,10)||25;this._t=1;this.blur();
 post('/fps','value='+v).then(function(){ping('帧率上限已设为 '+v+' fps（画面静止时按页面更新推送）')})
-.catch(function(){ping('帧率设置失败')});
+.catch(function(e){ping('帧率设置失败：'+e.message)});
 });
 
 // —— 平台选择（启动无弹窗：平台留空待选，此处选好后引擎加载页面）——
@@ -486,18 +492,19 @@ var isEnd=phase==='end';
 if(PTR.size===0){
 TD.style.display='none';
 var gap=Date.now()-pt.at;
-// 整组释放也带最后触点：Chromium 的 tap 手势合成（touchend 后自动合成
-// mousedown/up/click）从 touchEnd 触点列表取落点——空列表会让合成 click
-// 落在 (0,0)，远端 H5 轻点全打在页面左上角（「点击没效果」根因；
-// 引擎侧 dispatch_touch 亦会补全，此处双保险）
+// 整组释放：end/cancel 恒空点（CDP 协议规定 touchEnd/touchCancel
+// 不得携带触点——带点形态违反协议点列表约束会被 Chrome 拒绝，页面
+// 收不到 tap 收尾，远端 H5 表现为「点击没反应」；puppeteer 同款
+// 规范形态）
 function fin(){if(flushEnd!==fin)return;flushEnd=null;
-tSend(isEnd?'end':'cancel',fmtPt(pt))}
+tSend(isEnd?'end':'cancel','')}
 // 轻点补足 ≥60ms 按下时长：贴近真实触摸节奏，保证 tap 手势识别（合成 click）
 if(GT===1&&isEnd&&gap<60){flushEnd=fin;setTimeout(fin,60-gap)}else{fin()}
 GT=0;
 }else{
-// 还有手指按着（双指缩放中途抬一指）：仅释放该触点，手势继续
-tSend(isEnd?'end':'cancel',fmtPt(pt));
+// 还有手指按着（双指中途抬一指）：协议限制 end 只能整组释放
+// （CDP 无法表达「只抬一指」，与 puppeteer 同款限制），释放整组
+tSend(isEnd?'end':'cancel','');
 }
 }
 
@@ -714,9 +721,11 @@ ping('无剪贴板权限：已弹出输入框，Ctrl+V 或长按粘贴')});
 }
 
 // —— 面板操作 ——
-function doReload(){post('/reload','').then(function(){ping('已刷新页面')})}
+function doReload(){post('/reload','').then(function(){ping('已刷新页面')})
+.catch(function(e){ping('刷新失败：'+e.message)})}
 function doNav(){if(!HOME){ping('未知首页地址');return}
-post('/nav','url='+encodeURIComponent(HOME)).then(function(){ping('已回首页')})}
+post('/nav','url='+encodeURIComponent(HOME)).then(function(){ping('已回首页')})
+.catch(function(e){ping('回首页失败：'+e.message)})}
 function fs(){var el=document.documentElement;
 if(document.fullscreenElement){document.exitFullscreen()}
 else if(el.requestFullscreen){el.requestFullscreen()}}
@@ -826,7 +835,9 @@ fn stream_mjpeg(stream: &mut TcpStream, ctrl: &Sender<ControlRequest>, logger: &
         respond(stream, 500, "text/plain; charset=utf-8", "引擎不可用".as_bytes());
         return;
     }
-    let (sub_id, frame_box) = match rx.recv_timeout(Duration::from_secs(8)) {
+    // 平台冷启动全程 ~13s（Chromium 启动 + CDP 装配 + 导航），等待窗放宽到
+    // 20s：8s 会在引擎刚到稳态前掐掉订阅，多走一轮「截图模式 → 8s 后重连」
+    let (sub_id, frame_box) = match rx.recv_timeout(Duration::from_secs(20)) {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
             respond(
@@ -1075,7 +1086,12 @@ fn route(
                 .or_else(|| req.form.get("ps"))
                 .cloned()
                 .unwrap_or_default();
-            let points: Vec<TouchPoint> = if !ps.is_empty() {
+            let points: Vec<TouchPoint> = if matches!(phase.as_str(), "end" | "cancel") {
+                // 协议规定 touchEnd/touchCancel 不得携带触点（整组释放）：
+                // 忽略 ps——带点释放形态违反协议点列表约束会被 Chrome 拒绝，
+                // 页面收不到 touchend 的 tap 收尾（轻点「没反应」的直接根源）
+                Vec::new()
+            } else if !ps.is_empty() {
                 match parse_touch_points(&ps) {
                     Some(v) => v,
                     None => {
@@ -1086,16 +1102,11 @@ fn route(
                         )
                     }
                 }
-            } else if matches!(phase.as_str(), "start" | "move") {
-                // 单点兼容：phase + x/y（仅限按下/移动）。end/cancel 空点必须
-                // 走空点列表=整组释放——若在此造 x/y 缺省的 (0,0) 假点，会把
-                // 引擎跟踪的真实抬起坐标覆盖成 (0,0)，tap 合成 click 全打左上角
+            } else {
+                // start/move 单点兼容：phase + x/y
                 let x = num(&req.query, &req.form, "x");
                 let y = num(&req.query, &req.form, "y");
                 vec![TouchPoint { x, y, id: 1 }]
-            } else {
-                // end/cancel 无 ps：空点=整组释放（引擎侧补全在按触点坐标）
-                Vec::new()
             };
             control_void(ctrl, move |reply| ControlRequest::Touch { phase, points, reply })
         }
@@ -1201,8 +1212,14 @@ fn route(
             control_void(ctrl, move |reply| ControlRequest::SetPlatform { platform: p, reply })
         }
         "/fps" => {
-            // 帧率上限：1..=60；引擎侧软件限帧即刻生效（Chrome 152 的
-            // startScreencast maxFrameRate 参数实测无效，见 cdp.rs push_frame）
+            // 帧率上限：1..=60；引擎侧软件限帧（Chrome 152 的
+            // startScreencast maxFrameRate 参数实测无效，见 cdp.rs push_frame）。
+            // 共享状态由 HTTP 层直写：引擎待机/重启窗口期设置同样立即生效
+            // （下次 CDP 装配恢复 + 稳态循环每周期同步），不再依赖引擎控制
+            // 通道存活——此前待机期设帧率被引擎快速失败，控制页却报
+            // 「已设为 N」（post 不检查 r.ok 的谎报），healthz 仍回旧值
+            // （用户实测「设置 10 显示上限 25」的根因）。
+            // 引擎在线时的即刻生效通知仍尽力转发（失败由稳态同步兜底）。
             let fps = unum(&req.query, &req.form, "value");
             if !(1..=60).contains(&fps) {
                 return (
@@ -1212,7 +1229,10 @@ fn route(
                 );
             }
             let fps = fps as u32;
-            control_void(ctrl, move |reply| ControlRequest::SetFps { fps, reply })
+            shared.set_fps(fps);
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let _ = ctrl.send(ControlRequest::SetFps { fps, reply: tx });
+            (200, "text/plain".into(), b"ok".to_vec())
         }
         "/type" => {
             let text = req
@@ -1598,9 +1618,10 @@ mod tests {
         // fps 状态行实测+上限双指标（静止页实测远低于上限不再误读为设置失效）
         assert!(body4.contains("实测 "), "状态行缺实测帧率");
         assert!(body4.contains("上限 "), "状态行缺帧率上限");
-        // 触摸整组释放带触点：空点 touchEnd 会让 Chromium tap 合成的 click
-        // 落在 (0,0)（远端 H5「点击没效果」根因）——控制页与引擎双保险
-        assert!(body4.contains("tSend(isEnd?'end':'cancel',fmtPt(pt))"), "整组释放应带触点");
+        // 触摸整组释放恒空点（CDP 协议规定 touchEnd/touchCancel 不得携带触点，
+        // 带点形态会被 Chrome 拒绝——页面收不到 tap 收尾，「点击没反应」
+        // 的直接根源）——控制页与引擎双保险
+        assert!(body4.contains("tSend(isEnd?'end':'cancel','')"), "整组释放应恒空点");
         assert!(body4.contains("id=\"kbin\""), "控制页缺键盘输入框");
         assert!(!body4.contains("id=\"imode\""), "触控模式选择器应已移除（与 Windows 版一致）");
         assert!(!body4.contains("cpk_imode"), "触控模式 localStorage 残留应已移除");
@@ -1700,7 +1721,9 @@ mod tests {
             "GET /kbd?t=down&key=a&code=KeyA&vk=65&text=a&m=0 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
         );
         assert_eq!(st, 500);
-        // /fps：越界 → 400；合法 → 500（引擎不可用）
+        // /fps：越界 → 400；合法 → 200 且直写共享状态（引擎不在线也生效——
+        // 待机/重启窗口期设帧率不再丢失，healthz 立即回显新值）
+        let (port, shared, _tx) = start_server("");
         let (st, _) = http(
             port,
             "GET /fps?value=99 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
@@ -1710,7 +1733,8 @@ mod tests {
             port,
             "GET /fps?value=10 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
         );
-        assert_eq!(st, 500);
+        assert_eq!(st, 200, "fps 应由 HTTP 层直写共享状态，引擎不在线也成功");
+        assert_eq!(shared.snapshot().fps, 10, "帧率应写入共享状态并回显 healthz");
         // /clip：引擎不可用 → 500
         let (st, body) = http(
             port,
