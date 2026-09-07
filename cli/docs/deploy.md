@@ -3,8 +3,13 @@
 一个实例 = 一个账号（Docker 容器或裸机进程）。镜像：`ghcr.io/xaxka/cloudphonekeep`（**多架构**：
 `linux/amd64` + `linux/arm64` 单一 manifest，x86 服务器与 ARM 主机/Apple
 Silicon 均原生运行，`docker pull` 自动选架构）。不想用 Docker 的机器
-（已装 chrome-headless-shell）可直接跑 CI 同源发布的 musl 静态二进制，
-见 [`../README.md`](../README.md)「裸机直跑」章节。
+用一键安装脚本（自动下载引擎二进制与 chrome-headless-shell、检查运行库、
+装完自检，googleapis 失败自动换 npmmirror 国内镜像）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xaxka/CloudPhoneKeep/main/cli/install.sh | bash
+# 选项与裸机细节见 ../README.md「裸机直跑」章节。
+```
 
 ## 快速开始
 

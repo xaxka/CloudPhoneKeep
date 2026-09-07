@@ -43,8 +43,14 @@ docker run -d --name cpk -v cpk:/data -p 127.0.0.1:8088:8088 \
    登录态持久化在 volume，之后自动保活
 3. 健康检查：`curl http://127.0.0.1:8088/healthz`
 
-单账号开箱即用（`CPK_ACCOUNT` 默认 `1`，可不设）。多实例多账号、裸机直跑
-（musl 静态二进制）、运行时调优（帧率/画质/分辨率/空闲降频）见 [cli/README.md](cli/README.md)。
+单账号开箱即用（`CPK_ACCOUNT` 默认 `1`，可不设）。不想用 Docker？裸机一键安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xaxka/CloudPhoneKeep/main/cli/install.sh | bash
+```
+
+多实例多账号、裸机细节（systemd/多架构）、运行时调优（帧率/画质/分辨率/空闲降频）
+见 [cli/README.md](cli/README.md)。
 
 ## 构建与发布
 

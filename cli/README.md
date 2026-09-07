@@ -78,13 +78,26 @@ docker logs -f cpk     # 诊断日志实时镜像
 
 ## 裸机直跑（无 Docker）
 
-CI 每次推送发布**与镜像同源同构**的 musl 静态二进制到 `dev` Release：
-`cloudphonekeep-linux-amd64` / `cloudphonekeep-linux-arm64`（glibc 机器也能跑，
-musl 静态自包含 libc）。机器上只需要装好 chrome-headless-shell：
+**一键安装**（推荐）：自动下载本机架构（amd64/arm64）的引擎二进制与
+chrome-headless-shell、检查运行库、装完自检（googleapis 下载失败自动换
+npmmirror 国内镜像）：
 
 ```bash
-# 1. 取二进制（或源码编译：仓库根 cargo build --release
-#    --target x86_64-unknown-linux-musl，纯 Rust 无 C 依赖）
+curl -fsSL https://raw.githubusercontent.com/xaxka/CloudPhoneKeep/main/cli/install.sh | bash
+# root 默认装 /opt/cloudphonekeep，普通用户装 ~/.local/cloudphonekeep
+# 常用选项（管道方式加在 bash 后）：
+#   ... | bash -s -- --systemd    # root：顺带装 systemd 模板单元 cpk@<账号>
+#   ... | bash -s -- --chrome-bin /path/to/chrome-headless-shell   # 复用已有浏览器
+#   ... | bash -s -- --uninstall  # 卸载
+# 之后直接运行：cloudphonekeep（或 bash install.sh --uninstall 卸载）
+```
+
+手动安装（想自己控制每一步）：CI 每次推送发布**与镜像同源同构**的 musl 静态
+二进制到 `dev` Release：`cloudphonekeep-linux-amd64` / `cloudphonekeep-linux-arm64`
+（glibc 机器也能跑，musl 静态自包含 libc）。机器上只需要装好 chrome-headless-shell：
+
+```bash
+# 1. 取二进制（或源码编译：见 docs/build.md）
 curl -LO https://github.com/xaxka/CloudPhoneKeep/releases/download/dev/cloudphonekeep-linux-amd64
 chmod +x cloudphonekeep-linux-amd64
 
@@ -118,7 +131,10 @@ curl http://127.0.0.1:8088/healthz
 - 数据目录：默认 `~/.local/share/cloudphonekeep`（容器里是 `/data`）
 
 多实例多账号：不同 `CPK_ACCOUNT` + `CPK_REPORT_PORT`（8088/8089…）各起一个进程，
-数据目录按账号自动隔离（`profile-<账号>`）。systemd 常驻示例：
+数据目录按账号自动隔离（`profile-<账号>`）。systemd 常驻（一键安装已带模板，
+`systemctl enable --now cpk@138xxxx1234` 启动，多实例端口用
+`systemctl edit cpk@<账号>` 追加 `Environment=CPK_REPORT_PORT=8089`）；
+或手写单元：
 
 ```ini
 # /etc/systemd/system/cpk@.service（cpk@138xxxx1234 启动）
@@ -141,6 +157,7 @@ WantedBy=multi-user.target
 cli/
 ├── Dockerfile                # 多阶段多架构：rust:1-alpine 交叉编译（rust-lld）→ 运行层 + 无头浏览器
 ├── docker-compose.yml        # 一账号一服务（含多账号示例）
+├── install.sh                # 裸机一键安装（引擎 + chrome-headless-shell + 可选 systemd）
 ├── README.md                 # 本文件
 ├── control_page.html         # 控制页模板（CLI 专属；report_server.rs include_str! 内嵌）
 ├── Cargo.toml                # 依赖 cloudphonekeep-shared（../shared）+ serde_json；锁文件在仓库根
