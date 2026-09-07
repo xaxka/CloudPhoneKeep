@@ -58,6 +58,8 @@ mod tests {
             report_port: 8088,
             bind: "0.0.0.0".into(),
             control_token: String::new(),
+            auth_user: String::new(),
+            auth_pass: String::new(),
             cdp_port: 0,
             chrome_bin: "chrome-headless-shell".into(),
             no_sandbox: true,

@@ -15,8 +15,9 @@ CLI 版全部配置走环境变量；Windows 版配置见
 | `CPK_BLOCK_CONTEXT_MENU` | `1` | 屏蔽页面右键菜单 |
 | `CPK_PAGE_TIMER` | `0` | 页内 setInterval 驱动（默认关：宿主 CDP 看门狗驱动） |
 | `CPK_REPORT_PORT` | `8088` | 回环上报/控制页端口（0=自动） |
-| `CPK_BIND` | `0.0.0.0` | 上述端口绑定地址（`127.0.0.1` 最保守；默认配合端口映射/防火墙） |
+| `CPK_BIND` | `127.0.0.1`（镜像内 ENV 固定 `0.0.0.0`） | 上述端口绑定地址；要从其他机器访问控制页设 `0.0.0.0`（务必同时设鉴权：`CPK_AUTH_USER`/`CPK_AUTH_PASS` 或 `CPK_CONTROL_TOKEN`） |
 | `CPK_CONTROL_TOKEN` | 空 | 控制页/截图/触摸端点的访问令牌（强烈建议公网可达时设置） |
+| `CPK_AUTH_USER` / `CPK_AUTH_PASS` | 空 | HTTP Basic Auth（两者同时非空才启用）：控制页/画面流/控制端点弹账号密码登录框；`/healthz` `/status` `/report` `/log` 保持开放（探活与页内脚本上报通道）。与 `CPK_CONTROL_TOKEN` 可叠加（先过 Basic 再过 token） |
 | `CPK_CDP_PORT` | `0` | Chromium DevTools 固定端口（0=自动分配；固定端口可用于外部 DevTools） |
 | `CPK_CHROME_BIN` | `chrome-headless-shell`（按 PATH 查找；镜像内 ENV 设为绝对路径 `/opt/chrome-headless-shell/chrome-headless-shell`） | 浏览器二进制路径（调试时可指向其他 Chrome） |
 | `CPK_NO_SANDBOX` | `1` | 容器内通常需关闭 Chromium 沙箱 |

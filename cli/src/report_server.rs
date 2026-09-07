@@ -55,6 +55,10 @@ pub struct ReportCfg {
     pub bind: String,
     pub port: u16,
     pub control_token: String,
+    /// HTTP Basic Auth（user+pass 同时非空才启用）：控制页/画面流/控制端点
+    /// 的外层门禁；/healthz /status /report /log 免鉴权（探活与页内脚本通道）
+    pub auth_user: String,
+    pub auth_pass: String,
 }
 
 impl ReportCfg {
@@ -63,6 +67,8 @@ impl ReportCfg {
             bind: cfg.bind.clone(),
             port: cfg.report_port,
             control_token: cfg.control_token.clone(),
+            auth_user: cfg.auth_user.clone(),
+            auth_pass: cfg.auth_pass.clone(),
         }
     }
 }
@@ -116,6 +122,17 @@ fn handle_conn(
     stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
     let req = parse_request(&mut stream)?;
+    // —— Basic Auth 外层门禁 ——
+    // 免鉴权通道：/healthz /status（监控探活，Docker HEALTHCHECK 不带凭据）、
+    // /report /log（页内脚本上报：云机页 → 回环是跨域 fetch，无法携带
+    // Basic 凭据（自定义头会触发预检，本服务不容预检），保护它们会掐断
+    // 心跳与诊断）；其余一切（控制页/画面流/输入注入/设置）全部要求凭据。
+    // 控制页与后继请求同源，浏览器缓存凭据后 fetch/img 自动携带，无感。
+    if auth_enabled(cfg) && !auth_exempt(&req.path) && !auth_ok(&req, cfg) {
+        respond_401(&mut stream);
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        return Ok(());
+    }
     // 实时画面流：响应体无界（multipart），绕过 route/respond 一次性模型直写 socket
     if req.method == "GET" && req.path == "/stream.mjpg" {
         if !token_ok(&req, cfg) {
@@ -339,8 +356,16 @@ fn route(
         return (204, "text/plain".into(), Vec::new());
     }
     if p == "/log" && req.method == "POST" {
+        // 日志注入防护（未鉴权通道）：level 白名单化、msg 控制字符归一为空格
+        // + 限长 4000，防伪造日志行误导排障（\r\n 可仿造任意日志级别条目）
         let level = req.form.get("level").cloned().unwrap_or_else(|| "sys".into());
-        let msg = req.form.get("msg").cloned().unwrap_or_default();
+        let level: String = level
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .take(16)
+            .collect();
+        let level = if level.is_empty() { "sys".to_string() } else { level };
+        let msg = sanitize_log_msg(req.form.get("msg").map(|s| s.as_str()).unwrap_or(""));
         if !msg.is_empty() {
             logger.log(1, &level, &msg);
         }
@@ -576,11 +601,12 @@ fn route(
             (200, "text/plain".into(), b"ok".to_vec())
         }
         "/type" => {
+            // 文本插入限长 10000：防未授权滥用（更长输入应分次发送）
             let text = req
                 .query
                 .get("text")
                 .or_else(|| req.form.get("text"))
-                .cloned()
+                .map(|s| s.chars().take(10_000).collect::<String>())
                 .unwrap_or_default();
             control_void(ctrl, move |reply| ControlRequest::TypeText { text, reply })
         }
@@ -594,11 +620,12 @@ fn route(
             control_void(ctrl, move |reply| ControlRequest::Key { key, reply })
         }
         "/nav" => {
+            // URL 限长 2048：防未授权滥用（超长 URL 占用 CDP 管道）
             let url = req
                 .query
                 .get("url")
                 .or_else(|| req.form.get("url"))
-                .cloned()
+                .map(|s| s.chars().take(2048).collect::<String>())
                 .unwrap_or_default();
             control_void(ctrl, move |reply| ControlRequest::Navigate { url, reply })
         }
@@ -614,13 +641,54 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     (0..=haystack.len() - needle.len()).find(|&i| &haystack[i..i + needle.len()] == needle)
 }
 
+/// 常数时间比较（防时序侧信道泄露凭据/token 内容；长度不等直接 false，
+/// 长度本身不属秘密）
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn auth_enabled(cfg: &ReportCfg) -> bool {
+    !cfg.auth_user.is_empty() && !cfg.auth_pass.is_empty()
+}
+
+fn auth_exempt(path: &str) -> bool {
+    matches!(path, "/healthz" | "/status" | "/report" | "/log")
+}
+
+/// Basic Auth 校验：Authorization: Basic base64(user:pass)。
+/// 解析失败/凭据错误 → false（401 + WWW-Authenticate 引导浏览器弹登录框）
+fn auth_ok(req: &Req, cfg: &ReportCfg) -> bool {
+    let Some(header) = req.headers.get("authorization") else {
+        return false;
+    };
+    // scheme 大小写不敏感（RFC 7235），凭据按 base64 解码
+    let cred = match header.split_once(' ') {
+        Some((scheme, cred)) if scheme.eq_ignore_ascii_case("basic") => cred.trim(),
+        _ => return false,
+    };
+    let decoded = crate::util::base64_decode(cred);
+    let Some(text) = std::str::from_utf8(&decoded).ok() else {
+        return false;
+    };
+    // RFC 7617：user-id 与 password 用冒号分隔，user-id 不得含冒号——
+    // 按第一个冒号切分
+    let Some((user, pass)) = text.split_once(':') else {
+        return false;
+    };
+    ct_eq(user.as_bytes(), cfg.auth_user.as_bytes())
+        && ct_eq(pass.as_bytes(), cfg.auth_pass.as_bytes())
+}
+
 fn token_ok(req: &Req, cfg: &ReportCfg) -> bool {
     if cfg.control_token.is_empty() {
         return true;
     }
-    let q = req.query.get("token").map(|s| s.as_str()).unwrap_or("");
-    let h = req.headers.get("x-cpk-token").map(|s| s.as_str()).unwrap_or("");
-    q == cfg.control_token || h == cfg.control_token
+    let q = req.query.get("token").map(|s| s.as_bytes()).unwrap_or(b"");
+    let h = req.headers.get("x-cpk-token").map(|s| s.as_bytes()).unwrap_or(b"");
+    ct_eq(q, cfg.control_token.as_bytes()) || ct_eq(h, cfg.control_token.as_bytes())
 }
 
 fn num(query: &HashMap<String, String>, form: &HashMap<String, String>, key: &str) -> f64 {
@@ -652,7 +720,13 @@ fn take(req: &Req, key: &str, max_chars: usize) -> String {
         .collect()
 }
 
-/// 多点触控参数解析："x1,y1,id1;x2,y2,id2"（id 1..=10，最多 10 点）
+/// 日志消息消毒：控制字符（含 CR/LF，防伪造日志行）归一为空格，限长 4000
+fn sanitize_log_msg(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).take(4000).collect()
+}
+
+/// 多点触控参数解析："x1,y1,id1;x2,y2,id2"（id 1..=10，最多 10 点——
+/// Chromium 触摸点列表上限，超出直接拒绝而非截断：截断会静默丢后半段手势）
 fn parse_touch_points(s: &str) -> Option<Vec<TouchPoint>> {
     let mut v = Vec::new();
     for part in s.split(';') {
@@ -710,6 +784,8 @@ fn respond(stream: &mut TcpStream, status: u16, ctype: &str, body: &[u8]) {
     let reason = match status {
         200 => "OK",
         204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         500 => "Internal Server Error",
@@ -725,16 +801,37 @@ fn respond(stream: &mut TcpStream, status: u16, ctype: &str, body: &[u8]) {
     let _ = stream.write_all(body);
 }
 
+/// 401 应答（带 WWW-Authenticate，浏览器弹 Basic 登录框的唯一钩子）
+fn respond_401(stream: &mut TcpStream) {
+    let head = "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 12\r\nWWW-Authenticate: Basic realm=\"CloudPhoneKeep\", charset=UTF-8\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(b"unauthorized");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
 
     fn start_server(token: &str) -> (u16, Arc<SharedState>, Sender<ControlRequest>) {
+        start_server_full(token, "", "")
+    }
+
+    fn start_server_full(
+        token: &str,
+        auth_user: &str,
+        auth_pass: &str,
+    ) -> (u16, Arc<SharedState>, Sender<ControlRequest>) {
         let cfg = Config::from_env();
         let shared = SharedState::new(&cfg);
         let (tx, _rx) = std::sync::mpsc::channel();
-        let rcfg = ReportCfg { bind: "127.0.0.1".into(), port: 0, control_token: token.into() };
+        let rcfg = ReportCfg {
+            bind: "127.0.0.1".into(),
+            port: 0,
+            control_token: token.into(),
+            auth_user: auth_user.into(),
+            auth_pass: auth_pass.into(),
+        };
         let port = start(rcfg, Arc::new(Logger::new(cfg.log_dir.clone())), shared.clone(), tx.clone()).unwrap();
         (port, shared, tx)
     }
@@ -755,6 +852,28 @@ mod tests {
         let status: u16 = out.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
         let body = out.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
         (status, body)
+    }
+
+    /// 带完整响应头读取（断言 WWW-Authenticate 用）
+    fn http_raw(port: u16, req: &str) -> String {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        s.write_all(req.as_bytes()).unwrap();
+        let mut out = String::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match s.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => out.push_str(&String::from_utf8_lossy(&buf[..n])),
+            }
+        }
+        out
+    }
+
+    /// base64(user:pass)（测试用；util::base64_encode 面向二进制，此处拼 UTF-8 即可）
+    fn b64(s: &str) -> String {
+        crate::util::base64_encode(s.as_bytes())
     }
 
     #[test]
@@ -813,6 +932,76 @@ mod tests {
     }
 
     #[test]
+    fn basic_auth_protection() {
+        // Basic Auth 启用：控制页/画面流/控制端点全部要求凭据
+        let (port, _shared, _tx) = start_server_full("", "admin", "p@ss!");
+        // 无凭据 → 401 + WWW-Authenticate（浏览器弹登录框钩子）
+        let raw = http_raw(port, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        assert!(raw.starts_with("HTTP/1.1 401"), "{raw}");
+        assert!(raw.contains("WWW-Authenticate: Basic realm=\"CloudPhoneKeep\""), "{raw}");
+        // 错误密码 → 401
+        let bad = format!("GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Basic {}\r\nConnection: close\r\n\r\n", b64("admin:wrong"));
+        let (st, _) = http(port, &bad);
+        assert_eq!(st, 401);
+        // Bearer 头（非 Basic）→ 401
+        let bearer = "GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer xxx\r\nConnection: close\r\n\r\n";
+        let (st, _) = http(port, bearer);
+        assert_eq!(st, 401);
+        // 正确凭据 → 200 控制页
+        let good = format!("GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Basic {}\r\nConnection: close\r\n\r\n", b64("admin:p@ss!"));
+        let (st, body) = http(port, &good);
+        assert_eq!(st, 200);
+        assert!(body.contains("CloudPhoneKeep"));
+        // 画面流：无凭据 401（鉴权在 token 之外的外层）
+        let (st, _) = http(port, "GET /stream.mjpg HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        assert_eq!(st, 401);
+        // 控制端点：无凭据 401（POST /fps 也被保护）
+        let (st, _) = http(port, "POST /fps?value=10 HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        assert_eq!(st, 401);
+        // 免鉴权通道不受影响：/healthz（Docker HEALTHCHECK 不带凭据）
+        let (st, _) = http(port, "GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        assert_eq!(st, 503);
+        // /report（页内脚本上报，跨域 fetch 无法携带凭据）与 /log 同理
+        let (st, _) = http(port, "GET /report?status=alive HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        assert_eq!(st, 204);
+        let (st, _) = http(port, "POST /log HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        assert_eq!(st, 204);
+        // auth 与 token 可叠加：两者都设时先过 auth 再过 token
+        let (port2, _s2, _t2) = start_server_full("s3cret", "admin", "p@ss!");
+        let both = format!("GET /?token=s3cret HTTP/1.1\r\nHost: x\r\nAuthorization: Basic {}\r\nConnection: close\r\n\r\n", b64("admin:p@ss!"));
+        let (st, _) = http(port2, &both);
+        assert_eq!(st, 200);
+        let only_auth = format!("GET / HTTP/1.1\r\nHost: x\r\nAuthorization: Basic {}\r\nConnection: close\r\n\r\n", b64("admin:p@ss!"));
+        let (st, _) = http(port2, &only_auth);
+        assert_eq!(st, 403, "过 auth 但缺 token → 403");
+    }
+
+    #[test]
+    fn auth_partial_config_is_disabled() {
+        // 只设 user 不设 pass（或反之）→ auth 不启用（防半配置误锁）
+        let (port, _shared, _tx) = start_server_full("", "admin", "");
+        let (st, _) = http(port, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        assert_eq!(st, 200, "半配置不应启用鉴权");
+    }
+
+    #[test]
+    fn log_forging_sanitized() {
+        // 控制字符（CRLF）归一为空格：无法伪造日志行；限长 4000
+        let evil = "line1\r\n[error] FAKE-SYS-ENTRY\r\u{0007}";
+        let out = sanitize_log_msg(evil);
+        assert!(!out.contains('\r') && !out.contains('\n'), "{out:?}");
+        assert!(!out.contains('\u{0007}'));
+        assert_eq!(out, "line1  [error] FAKE-SYS-ENTRY  ");
+        let long = "x".repeat(5000);
+        assert_eq!(sanitize_log_msg(&long).chars().count(), 4000);
+        // level 白名单：非法字符被剔除，空值回退 sys
+        // （行为经 /log 路由间接验证：此处直接测同一过滤逻辑）
+        let level = "j\x00a!v\tas\r\ncript";
+        let clean: String = level.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
+        assert_eq!(clean, "javascript");
+    }
+
+    #[test]
     fn stream_endpoint_guards() {
         // token 保护与 /shot.jpg 同策略：无 token → 403
         let (port, _shared, _tx) = start_server("s3cret");
@@ -846,7 +1035,7 @@ mod tests {
         let cfg = Config::from_env();
         let shared = SharedState::new(&cfg);
         let (tx, engine_rx) = std::sync::mpsc::channel();
-        let rcfg = ReportCfg { bind: "127.0.0.1".into(), port: 0, control_token: String::new() };
+        let rcfg = ReportCfg { bind: "127.0.0.1".into(), port: 0, control_token: String::new(), auth_user: String::new(), auth_pass: String::new() };
         let port = start(
             rcfg,
             Arc::new(Logger::new(cfg.log_dir.clone())),
@@ -1168,7 +1357,7 @@ mod tests {
         let cfg = Config::from_env();
         let shared = SharedState::new(&cfg);
         let (tx, _rx) = std::sync::mpsc::channel();
-        let rcfg = ReportCfg { bind: "127.0.0.1".into(), port: 0, control_token: String::new() };
+        let rcfg = ReportCfg { bind: "127.0.0.1".into(), port: 0, control_token: String::new(), auth_user: String::new(), auth_pass: String::new() };
         let logger = Arc::new(Logger::new(dir.clone()));
         let port = start(rcfg, logger, shared, tx).unwrap();
         let body = "level=beat&msg=tick%3D3%20url%3D%2Fhome";

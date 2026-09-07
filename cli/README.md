@@ -72,7 +72,8 @@ docker logs -f cpk     # 诊断日志实时镜像
 多账号：`docker run` 换容器名/`-v` 目录/`-p` 宿主端口（8089、8090…）并加
 `-e CPK_ACCOUNT=手机号` 区分数据目录，或用本目录 `docker-compose.yml` 复制服务块。
 常用环境变量见 [配置参考](docs/configuration.md)：`CPK_PLATFORM` / `CPK_URL`；
-安全相关 `CPK_CONTROL_TOKEN`（公网可达时务必设置）、`CPK_EXTRA_CHROME_ARGS`
+安全相关 `CPK_AUTH_USER` + `CPK_AUTH_PASS`（Basic Auth，公网可达时建议启用）与
+`CPK_CONTROL_TOKEN`（令牌，可与 Basic Auth 叠加）、`CPK_EXTRA_CHROME_ARGS`
 （低内存调优）。平台（移动/联通）不在环境变量里设置——启动后留空，控制页
 「设置→平台」选择后才加载页面（显式 `CPK_URL` 视为自动启动，供 CI 冒烟/自定义 H5）。
 

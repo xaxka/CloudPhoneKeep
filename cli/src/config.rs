@@ -37,6 +37,9 @@ pub struct Config {
     pub report_port: u16,
     pub bind: String,
     pub control_token: String,
+    /// HTTP Basic Auth（CPK_AUTH_USER + CPK_AUTH_PASS 同时非空才启用）
+    pub auth_user: String,
+    pub auth_pass: String,
     pub cdp_port: u16,
     pub chrome_bin: String,
     pub no_sandbox: bool,
@@ -178,8 +181,15 @@ impl Config {
             block_context_menu: bool_env("CPK_BLOCK_CONTEXT_MENU", true),
             page_timer: bool_env("CPK_PAGE_TIMER", false),
             report_port: i64_env("CPK_REPORT_PORT", 8088, 0, 65535) as u16,
-            bind: envs("CPK_BIND").unwrap_or_else(|| "0.0.0.0".into()),
+            // 安全默认：裸机默认只绑回环（镜像内 ENV 固定 0.0.0.0 不受影响）；
+            // 需要从其他机器访问控制页时显式设 CPK_BIND=0.0.0.0（务必同时设鉴权）
+            bind: envs("CPK_BIND").unwrap_or_else(|| "127.0.0.1".into()),
             control_token: envs("CPK_CONTROL_TOKEN").unwrap_or_default(),
+            // HTTP Basic Auth（双变量同时非空才启用）：保护控制页/画面流/控制
+            // 端点；/healthz /status /report /log 保持开放（监控探活与页内
+            // 脚本上报通道，跨域 fetch 无法携带凭据）
+            auth_user: envs("CPK_AUTH_USER").unwrap_or_default(),
+            auth_pass: envs("CPK_AUTH_PASS").unwrap_or_default(),
             cdp_port: i64_env("CPK_CDP_PORT", 0, 0, 65535) as u16,
             chrome_bin: envs("CPK_CHROME_BIN").unwrap_or_else(|| "chrome-headless-shell".into()),
             no_sandbox: bool_env("CPK_NO_SANDBOX", true), // Docker 默认无 user-namespace 特权
@@ -240,7 +250,9 @@ mod tests {
         assert_eq!(cfg.height, 896);
         assert_eq!(cfg.interval_ms, 5000);
         assert_eq!(cfg.report_port, 8088);
-        assert_eq!(cfg.bind, "0.0.0.0");
+        assert_eq!(cfg.bind, "127.0.0.1", "裸机默认应只绑回环（安全默认；镜像 ENV 固定 0.0.0.0）");
+        assert_eq!(cfg.auth_user, "", "默认不启用 Basic Auth");
+        assert_eq!(cfg.auth_pass, "", "默认不启用 Basic Auth");
         assert_eq!(cfg.ua_mode, "mobile", "默认 UA 应为移动（云机 H5 手机布局）");
         assert_eq!(cfg.page_timer, false);
         assert_eq!(cfg.chrome_bin, "chrome-headless-shell");

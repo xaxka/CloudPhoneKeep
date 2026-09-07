@@ -41,6 +41,9 @@ services:
       # CPK_INTERVAL_MS: "5000"     # actionTick 周期（默认 5000ms）
       # CPK_EXTRA_CHROME_ARGS: "--js-flags=--max-old-space-size=512"  # 低内存调优
       # CPK_CONTROL_TOKEN: "换成长随机串"   # 控制页/截图/触摸的访问令牌
+      # —— Basic Auth（公网可达时建议启用：控制页弹登录框，画面流/控制端点全保护）——
+      # CPK_AUTH_USER: "admin"
+      # CPK_AUTH_PASS: "换成长随机串"
     volumes:
       - ./data/138xxxx1234:/data    # Chromium Profile + 日志（Cookie/LocalStorage 持久化）
     ports:

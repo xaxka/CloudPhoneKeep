@@ -12,6 +12,31 @@ curl http://127.0.0.1:8088/healthz
 #   "pageUrl": "...", "exited": false }
 ```
 
+完整字段参考（排障速查）：
+
+| 字段 | 含义 | 判读 |
+| :--- | :--- | :--- |
+| `ok` | 总健康判定 | `browser=running` 且未退出云机且心跳未超龄；false → HTTP 503 |
+| `browser` | 浏览器进程状态 | `running` / `idle`（待机未启动）/ 启动中 |
+| `chromeVersion` | 浏览器版本 | 排查版本回归用 |
+| `page` | 页面健康 | `ok` / `loading` / `nav-error` / `not-installed` 等 |
+| `pageUrl` | 当前页面 URL | `chrome-error://` 前缀 = 导航失败（见下） |
+| `title` | 页面标题 | 采样周期回读；确认页面身份 |
+| `platform` / `platformLabel` | 当前平台 | `mobile` / `unicom`；空 = 待机待选 |
+| `homeUri` / `vw` / `vh` | 平台首页与视口 | 平台切换后即刻更新 |
+| `account` | 账号标识 | 数据目录 `profile-<account>` 对应 |
+| `version` | 引擎版本 | 与 Windows 版对齐版本号 |
+| `ticks` / `clicks` | 看门狗 tick 数 / 已执行保活点击数 | `ticks` 持续增长 = 保活在跑；`clicks` 是弹窗确认/重连计数 |
+| `lastAction` | 最近一次保活动作 | 如 `confirm(-)` / `enter-instance` |
+| `lastStatus` | 最近页面状态上报 | `alive` / `retry` / `entered` / `exited` / `expired` 等 |
+| `lastBeatAge` | 心跳年龄（秒） | 持续增长 > `CPK_BEAT_STALE_SEC`（180）→ 硬重启浏览器 |
+| `exited` | 已退出云机 | `true` 需人工重新进入（控制页会发通知） |
+| `restarts` / `reloads` | 分级恢复次数 | 偶发正常；频繁增长 = 站点改版嫌疑，看日志 |
+| `dialogs` | 自动应答的 alert/confirm 数 | 站点弹窗频繁时的参考计数 |
+| `lastError` | 最近错误结论 | 含 DNS/TCP 探测结果（导航失败时最有价值） |
+| `fps` / `quality` / `scale` | 三旋钮当前值 | 与控制页「设置」一致；运行时可调（POST 即生效） |
+| `tickIdle` | 空闲降频是否生效中 | 见下 |
+
 - `ticks` 持续增长 = 保活看门狗在跑；`clicks` = 已执行的保活点击数
 - `tickIdle` = `true` 表示空闲降频生效中（无人观看且无操作 ≥
   `CPK_IDLE_AFTER_SEC`，tick 降为 `CPK_IDLE_TICK_SEC`，保活语义零变化；

@@ -182,6 +182,8 @@ fn selftest(cfg: &config::Config, logger: &Arc<Logger>) -> i32 {
         bind: "127.0.0.1".into(),
         port: 0,
         control_token: String::new(),
+        auth_user: String::new(),
+        auth_pass: String::new(),
     };
     let p = match report_server::start(rcfg, logger.clone(), shared, ctrl_tx) {
         Ok(p) => p,

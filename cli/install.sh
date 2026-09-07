@@ -199,7 +199,7 @@ fi
 # ---------- 6. 环境文件（systemd / 脚本常驻用） ----------
 ENV_FILE="$PREFIX/cpk.env"
 if [ -n "${CHROME_USE:-}" ]; then
-  printf 'CPK_CHROME_BIN=%s\nTZ=Asia/Shanghai\n' "$CHROME_USE" > "$ENV_FILE"
+  printf 'CPK_CHROME_BIN=%s\nTZ=Asia/Shanghai\n# 公网可达时建议启用鉴权（去掉注释并改密码）：\n# CPK_AUTH_USER=admin\n# CPK_AUTH_PASS=change-me\n' "$CHROME_USE" > "$ENV_FILE"
   log "环境文件已写：$ENV_FILE"
 fi
 

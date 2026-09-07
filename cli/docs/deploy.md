@@ -11,6 +11,19 @@ curl -fsSL https://raw.githubusercontent.com/xaxka/CloudPhoneKeep/main/cli/insta
 # 选项与裸机细节见 ../README.md「裸机直跑」章节。
 ```
 
+## 安全与鉴权
+
+- **默认只绑回环**：裸机直跑默认 `CPK_BIND=127.0.0.1`（只有本机能访问控制页）；
+  镜像内 ENV 固定 `0.0.0.0`（容器端口映射需要），宿主侧请配合
+  `-p 127.0.0.1:8088:8088`（默认示例即如此）
+- **要从其他机器访问**（`CPK_BIND=0.0.0.0` 或公网可达）时务必设鉴权，二选一或叠加：
+  - `CPK_AUTH_USER` + `CPK_AUTH_PASS`：HTTP Basic Auth——浏览器打开控制页弹登录框，
+    画面流/输入注入/设置端点全保护；`/healthz` `/status` `/report` `/log` 保持开放
+    （Docker 健康检查与页内脚本上报通道，不含敏感控制能力）
+  - `CPK_CONTROL_TOKEN`：URL `?token=` 或 `X-CPK-Token` 头（脚本集成友好）
+- 免鉴权通道的内容是只读诊断与页面状态上报（已做限长与控制字符过滤），
+  不含任何控制能力；真正的控制面（触摸/键盘/导航/设置）全部在鉴权之后
+
 ## 快速开始
 
 ```bash
