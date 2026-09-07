@@ -31,6 +31,9 @@ export CPK_SHELL=/path/to/chrome        # chromium / google-chrome / chrome-head
 | `test_ack_hold.py` | ack 持有语义实验（持有超时死流、stop+start 复活） |
 | `test_wall_clock_gate.js` | 保活脚本墙钟门控验证（空闲降频下 actionTick 周期恒 ≈ intervalMs，不被 tick 周期拉长） |
 | `test_idle_smoke.sh` | 空闲降频真实引擎冒烟（需先 `cargo build`；降频迁移日志 + healthz tickIdle + 空闲态 ticks 每 5s 前进 + smoke PASS） |
+| `ci_smoke.sh` | **CI 冒烟档**：真实引擎 + chrome 端到端（本地动画页/注入/画面流出帧/控制链路/healthz 字段/smoke PASS）。CI 用 install.sh 装好的 /opt 产物跑 |
+| `knob_e2e.py` | 三旋钮（fps/quality/scale）热更新端到端：healthz 即刻回读 + 帧实际尺寸/实测帧率证真实生效 + 越界 400 |
+| `auth_e2e.py` | Basic Auth 端到端：无凭据 401×4 + WWW-Authenticate + 免鉴权通道照常 + 心跳不断 + 凭据/token 叠加 |
 
 ## 用法
 
@@ -40,7 +43,17 @@ node e2e_repro.js          # 主回归：末行应输出「控制页发出了 3 
 python3 mock_control_page.py   # 起控制页 mock：http://127.0.0.1:8899/
 node test_wall_clock_gate.js   # 墙钟门控（无外部依赖）
 bash test_idle_smoke.sh       # 空闲降频引擎冒烟（先在仓库根 cargo build，产物在根 target/）
+bash ci_smoke.sh              # CI 冒烟档（需先 cargo build --release）
+python3 knob_e2e.py           # 三旋钮热更新（需 chrome-headless-shell）
+python3 auth_e2e.py           # Basic Auth 端到端（需 chrome-headless-shell）
 ```
+
+真实引擎类脚本（`ci_smoke.sh` / `knob_e2e.py` / `auth_e2e.py` / `test_idle_smoke.sh`）
+的路径约定：
+- 引擎二进制：`CPK_ENGINE` 环境变量，默认 仓库根 `target/release/cloudphonekeep`
+  （`test_idle_smoke.sh` 默认 debug 产物、可用首参覆盖；先 `cargo build [--release]`）；
+- Chrome：`CPK_SHELL` 环境变量，否则探测 PATH 常见命令；
+- 三者端口互不冲突但共用 8089/8899（`knob_e2e.py` 与 `auth_e2e.py` 顺序跑，勿并行）。
 
 脚本读取的模板与生产同源：保活脚本取 `../../shared/keepalive.inject.js`，
 控制页取 `../control_page.html`（cli/ 根，CLI 专属）；修改后重跑即验证。

@@ -61,12 +61,56 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # =====================================================================
+  # 冒烟档（push main / 手动触发）：真实引擎 + 真实 chrome-headless-shell
+  # 端到端——本地动画页 + 保活注入 + 画面流出帧 + 控制链路 + 三旋钮热更新
+  # + Basic Auth 全链路。
+  # 浏览器经 install.sh 安装（版本单一源 cli/chrome-versions.env，与生产同版），
+  # 冒烟跑的就是用户一键安装实际装到的 /opt 产物；ldd 运行库检查顺带在
+  # runner 上回归「裸机最小依赖集可跑」。PR 不跑（省浏览器下载与时长，
+  # 编译校验已由 linux job 覆盖）。
+  # =====================================================================
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CPK_ENGINE: /opt/cloudphonekeep/cloudphonekeep
+      CPK_SHELL: /opt/cloudphonekeep/chrome-headless-shell/chrome-headless-shell
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Build engine (release, native)
+        run: cargo build --release --manifest-path cli/Cargo.toml
+
+      # 一键安装全链路实测：chrome-versions.env 单一源下载浏览器 → ldd
+      # 运行库检查（runner 预装 Chrome 系依赖时零 apt；缺失则 root 自动补装
+      # 最小集）→ 引擎 CPK_SELFTEST 自检 → /opt/cloudphonekeep 就位
+      - name: Install via install.sh (engine = current build)
+        run: sudo bash cli/install.sh --engine "$PWD/target/release/cloudphonekeep"
+
+      - name: Smoke 1/3 — engine + chrome end-to-end
+        run: bash cli/tests/ci_smoke.sh
+
+      - name: Smoke 2/3 — knob hot-reload e2e
+        run: python3 cli/tests/knob_e2e.py
+
+      - name: Smoke 3/3 — basic auth e2e
+        run: python3 cli/tests/auth_e2e.py
+
+  # =====================================================================
   # CLI 版（cli/ + shared/，根 workspace）：Rust musl 静态引擎 + Alpine 交叉编译
   # + Debian Chromium + CDP；一容器一账号；全部编译在 CI 完成（本地无需 Rust）
   # 镜像多架构（linux/amd64 + linux/arm64）：Rust 交叉编译走 rust-lld
   # 原生速度，QEMU 仅用于 arm64 运行层的 apk 安装
-  # —— 测试已移除（单元/selftest/冒烟按用户要求删除：无浏览器环境下的
-  #    快速回归对真实问题无覆盖，真正的验证靠生产环境日志留痕）——
+  # （本 job 只管构建与发布产物；真浏览器端到端回归在上方 smoke 档）
   #
   # 另产出与镜像同源的 musl 静态二进制（amd64/arm64）发布到 dev Release：
   # 装了 chrome-headless-shell 的机器无需 Docker 可直接运行（裸机直跑）。

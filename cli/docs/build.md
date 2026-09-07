@@ -40,6 +40,10 @@ docker build -t cpk:local -f cli/Dockerfile .
 
 推送 `main` 后 GitHub Actions（`.github/workflows/ci.yml`）自动：
 
+- **冒烟档**（`smoke` job）：先用 `install.sh` 装好引擎（当前提交构建）与
+  chrome-headless-shell（版本读 `cli/chrome-versions.env` 单一源），再跑
+  `cli/tests/` 三个真浏览器端到端脚本（引擎+画面流+控制链路冒烟 / 三旋钮
+  热更新 / Basic Auth）——发布的产物先证明能跑再发布
 - 交叉编译 musl 静态二进制（amd64 + arm64）发布到 `dev` 预发布版：
   `cloudphonekeep-linux-amd64` / `cloudphonekeep-linux-arm64`
   （与镜像内引擎同源同构，裸机直跑用）
