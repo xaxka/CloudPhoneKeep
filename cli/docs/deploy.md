@@ -4,7 +4,7 @@
 `linux/amd64` + `linux/arm64` 单一 manifest，x86 服务器与 ARM 主机/Apple
 Silicon 均原生运行，`docker pull` 自动选架构）。不想用 Docker 的机器
 （已装 chrome-headless-shell）可直接跑 CI 同源发布的 musl 静态二进制，
-见 [`cli/README.md「裸机直跑」`](../cli/README.md)。
+见 [`../README.md`](../README.md)「裸机直跑」章节。
 
 ## 快速开始
 
@@ -57,6 +57,24 @@ docker logs -f cpk-138xxxx1234     # 诊断日志实时镜像
 单账号容器典型 RSS ≈ Rust 引擎 ~10MB + Chromium 250-450MB（主要由云手机
 页面与 WebRTC 视频流决定）。WebRTC 走软件编解码（容器无 GPU），
 `--autoplay-policy=no-user-gesture-required` 确保视频流自动播放。
+
+## 浏览器选型说明（chrome-headless-shell）
+
+CLI 版使用 **Google Chrome for Testing 官方预编译的 `chrome-headless-shell`**
+（无头渲染内核，无 Chrome UI/标签页/扩展，比完整 Chrome 省内存；WebRTC 栈完整
+保留——保活只要求流建立不断开）：
+
+- **架构**：CfT 自 153.0.8001.0 起提供 `linux-arm64` 预编译；镜像双架构
+  （amd64/arm64）都用 CfT headless-shell，运行层为 `debian:bookworm-slim`
+  （CfT 二进制是 glibc 动态链接，不能跑在 musl/Alpine 上；Rust 引擎是 musl
+  静态二进制，与运行层 libc 无耦合）
+- **版本**：amd64 用 stable `152.0.7977.82`（开发环境端到端冒烟验证过的
+  版本）；arm64 用 beta `154.0.8037.0`（stable 渠道尚无 arm64，取 arm64
+  可用的最近渠道），见 `../Dockerfile` 的 ARG
+- headless-shell 本身即无头模式，恒不加 `--headless=new`（`CPK_HEADLESS` 开关
+  已移除；极少数换用完整 Chromium 的场景经 `CPK_EXTRA_CHROME_ARGS` 自行追加）
+- 依赖最小化：运行层 apt 包为 `ldd` 实测结果（nss/glib/X11 基础库/alsa/
+  gbm 等，见 Dockerfile 注释），curl/unzip 仅构建期使用后即删除
 
 ## 首次登录与控制台
 

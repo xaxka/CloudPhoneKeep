@@ -1,64 +1,8 @@
-# 架构与引擎模型
+# Windows 版架构（Tauri）
 
-## 双平台总览
-
-同一套保活逻辑，两种宿主形态：
-
-| | Windows 版 | Linux 版 |
-| :--- | :--- | :--- |
-| 内核 | WebView2（Edge） | chrome-headless-shell（CfT 官方预编译，双架构） |
-| 宿主引擎 | Rust（Tauri 窗口 + 看门狗） | Rust musl 静态二进制（手写 RFC6455 WebSocket + CDP 客户端 + 看门狗） |
-| 驱动 | 窗口可见时页内定时器；隐藏/最小化时 Rust 看门狗 eval 驱动 | Rust 看门狗每秒经 CDP 调 `__CPK_TICK__()`（同一模型的无头恒定态） |
-| 多账号 | 多窗口多槽位（单进程） | 多容器（一容器一账号） |
-| 首次登录 | 直接在窗口里点 | 浏览器打开控制页：平台留空待选（「设置→平台」选择后引擎加载页面），MJPEG 实时画面 + 全量输入（触摸/鼠标/键盘/剪贴板）、运行时平台切换、退出/到期通知（对齐 Windows 版交互，或外部 DevTools） |
-| 保活脚本 | `shared/keepalive.inject.js`（`include_str!` 内嵌） | 同一本 `shared/keepalive.inject.js`（`include_str!` 内嵌） |
-| 数据位置 | `AppData\LocalLow\CloudPhoneKeep` | `/data`（volume 持久化 Profile + 日志） |
-| 内存 | 单账号 WebView2 300-500MB | Rust 引擎 ~10MB + headless-shell 250-450MB |
-
-**保活脚本唯一源文件**：`shared/keepalive.inject.js` 由共享 crate
-（`shared/src/keepalive.rs`）`include_str!` 内嵌，双端适配层
-（`src-tauri/src/keepalive.rs` / `cli/src/keepalive.rs`）传各自策略参数后注入——
-修改保活规则只需改这一份文件，双端重新构建后同时生效。平台差异全部收敛为
-CFG 开关（见 [keepalive-rules.md](keepalive-rules.md)）。
-
-### 浏览器选型说明（chrome-headless-shell）
-
-Linux 版使用 **Google Chrome for Testing 官方预编译的 `chrome-headless-shell`**
-（无头渲染内核，无 Chrome UI/标签页/扩展，比完整 Chrome 省内存；WebRTC 栈完整
-保留——保活只要求流建立不断开）：
-
-- **架构**：CfT 自 153.0.8001.0 起提供 `linux-arm64` 预编译；镜像双架构
-  （amd64/arm64）都用 CfT headless-shell，运行层为 `debian:bookworm-slim`
-  （CfT 二进制是 glibc 动态链接，不能跑在 musl/Alpine 上；Rust 引擎是 musl
-  静态二进制，与运行层 libc 无耦合）
-- **版本**：amd64 用 stable `152.0.7977.82`（开发环境端到端冒烟验证过的
-  版本）；arm64 用 beta `154.0.8037.0`（stable 渠道尚无 arm64，取 arm64
-  可用的最近渠道），见 `cli/Dockerfile` 的 ARG
-- headless-shell 本身即无头模式，恒不加 `--headless=new`（`CPK_HEADLESS` 开关
-  已移除；极少数换用完整 Chromium 的场景经 `CPK_EXTRA_CHROME_ARGS` 自行追加）
-- 依赖最小化：运行层 apt 包为 `ldd` 实测结果（nss/glib/X11 基础库/alsa/
-  gbm 等，见 Dockerfile 注释），curl/unzip 仅构建期使用后即删除
-
-## 看门狗驱动模型
-
-保活脚本内的双定时器（`stopCheck` 1s / `actionTick` 5s）需要有人周期驱动
-`__CPK_TICK__()`：
-
-- **Windows**：窗口可见时由页内 `setInterval` 驱动（`CFG.pageTimer=true`）；
-  窗口被隐藏**或最小化**后，页内定时器被 Chromium 后台节流，Rust 看门狗
-  每 1 秒 eval `__CPK_TICK__()` 接管（v1.11.0 起最小化与隐藏同等接管）。
-- **Linux**：无头页面永不可见，恒由宿主看门狗经 CDP 驱动
-  （`CFG.pageTimer=false`），避免页内 + 外部双驱动把 5 秒动作周期缩短一半。
-
-## 自动恢复分级（Linux 版，与 Windows 同思路）
-
-1. tick 失败 / 状态冻结 / 脚本缺失 → **页面导航回首页**（站点自身重定向兜底）
-2. 传输断裂 / 页面级恢复 10 分钟 3 次无效 → **重建 CDP 会话**（Chromium 进程
-   保留、页面状态不丢）
-3. 重连无效 / Chromium 退出 / 心跳超龄 180s → **重启 Chromium**（指数退避
-   5s→300s，防崩溃循环）
-
-Profile 持久化 + 分级恢复 + 容器层 `restart: unless-stopped`，形成三层自愈。
+双平台总览与看门狗驱动模型见
+[../../shared/docs/architecture.md](../../shared/docs/architecture.md)。
+本文为 Windows（Tauri）版专属内容。
 
 ## 源码级复刻对照（aardio → Tauri）
 
@@ -74,7 +18,7 @@ Profile 持久化 + 分级恢复 + 容器层 `restart: unless-stopped`，形成�
 | 「旋转」交换 userInfo 宽高 + `go(location)` 刷新，不落盘 | **已移除**（随菜单栏一起删除；横竖屏需求可在设置窗口直接改窗口分辨率） |
 | `win.util.tray(webForm)` 每窗口一托盘，菜单 显示(●)/隐藏/退出 | 每槽位独立托盘，左键单击/双击呼出窗口（不再设显示/隐藏菜单项），退出=退出程序 |
 | `reghotkey Ctrl+N` 显隐 + 置前 | 同；注册失败仅告警不阻塞（原版亦不检查返回值） |
-| `reghotkey Ctrl+U` 地址栏，回车 `go(url)` | **Linux 版不提供地址栏**（按需求：无头远程控制无需浏览器地址栏；导航走控制页「回首页」/`/nav`。shared 脚本注入的 `#cpk-addr-bar` 在云机页内惰性存在，无副作用） |
+| `reghotkey Ctrl+U` 地址栏，回车 `go(url)` | **CLI 版不提供地址栏**（按需求：无头远程控制无需浏览器地址栏；导航走控制页「回首页」/`/nav`。shared 脚本注入的 `#cpk-addr-bar` 在云机页内惰性存在，无副作用） |
 | `runTimer 5000ms`：重连/进入/确认弹窗 + 解锁区 + 进入云机 | `actionTick` 每 5 秒，文字**包含匹配**（还原 `string.keywords`） |
 | `stopTimer 1000ms`：#tabbar 退出检测 + 「知道了」到期确认，触发后停用 | `stopCheck` 每 1 秒，`stopDone` 标志触发一次后停用 |
 | CDP `Network.setCookies` domain=`.139.com` 导航前生效 | **已移除**（登录态由各帐号独立数据目录保持，无需手动指定 Cookie） |

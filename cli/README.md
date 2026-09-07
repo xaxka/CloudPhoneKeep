@@ -11,9 +11,8 @@
 `linux/arm64`——x86 服务器与 ARM 主机 / Apple Silicon 均原生运行，
 `docker pull` 自动选择架构（无需 `--platform`，也不会有平台不匹配告警）。
 
-详细文档见 [`doc/`](../doc/README.md)：[部署运维](../doc/linux-deploy.md) ·
-[保活规则](../doc/keepalive-rules.md) · [配置参考](../doc/configuration.md) ·
-[排查指南](../doc/diagnostics.md) · [架构](../doc/architecture.md)。
+详细文档：[部署运维](docs/deploy.md) · [保活规则](../shared/docs/keepalive-rules.md) ·
+[配置参考](docs/configuration.md) · [排查指南](docs/diagnostics.md) · [架构](../shared/docs/architecture.md)。
 
 ## 为什么内存占用低
 
@@ -41,7 +40,7 @@
 | 保活脚本 | `shared/keepalive.inject.js`（`include_str!` 内嵌） | 同一本（shared crate 内嵌，构建器统一） |
 | 数据位置 | `AppData\LocalLow\CloudPhoneKeep` | Docker：`/data`（volume）；裸机默认 `~/.local/share/cloudphonekeep`（可 `CPK_DATA_DIR` 覆盖） |
 
-保活脚本唯一源文件、平台差异收敛、分级恢复等说明见 [doc/architecture.md](../doc/architecture.md) 与 [doc/keepalive-rules.md](../doc/keepalive-rules.md)。
+保活脚本唯一源文件、平台差异收敛、分级恢复等说明见 [架构](../shared/docs/architecture.md) 与 [保活规则](../shared/docs/keepalive-rules.md)。
 
 ## 快速开始
 
@@ -70,7 +69,7 @@ docker logs -f cpk     # 诊断日志实时镜像
 ```
 
 多账号：`docker run` 换容器名/`-v` 目录/`-p` 宿主端口（8089、8090…），或用本目录
-`docker-compose.yml` 复制服务块。常用环境变量见 [doc/configuration.md](../doc/configuration.md)：
+`docker-compose.yml` 复制服务块。常用环境变量见 [配置参考](docs/configuration.md)：
 `CPK_ACCOUNT` / `CPK_URL`；安全相关 `CPK_CONTROL_TOKEN`（公网可达时务必
 设置）、`CPK_EXTRA_CHROME_ARGS`（低内存调优）。平台（移动/联通）不在环境变量里
 设置——启动后留空，控制页「设置→平台」选择后才加载页面（显式 `CPK_URL`
@@ -109,7 +108,7 @@ CPK_ACCOUNT=138xxxx1234 ./cloudphonekeep-linux-amd64
 curl http://127.0.0.1:8088/healthz
 ```
 
-环境变量与 Docker 版完全一致（[doc/configuration.md](../doc/configuration.md)）
+环境变量与 Docker 版完全一致（[配置参考](docs/configuration.md)）
 ——`CPK_PLATFORM`/`CPK_URL`/`CPK_FPS`/`CPK_JPEG_QUALITY`/`CPK_STREAM_SCALE`/
 `CPK_IDLE_AFTER_SEC` 等；裸机差异只有两点：
 
@@ -143,6 +142,7 @@ cli/
 ├── README.md                 # 本文件
 ├── control_page.html         # 控制页模板（CLI 专属；report_server.rs include_str! 内嵌）
 ├── Cargo.toml                # 依赖 cloudphonekeep-shared（../shared）+ serde_json；锁文件在仓库根
+├── docs/                     # CLI 版文档（部署/配置/排查）
 ├── src/
 │   ├── main.rs               # 入口：装配 + 信号 + selftest/smoke 模式
 │   ├── config.rs             # 环境变量配置（平台预设再导出自 shared；数据目录裸机自适应）

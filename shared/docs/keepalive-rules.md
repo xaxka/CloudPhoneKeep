@@ -2,7 +2,7 @@
 
 ## 唯一源文件与修改指引
 
-保活脚本本体是 [`shared/keepalive.inject.js`](../shared/keepalive.inject.js)，
+保活脚本本体是 [`shared/keepalive.inject.js`](../keepalive.inject.js)，
 由共享 crate（`shared/src/keepalive.rs`）`include_str!` 内嵌——占位符替换
 与 CFG 生成只有这一份实现，两个平台的适配层只传各自策略参数后注入：
 

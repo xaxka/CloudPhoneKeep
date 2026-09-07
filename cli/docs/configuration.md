@@ -1,24 +1,7 @@
-# 配置参考
+# CLI 版配置（环境变量，Docker 与裸机通用）
 
-## Windows 版
-
-- **配置入口**：设置窗口（「新开账号」）——平台、手机号（缓存目录名）、老板键
-  索引、分辨率、触点光标等；配置落盘 `config.json`
-- **数据目录**（`AppData\LocalLow\CloudPhoneKeep`，不写注册表）：
-
-```
-C:\Users\<用户名>\AppData\LocalLow\CloudPhoneKeep\
-├── config.json          # 全部帐号配置
-├── cpk-YYYYMMDD.log     # 程序级日志（按天滚动，保留 7 天）
-├── panic-pPID.log       # 若程序异常崩溃，原因记录于此
-├── 1/                   # 目录名填「1」的帐号：浏览器数据（Cookie/登录态/缓存）
-│   └── cpk-YYYYMMDD.log #   该帐号的日志（与数据同目录）
-└── 138xxxx1234/         # 目录名填「138xxxx1234」的帐号 …
-```
-
-多实例共用数据根目录，按帐号目录名隔离；登录态随目录保留。
-
-## CLI 版环境变量（Docker 与裸机通用）
+CLI 版全部配置走环境变量；Windows 版配置见
+[../../src-tauri/docs/configuration.md](../../src-tauri/docs/configuration.md)。
 
 | 变量 | 默认 | 说明 |
 | :--- | :--- | :--- |
@@ -45,6 +28,8 @@ C:\Users\<用户名>\AppData\LocalLow\CloudPhoneKeep\
 | `CPK_TICK_FAIL_RELOAD` | `10` | tick 连续失败 N 次后导航回首页 |
 | `CPK_FROZEN_RELOAD` | `3` | 状态冻结 N 个采样周期后导航回首页 |
 | `CPK_BEAT_STALE_SEC` | `180` | 心跳超龄 N 秒硬重启浏览器 |
+| `CPK_IDLE_AFTER_SEC` | `60` | 空闲判定：无画面订阅且距最近操作 N 秒后进入空闲降频（0-3600；`0` = 关闭空闲降频）。空闲态 tick 由 1s 降至 `CPK_IDLE_TICK_SEC`、采样降为 3 倍动作周期，保活语义零变化；任一操作/打开画面流 ≤200ms 恢复活跃节奏 |
+| `CPK_IDLE_TICK_SEC` | `5` | 空闲态 tick 周期（1-60）。配置会让「页面级恢复」慢于「心跳硬重启」时引擎自动否决降频维持活跃节奏 |
 | `CPK_FPS` | `10` | 实时画面帧率上限（1-60；控制台「设置→帧率」可运行时调整，此为初始值。默认 10：云机页面内容变化率普遍 5-10fps，已足额；引擎按目标帧率对 Chrome 端采集/编码做门控节流（ack 确认一帧才采下一帧），传输 CPU 大致正比帧率） |
 | `CPK_JPEG_QUALITY` | `50` | 实时画面 JPEG 质量（10-90；控制台「设置→画质」可运行时调整）：质量越高编码 CPU 与带宽越大，弱机优先降 |
 | `CPK_STREAM_SCALE` | `100` | 采集分辨率百分比（30-100；控制台「设置→分辨率」可运行时调整）：<100 时 Chrome 编码前先缩小，编码 CPU 与带宽按像素数近线性下降（如 75 ≈ 省 44%），触摸坐标不受影响。弱机推荐 75-90 |
@@ -57,3 +42,6 @@ C:\Users\<用户名>\AppData\LocalLow\CloudPhoneKeep\
 > 控制页「设置→平台」选择后才启动并加载；引擎恒无头（镜像固定
 > chrome-headless-shell，本身就无头；换用完整 Chromium 的极少数场景经
 > `CPK_EXTRA_CHROME_ARGS` 自行追加 `--headless=new`）。
+
+空闲降频的判定与恢复机制详见 [deploy.md](deploy.md)「空闲 CPU 的治理」；
+部署示例与容器编排见 [deploy.md](deploy.md)。
