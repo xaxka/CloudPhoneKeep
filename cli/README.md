@@ -89,6 +89,8 @@ curl -fsSL https://raw.githubusercontent.com/xaxka/CloudPhoneKeep/main/cli/insta
 # 常用选项（管道方式加在 bash 后）：
 #   ... | bash -s -- --systemd    # root：顺带装 systemd 模板单元 cpk@<账号>
 #   ... | bash -s -- --chrome-bin /path/to/chrome-headless-shell   # 复用已有浏览器
+#   ... | bash -s -- --mirror     # 下载源反转（npmmirror 国内源优先）
+#   ... | bash -s -- --dns        # DNS 解析/连通性排障（只诊断不安装）
 #   ... | bash -s -- --uninstall  # 卸载
 # 之后直接运行：cloudphonekeep（或 bash install.sh --uninstall 卸载）
 ```
@@ -106,11 +108,12 @@ chmod +x cloudphonekeep-linux-amd64
 #    https://googlechromelabs.github.io/chrome-for-testing/
 #    解压后把二进制放进 PATH，或用 CPK_CHROME_BIN 指向绝对路径
 #    （默认在 PATH 里找 "chrome-headless-shell"）
-#    运行库（Debian/Ubuntu）：
-#    apt install libnss3 libnspr4 libglib2.0-0 libexpat1 libx11-6 libxcb1 \
-#        libxext6 libxrender1 libxi6 libxcomposite1 libxdamage1 libxfixes3 \
-#        libxrandr2 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libdbus-1-3 \
-#        libasound2 libdrm2 libgbm1 libxkbcommon0 libfontconfig1 libfreetype6
+#    运行库最小集（Debian/Ubuntu；readelf 直连 + LD_DEBUG dlopen 实测，
+#    传递依赖由 apt 自动带入，fontconfig/freetype 全程零加载不需要装）：
+#    apt install libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 \
+#        libdbus-1-3 libexpat1 libgbm1 libglib2.0-0 libnss3 libudev1 \
+#        libx11-6 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
+#        libxkbcommon0 libxrandr2
 #    中文字体可选（截图可读性）：fonts-wqy-microhei
 
 # 3. 运行（数据目录默认 ~/.local/share/cloudphonekeep，/data 存在时优先用它——
@@ -138,7 +141,7 @@ curl http://127.0.0.1:8088/healthz
 或手写单元：
 
 ```ini
-# /etc/systemd/system/cpk@.service（cpk@138xxxx1234 启动）
+# /etc/systemd/system/cpk@.service (cpk@138xxxx1234 启动)
 [Unit]
 Description=CloudPhoneKeep %i
 After=network-online.target

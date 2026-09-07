@@ -5,9 +5,9 @@
 # 浏览器：Google Chrome for Testing 官方预编译 chrome-headless-shell
 #   （无头渲染内核，无 Chrome UI/标签页/扩展，单页面场景比完整 Chrome
 #    省 100MB+；CfT 二进制为 glibc 构建 → 运行层用 debian:bookworm-slim）
-#   版本策略：amd64 用 stable 152.0.7977.82（本地端到端冒烟验证过的版本）；
-#             arm64 用 154.0.8037.0（CfT 自 153.0.8001.0 才提供 linux-arm64，
-#             stable 尚无 arm64，取 arm64 可用的 Beta 渠道最新）
+#   版本唯一源：cli/chrome-versions.env（amd64 用 stable 152，本地端到端
+#    验证过；arm64 取 154 Beta——CfT 自 153 才提供 linux-arm64，stable 尚无
+#    arm64 渠道。升级浏览器版本只改那一个文件，与 install.sh / CI 冒烟同源）
 #
 # 多架构（linux/amd64 + linux/arm64）：
 #   构建阶段固定在 BUILDPLATFORM 原生运行（CI 上 amd64 全速编译），
@@ -45,10 +45,13 @@ RUN --mount=type=cache,target=/build/target \
 # —— 运行阶段：debian + CfT chrome-headless-shell ——
 FROM debian:bookworm-slim
 ARG TARGETARCH
-ARG SHELL_AMD64=152.0.7977.82
-ARG SHELL_ARM64=154.0.8037.0
+# 浏览器版本唯一源（与 install.sh / CI 冒烟同一份文件）
+COPY cli/chrome-versions.env /tmp/chrome-versions.env
 
-# 运行时依赖（ldd 实测最小集）+ 中文字体 + tzdata；curl/unzip 仅构建期用完即删。
+# 运行时依赖（readelf 直连 NEEDED + LD_DEBUG dlopen 实测最小集；被裁的
+# libnspr4/libxcb1/libxrender1/libxi6/libdrm2 为传递依赖由 apt 自动带入，
+# libfontconfig1/libfreetype6 全程零加载）+ 中文字体 + tzdata；
+# curl/unzip 仅构建期用完即删。
 # 镜像瘦身五连（amd64 579MB → 约 490MB，双架构同享）：
 #   1) dpkg path-exclude：doc/man/翻译文件自始不落盘（copyright 保留），比装完再删层更小
 #   2) 中文字体 wqy-zenhei(16MB) → wqy-microhei(5MB)：CJK 覆盖同源，截图可读
@@ -60,16 +63,15 @@ RUN printf 'path-exclude=/usr/share/doc/*\npath-include=/usr/share/doc/*/copyrig
       > /etc/dpkg/dpkg.cfg.d/01-slim \
     && apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates tzdata wget fonts-wqy-microhei fonts-liberation \
-      libnss3 libnspr4 libglib2.0-0 libexpat1 \
-      libx11-6 libxcb1 libxext6 libxrender1 libxi6 \
-      libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
-      libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libdbus-1-3 \
-      libasound2 libdrm2 libgbm1 libxkbcommon0 \
-      libfontconfig1 libfreetype6 \
+      libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libdbus-1-3 \
+      libexpat1 libgbm1 libglib2.0-0 libnss3 libudev1 \
+      libx11-6 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
+      libxkbcommon0 libxrandr2 \
       curl unzip \
+    && . /tmp/chrome-versions.env \
     && case "$TARGETARCH" in \
-         arm64) V="$SHELL_ARM64"; P="linux-arm64";; \
-         *)     V="$SHELL_AMD64"; P="linux64";; \
+         arm64) V="$SHELL_V_ARM64"; P="linux-arm64";; \
+         *)     V="$SHELL_V_AMD64"; P="linux64";; \
        esac \
     && curl -fsSL -o /tmp/shell.zip \
        "https://storage.googleapis.com/chrome-for-testing-public/${V}/${P}/chrome-headless-shell-${P}.zip" \
@@ -78,7 +80,7 @@ RUN printf 'path-exclude=/usr/share/doc/*\npath-include=/usr/share/doc/*/copyrig
     && find /opt/chrome-headless-shell/locales -type f -name '*.pak' \
          ! -name 'en-US*.pak' ! -name 'zh-CN*.pak' -delete \
     && rm -rf /opt/chrome-headless-shell/hyphen-data \
-    && rm -f /tmp/shell.zip \
+    && rm -f /tmp/shell.zip /tmp/chrome-versions.env \
     && chmod +x /opt/chrome-headless-shell/chrome-headless-shell \
     && apt-get purge -y curl unzip \
     && apt-get autoremove -y \

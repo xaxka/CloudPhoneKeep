@@ -82,13 +82,15 @@ CLI 版使用 **Google Chrome for Testing 官方预编译的 `chrome-headless-sh
   （amd64/arm64）都用 CfT headless-shell，运行层为 `debian:bookworm-slim`
   （CfT 二进制是 glibc 动态链接，不能跑在 musl/Alpine 上；Rust 引擎是 musl
   静态二进制，与运行层 libc 无耦合）
-- **版本**：amd64 用 stable `152.0.7977.82`（开发环境端到端冒烟验证过的
-  版本）；arm64 用 beta `154.0.8037.0`（stable 渠道尚无 arm64，取 arm64
-  可用的最近渠道），见 `../Dockerfile` 的 ARG
+- **版本**：唯一源 `cli/chrome-versions.env`（本地克隆运行、Docker 构建、
+  CI 冒烟与一键安装脚本读的是同一份；amd64 用 stable `152.0.7977.82`（
+  开发环境端到端冒烟验证过）；arm64 用 beta `154.0.8037.0`（stable 渠道
+  尚无 arm64，取 arm64 可用的最近渠道）。升级浏览器只改这一个文件）
 - headless-shell 本身即无头模式，恒不加 `--headless=new`（`CPK_HEADLESS` 开关
   已移除；极少数换用完整 Chromium 的场景经 `CPK_EXTRA_CHROME_ARGS` 自行追加）
-- 依赖最小化：运行层 apt 包为 `ldd` 实测结果（nss/glib/X11 基础库/alsa/
-  gbm 等，见 Dockerfile 注释），curl/unzip 仅构建期使用后即删除
+- 依赖最小化：运行层 apt 包为 readelf 直连 NEEDED + LD_DEBUG dlopen 全程
+  实测的最小集（17 个直连包，传递依赖由 apt 自动带入；fontconfig/freetype
+  全程零加载，见 `Dockerfile` 注释），curl/unzip 仅构建期使用后即删除
 
 ## 首次登录与控制台
 
@@ -122,6 +124,19 @@ VLC 等标准播放器也可直接打开 `http://<host>:<port>/stream.mjpg` 观�
 3. **可调旋钮（控制台面板/环境变量均可）**：`CPK_JPEG_QUALITY`（默认 50，
    降质量省编码 CPU/带宽）、`CPK_STREAM_SCALE`（默认 100；如 75 = 分辨率
    缩 75%，编码量按像素近线性下降，触摸坐标是 CSS 坐标系不受影响）。
+
+**`CPK_STREAM_SCALE` 的原理（为何「缩放」不等于「重新编码」）**：
+引擎全程只透传 Chrome 产出的 JPEG 字节，从解码到重编码零参与；scale
+是传给 `Page.startScreencast` 的**采集参数**（`maxWidth`/`maxHeight`），
+作用在 Chrome 内部管线**编码之前**——合成器先把 414×896 的页面输出
+按百分比缩到小图，再对小图做一次 JPEG 编码。因此：
+- 画质（JPEG 量化步长）与分辨率（空间采样密度）是两个正交旋钮：
+  前者管「每像素保留多少信息」，后者管「有多少像素」；
+- 像素数是编码 CPU、帧字节大小、网络带宽的共同分母：50% 缩放 ≈ 像素
+  降至 1/4 ≈ 编码量与带宽同降至约 1/4（弱机推荐 75-90 的出处）；
+- 触摸/鼠标不受影响：输入走 CDP `Input.dispatchTouchEvent` 注入的是
+  页面 CSS 坐标（0-414 / 0-896 视口系），与画面流发多大的 JPEG 无关；
+  控制页显示时把小图 CSS 拉伸回满屏，视觉略糊但点击位置永远对。
 观看中每 30s 日志输出一行帧流统计（Chrome 出帧 N/s → 解码推送 M/s）：
 出帧 ≈ min(页面内容变化率, 目标帧率)——远低于目标＝页面本身变化慢
 （静态页省流省 CPU，属正常），非设置失效。

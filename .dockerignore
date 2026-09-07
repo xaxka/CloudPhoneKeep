@@ -8,6 +8,7 @@ cli/*
 !cli/Cargo.toml
 !cli/src
 !cli/control_page.html
+!cli/chrome-versions.env
 !shared
 shared/*
 !shared/Cargo.toml
