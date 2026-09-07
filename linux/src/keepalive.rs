@@ -71,6 +71,8 @@ mod tests {
             fps: 25,
             jpeg_quality: 50,
             stream_scale_pct: 100,
+            idle_after_sec: 60,
+            idle_tick_sec: 5,
             selftest: false,
             smoke: false,
             smoke_seconds: 60,
@@ -140,8 +142,9 @@ mod tests {
     #[test]
     fn keepalive_semantics_fully_ported() {
         let s = build_init_script(&cfg(), 8088);
-        // 双定时器语义（stopCheck 1s / actionTick 5s）
-        assert!(s.contains("state.n >= every"));
+        // 双定时器语义（stopCheck 每 tick / actionTick 墙钟门控 ≈ intervalMs）
+        // 墙钟门控：宿主空闲降频（tick 1s→5s）下动作周期不变；旧计数门控会被拉长 every 倍
+        assert!(s.contains("state.nextActionAt"));
         assert!(s.contains("stopCheck"));
         assert!(s.contains("actionTick"));
         // 移动平台选择器

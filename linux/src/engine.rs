@@ -2,9 +2,12 @@
 //! ---------------------------------------------------------------------------
 //! 线程模型（刻意单引擎线程——CDP 命令天然串行，无锁竞争，内存最低）：
 //!   [引擎线程]  启动 Chromium → CDP 连接/页面装配/注入 → 稳态监督循环
-//!               （每 1s 经 CDP 驱动页面 __CPK_TICK__（stopCheck 1s + actionTick
-//!                 intervalMs 双定时器语义，与 Windows 隐藏态看门狗同一模型）；
-//!                每 5s 采样 __CPK_STATE__ + 取走 __CPK_DRAIN__ 诊断缓冲）
+//!               （活跃态每 1s 经 CDP 驱动页面 __CPK_TICK__（stopCheck 每 tick
+//!                 + actionTick 墙钟门控 ≈ intervalMs，与 Windows 隐藏态看门狗
+//!                 同一模型）；每 5s 采样 __CPK_STATE__ + 取走 __CPK_DRAIN__ 诊断
+//!                 缓冲。空闲自适应降频：无观看且无操作 CPK_IDLE_AFTER_SEC（默认
+//!                 60s）后 tick→CPK_IDLE_TICK_SEC、采样同步放缓——保活动作周期/
+//!                 心跳/自动恢复语义不变，任一操作或打开画面流即时恢复 1s/5s）
 //!   [HTTP 线程] 回环上报/控制端点；控制请求经 channel 交给引擎线程执行：
 //!               快通道（触摸/鼠标/键盘/文本/导航/限帧）fire 即发——在 eval
 //!               等待空窗（200ms 节拍）由 InputPump 即时分发（延迟 ≤200ms，
@@ -86,6 +89,9 @@ pub struct Health {
     /// 页面上报的最近一次状态（alive/retry/enter/…/exited/expired）；
     /// 状态迁移供控制页发通知（对齐 Windows 版系统通知）
     pub last_status: String,
+    /// 当前监督周期是否处于空闲降频态（tick/采样 eval 已放缓）。
+    /// 远程验证降频是否生效：curl /healthz 看 tickIdle
+    pub tick_idle: bool,
 }
 
 /// 运行时平台全貌（控制面板 /platform 切换后由 SharedState 持有；
@@ -108,6 +114,12 @@ pub struct SharedState {
     fps: AtomicU32,
     quality: AtomicU32,
     scale: AtomicU32,
+    /// 最近一次用户活动（控制请求/流订阅）：tick 自适应降频的判定源。
+    /// 「活动」定义＝有人在用：触摸/键鼠/导航/设置调整/画面流订阅；
+    /// 页面自发事件（心跳/保活动作/弹窗）不算——那正是空闲态要省的开销
+    last_activity: Mutex<Instant>,
+    /// 空闲降频态回显（healthz tickIdle）
+    tick_idle: AtomicBool,
 }
 
 impl SharedState {
@@ -141,6 +153,7 @@ impl SharedState {
             scale: cfg.stream_scale_pct.clamp(30, 100),
             title: String::new(),
             last_status: String::new(),
+            tick_idle: false,
         };
         Arc::new(SharedState {
             health: Mutex::new(health),
@@ -151,6 +164,8 @@ impl SharedState {
             fps: AtomicU32::new(cfg.fps.clamp(1, 60)),
             quality: AtomicU32::new(cfg.jpeg_quality.clamp(10, 90)),
             scale: AtomicU32::new(cfg.stream_scale_pct.clamp(30, 100)),
+            last_activity: Mutex::new(Instant::now()),
+            tick_idle: AtomicBool::new(false),
         })
     }
 
@@ -161,6 +176,7 @@ impl SharedState {
         h.fps = self.fps.load(Ordering::Relaxed);
         h.quality = self.quality.load(Ordering::Relaxed);
         h.scale = self.scale.load(Ordering::Relaxed);
+        h.tick_idle = self.tick_idle.load(Ordering::Relaxed);
         let age = if h.last_beat_ms > 0 {
             Some(((util::now_ms() - h.last_beat_ms).max(0) / 1000) as u64)
         } else {
@@ -253,6 +269,16 @@ impl SharedState {
     pub fn mark_exited(&self) { self.exited.store(true, Ordering::Relaxed); }
     pub fn request_stop(&self) { self.stop.store(true, Ordering::Relaxed); }
     pub fn stopping(&self) -> bool { self.stop.load(Ordering::Relaxed) }
+    // —— tick 自适应降频 ——
+    /// 用户活动登记（触摸/键鼠/导航/设置/流订阅都会调用；引擎循环判定空闲用）
+    pub fn touch_activity(&self) {
+        if let Ok(mut g) = self.last_activity.lock() { *g = Instant::now(); }
+    }
+    /// 距最近一次用户活动的时长
+    pub fn activity_age(&self) -> Duration {
+        self.last_activity.lock().map(|g| g.elapsed()).unwrap_or_default()
+    }
+    pub fn set_tick_idle(&self, v: bool) { self.tick_idle.store(v, Ordering::Relaxed); }
 }
 
 pub fn health_json(h: &Health) -> Value {
@@ -283,6 +309,7 @@ pub fn health_json(h: &Health) -> Value {
         "scale": h.scale,
         "title": h.title,
         "lastStatus": h.last_status,
+        "tickIdle": h.tick_idle,
     })
 }
 
@@ -701,6 +728,35 @@ struct Stats {
     cast_stat_prev: (u64, u64, u64),
 }
 
+/// tick 自适应降频决策（纯函数）：空闲态的 (tick 周期, 采样周期)。
+/// Some = 允许降频；None = 该配置下降频被安全规则否决（维持活跃 1s/5s）。
+///
+/// 空闲 CPU 的两个常驻源是每 1s 的 tick eval 与每 5s 的采样 eval（每次都要
+/// 唤醒 Chrome 渲染主线程跑 JS + JSON 往返）。降频规则：
+///  - tick → idle_tick_sec（CPK_IDLE_TICK_SEC，默认 5）
+///  - 采样 → 3 × 动作周期（动作周期 = max(interval_ms, tick)——注入脚本
+///    actionTick 墙钟门控下 ticks 每 ≈动作周期前进一次；采样窗 ≥3 倍保证
+///    每窗必见 ticks 前进，frozen 冻结检测不误报）
+///  - 安全钳：页面级冻结恢复阶梯（frozen_reload × 采样周期）必须先于心跳
+///    硬重启（beat_stale_sec）触发，否则整体放弃降频——绝不为省 CPU 打破
+///    「先页面级恢复、再硬重启」的分级语义
+/// 保活语义不变：保活动作周期恒 ≈ interval_ms（墙钟门控）、心跳照发、
+/// 自动恢复照常（恢复在途时循环侧会暂退回活跃节奏，见 steady_loop）。
+fn idle_periods(cfg: &Config) -> Option<(Duration, Duration)> {
+    if cfg.idle_after_sec == 0 {
+        return None; // 显式关闭
+    }
+    let tick_s = cfg.idle_tick_sec.max(1);
+    let interval_s = ((cfg.interval_ms as u64) / 1000).max(1);
+    let action_s = tick_s.max(interval_s);
+    let sample_s = (action_s * 3).max(5);
+    // 恢复阶梯安全：frozen_reload × 采样 ≥ 心跳硬重启阈值 → 否决降频
+    if (cfg.frozen_reload as u64) * sample_s >= cfg.beat_stale_sec {
+        return None;
+    }
+    Some((Duration::from_secs(tick_s), Duration::from_secs(sample_s)))
+}
+
 fn steady_loop(
     cdp: &mut Cdp,
     session: &str,
@@ -740,6 +796,13 @@ fn steady_loop(
     let mut last_progress = Instant::now();
     let mut last_dialog_count = 0u32;
     let mut rescue_log_at: Option<Instant> = None; // 自愈日志限流（静态页无帧属正常）
+    // —— tick 自适应降频（空闲 CPU 治理）——
+    // 空闲判定＝无画面订阅 && 无用户操作 ≥ idle_after && 无恢复在途；
+    // 恢复在途（not_installed/tick_fails/frozen/nav_err 任一非零）＝页面正被
+    // 救治，维持活跃节奏直到恢复完成；空闲中页面出状况 → 恢复计数增长
+    // 自动暂退活跃节奏（下一循环即恢复密集监督，自愈闭环）
+    let idle_plan = idle_periods(cfg);
+    let mut tick_idle_mode = false;
     shared.set_page("loading");
 
     loop {
@@ -870,10 +933,45 @@ fn steady_loop(
             }
         }
 
+        // —— tick 自适应降频决策（每周期重估：任一活动源出现即退出空闲）——
+        let recovering = stats.not_installed > 0
+            || stats.tick_fails > 0
+            || stats.frozen > 0
+            || stats.nav_err_active;
+        let want_idle = idle_plan.is_some()
+            && !cdp.has_sinks()
+            && !recovering
+            && shared.activity_age() >= Duration::from_secs(cfg.idle_after_sec);
+        if want_idle != tick_idle_mode {
+            tick_idle_mode = want_idle;
+            shared.set_tick_idle(want_idle);
+            if want_idle {
+                let (t, s) = idle_plan.unwrap_or((Duration::from_secs(1), Duration::from_secs(5)));
+                logger.log(
+                    1,
+                    "sys",
+                    &format!(
+                        "无观看/无操作 {}s，tick 降频 1s→{}s、采样 5s→{}s（保活动作周期不变，操作/观看即时恢复）",
+                        cfg.idle_after_sec, t.as_secs(), s.as_secs()
+                    ),
+                );
+            } else {
+                logger.log(1, "sys", "检测到观看/操作，tick 恢复 1s、采样 5s");
+            }
+            // 周期立即重排：恢复态马上 tick+采样确认页面状况，降频态按新周期起步
+            next_tick = Instant::now();
+            next_sample = Instant::now();
+        }
+        let (tick_period, sample_period) = if tick_idle_mode {
+            idle_plan.unwrap_or((Duration::from_secs(1), Duration::from_secs(5)))
+        } else {
+            (Duration::from_secs(1), Duration::from_secs(5))
+        };
+
         let now = Instant::now();
-        // —— tick：每 1 秒驱动页面双定时器 ——
+        // —— tick：驱动页面双定时器（活跃 1s / 空闲 idle_tick_sec） ——
         if now >= next_tick {
-            next_tick = now + Duration::from_secs(1);
+            next_tick = now + tick_period;
             let t0 = Instant::now();
             let r = eval_string_pumped(cdp, session, TICK_EXPR, 5000, &mut pump);
             let dt = t0.elapsed();
@@ -935,10 +1033,10 @@ fn steady_loop(
             }
         }
 
-        // —— 采样：每 5 秒读状态 + 取走诊断缓冲 ——
+        // —— 采样：读状态 + 取走诊断缓冲（活跃 5s / 空闲 3×动作周期） ——
         let now = Instant::now();
         if now >= next_sample {
-            next_sample = now + Duration::from_secs(5);
+            next_sample = now + sample_period;
             let t1 = Instant::now();
             let r2 = eval_string_pumped(cdp, session, SNAPSHOT_EXPR, 8000, &mut pump);
             let dt2 = t1.elapsed();
@@ -1251,6 +1349,9 @@ fn handle_control(
     logger: &Arc<Logger>,
     pump: &mut InputPump,
 ) -> Result<bool, String> {
+    // 用户活动登记：截图/剪贴板/流订阅/设置调整等慢通道请求同样算「有人在用」
+    // （快通道在 dispatch_input 登记，覆盖 eval 等待空窗的泵入路径）
+    shared.touch_activity();
     // 快通道分流：fire 即发（稳态循环直接调用与 eval 等待空窗泵入共用本入口）
     if is_fast(&req) {
         dispatch_input(cdp, session, shared, req, logger, &mut pump.tap_probe)?;
@@ -1404,6 +1505,9 @@ fn dispatch_input(
     logger: &Arc<Logger>,
     tap_probe: &mut Option<(f64, f64)>,
 ) -> Result<(), String> {
+    // 用户活动登记：触摸/键鼠/导航类请求出现＝有人在用，tick 降频即时退出
+    // （稳态循环下一周期 ≤200ms 重估；eval 等待空窗的泵入路径同样经过这里）
+    shared.touch_activity();
     match req {
         ControlRequest::Touch { phase, points, reply } => {
             // 协议规定 touchEnd/touchCancel 不得携带触点（整组释放，引擎侧
@@ -1942,12 +2046,65 @@ mod tests {
             fps: 25,
             jpeg_quality: 50,
             stream_scale_pct: 100,
+            idle_after_sec: 60,
+            idle_tick_sec: 5,
             selftest: false,
             smoke: false,
             smoke_seconds: 60,
         }
     }
 
+    #[test]
+    fn idle_periods_decision_table() {
+        // 默认：60s 无活动进入空闲，tick 1s→5s、采样 5s→15s（3×动作周期）
+        assert_eq!(
+            idle_periods(&test_cfg()),
+            Some((Duration::from_secs(5), Duration::from_secs(15)))
+        );
+        // 显式关闭（CPK_IDLE_AFTER_SEC=0）
+        let mut c = test_cfg();
+        c.idle_after_sec = 0;
+        assert_eq!(idle_periods(&c), None, "idle_after=0 应关闭空闲降频");
+        // tick=1（仅采样放缓）：动作周期取 interval=5s → 采样 15s
+        let mut c = test_cfg();
+        c.idle_tick_sec = 1;
+        assert_eq!(idle_periods(&c), Some((Duration::from_secs(1), Duration::from_secs(15))));
+        // tick < interval：动作周期取 interval（墙钟门控下 ticks 每 8s 前进）
+        let mut c = test_cfg();
+        c.interval_ms = 8000;
+        c.idle_tick_sec = 2;
+        assert_eq!(idle_periods(&c), Some((Duration::from_secs(2), Duration::from_secs(24))));
+        // tick > interval：动作周期取 tick
+        let mut c = test_cfg();
+        c.idle_tick_sec = 10;
+        assert_eq!(idle_periods(&c), Some((Duration::from_secs(10), Duration::from_secs(30))));
+        // 安全钳：冻结恢复阶梯 ≥ 心跳硬重启 → 否决降频（默认 beat_stale=180：
+        // 3×采样 ≥180 即采样 ≥60 → 动作周期 ≥20 → tick ≥20 否决）
+        let mut c = test_cfg();
+        c.idle_tick_sec = 20;
+        assert_eq!(idle_periods(&c), None, "阶梯 3×60=180 ≥ beat_stale 180 应否决");
+        let mut c = test_cfg();
+        c.beat_stale_sec = 44; // 3×15=45 ≥ 44 → 默认周期也被否决
+        assert_eq!(idle_periods(&c), None);
+        // 采样下限 5s：interval 极小（1s）时采样不快于活跃态
+        let mut c = test_cfg();
+        c.interval_ms = 1000;
+        c.idle_tick_sec = 1;
+        assert_eq!(idle_periods(&c), Some((Duration::from_secs(1), Duration::from_secs(5))));
+    }
+
+    #[test]
+    fn shared_state_activity_tracking() {
+        // 活动登记/读取：touch_activity 后年龄归零；空闲态回显写入 healthz
+        let shared = SharedState::new(&test_cfg());
+        assert!(shared.activity_age() < Duration::from_secs(1), "新建即最近活动");
+        assert!(!shared.snapshot().tick_idle, "初始应为活跃态");
+        shared.set_tick_idle(true);
+        let j = health_json(&shared.snapshot());
+        assert_eq!(j.get("tickIdle").and_then(|x| x.as_bool()), Some(true), "healthz 应回显 tickIdle");
+        shared.set_tick_idle(false);
+        assert_eq!(health_json(&shared.snapshot()).get("tickIdle").and_then(|x| x.as_bool()), Some(false));
+    }
     #[test]
     fn wait_platform_accepts_fps_and_wakes_on_platform() {
         // 平台待机期（启动时平台留空）：
@@ -2015,6 +2172,8 @@ mod tests {
             fps: 25,
             jpeg_quality: 50,
             stream_scale_pct: 100,
+            idle_after_sec: 60,
+            idle_tick_sec: 5,
             selftest: false,
             smoke: false,
             smoke_seconds: 60,
@@ -2066,6 +2225,8 @@ mod tests {
             fps: 25,
             jpeg_quality: 50,
             stream_scale_pct: 100,
+            idle_after_sec: 60,
+            idle_tick_sec: 5,
             selftest: false,
             smoke: false,
             smoke_seconds: 60,
@@ -2153,6 +2314,8 @@ mod tests {
             fps: 25,
             jpeg_quality: 50,
             stream_scale_pct: 100,
+            idle_after_sec: 60,
+            idle_tick_sec: 5,
             selftest: false,
             smoke: false,
             smoke_seconds: 60,

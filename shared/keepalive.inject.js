@@ -37,7 +37,7 @@
   // 且两个转换器天然互斥，绝不会双重转换。
   try { if (!('ontouchstart' in window)) window.ontouchstart = null; } catch(e){}
 
-  var state = { ticks: 0, clicks: 0, last: '', diagAt: {}, lastUrl: '', wasExited: false, stopDone: false, entered: false, n: 0, pdwMiss: 0, cfMiss: 0, diagBuf: [] };
+  var state = { ticks: 0, clicks: 0, last: '', diagAt: {}, lastUrl: '', wasExited: false, stopDone: false, entered: false, nextActionAt: 0, pdwMiss: 0, cfMiss: 0, diagBuf: [] };
   window.__CPK_STATE__ = state;
 
   // document_start 阶段 body/head 可能尚未解析（初始化脚本在文档创建时执行）：
@@ -610,8 +610,14 @@
     }
     if (resizing) return;  // resize 期间跳过 DOM 强制布局操作（stopCheck/actionTick 的 vis()）
     stopCheck();                                    // 原版 stopTimer：每 1 秒
-    var every = Math.max(1, Math.round((CFG.intervalMs || 5000) / 1000));
-    if (++state.n >= every) { state.n = 0; actionTick(); }  // 原版 runTimer：每 5 秒
+    // 原版 runTimer：每 intervalMs（5 秒）。旧计数门控（++state.n >= every）
+    // 假设 tick 恒 1s；宿主空闲降频（Linux 无观看时 tick 5s）下会把动作周期
+    // 拉长 every 倍——改墙钟门控：任意 tick 周期（≤ intervalMs）下动作周期
+    // 恒 ≈ intervalMs。页内 setInterval 1s 驱动（Windows 可见态）行为不变。
+    var period = CFG.intervalMs || 5000;
+    var nowMs = Date.now();
+    if (!state.nextActionAt) state.nextActionAt = nowMs + period;
+    if (nowMs >= state.nextActionAt) { state.nextActionAt = nowMs + period; actionTick(); }
   }
 
   // 手动诊断入口：输出当前页面结构快照
@@ -669,7 +675,7 @@
     setInterval(function(){ try { tick(); } catch(e){} }, 1000);
   }
   send('installed');
-  diag('sys', '保活脚本已注入 platform=' + CFG.platform + ' 动作周期=' + (CFG.intervalMs || 5000) + 'ms 检测周期=1000ms' +
+  diag('sys', '保活脚本已注入 platform=' + CFG.platform + ' 动作周期=' + (CFG.intervalMs || 5000) + 'ms 检测周期=宿主tick(墙钟门控)' +
        ' 触点光标=' + (CFG.customCursor ? '开' : '关') +
        ' 鼠标操控模拟=' + (tsOn ? '已安装(ontouchstart存在,页面自带模拟器未加载)' : '未安装(页面自带模拟器生效)') +
        ' 驱动=' + (CFG.pageTimer !== false ? '页内定时器' : '宿主CDP看门狗') +

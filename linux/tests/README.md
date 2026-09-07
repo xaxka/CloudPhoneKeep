@@ -29,6 +29,8 @@ export CPK_SHELL=/path/to/chrome        # chromium / google-chrome / chrome-head
 | `test_everynth.py` | Chrome startScreencast 参数实验（everyNthFrame/maxFrameRate 实际效果） |
 | `test_ack_pacing.py` | screencastFrameAck 门控实验（停止 ack 是否压制 Chrome 出帧） |
 | `test_ack_hold.py` | ack 持有语义实验（持有超时死流、stop+start 复活） |
+| `test_wall_clock_gate.js` | 保活脚本墙钟门控验证（空闲降频下 actionTick 周期恒 ≈ intervalMs，不被 tick 周期拉长） |
+| `test_idle_smoke.sh` | 空闲降频真实引擎冒烟（需先 `cargo build`；降频迁移日志 + healthz tickIdle + 空闲态 ticks 每 5s 前进 + smoke PASS） |
 
 ## 用法
 
@@ -36,6 +38,8 @@ export CPK_SHELL=/path/to/chrome        # chromium / google-chrome / chrome-head
 cd linux/tests
 node e2e_repro.js          # 主回归：末行应输出「控制页发出了 3 次 end」
 python3 mock_control_page.py   # 起控制页 mock：http://127.0.0.1:8899/
+node test_wall_clock_gate.js   # 墙钟门控（无外部依赖）
+bash test_idle_smoke.sh       # 空闲降频引擎冒烟（先 cd ../ && cargo build）
 ```
 
 脚本从 `../../shared/` 读取控制页与保活脚本（与生产同一份文件），

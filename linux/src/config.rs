@@ -66,6 +66,15 @@ pub struct Config {
     /// 调整；<100 时 Chrome 编码前先缩小，编码 CPU 与带宽按像素数近线性下降，
     /// 触摸坐标不受影响）
     pub stream_scale_pct: u32,
+    /// tick 自适应降频：连续无观看/无操作该时长（秒）后进入空闲态
+    /// （CPK_IDLE_AFTER_SEC，默认 60；0 = 关闭空闲降频）。
+    /// 空闲态下 tick eval 降频到 idle_tick_sec、采样 eval 降频到 3 倍动作周期；
+    /// 保活动作周期/心跳/自动恢复全部不变；任一操作或打开画面流立即恢复
+    pub idle_after_sec: u64,
+    /// 空闲态 tick 周期（秒；CPK_IDLE_TICK_SEC，默认 5，1..60）。
+    /// 采样周期同步放缓保证冻结检测不误报；若该配置会打破「页面级恢复
+    /// 先于心跳硬重启」的分级安全，引擎自动放弃降频（维持 1s/5s）
+    pub idle_tick_sec: u64,
     pub selftest: bool,
     pub smoke: bool,
     pub smoke_seconds: u64,
@@ -173,6 +182,8 @@ impl Config {
             fps: i64_env("CPK_FPS", 10, 1, 60) as u32,
             jpeg_quality: i64_env("CPK_JPEG_QUALITY", 50, 10, 90) as u32,
             stream_scale_pct: i64_env("CPK_STREAM_SCALE", 100, 30, 100) as u32,
+            idle_after_sec: i64_env("CPK_IDLE_AFTER_SEC", 60, 0, 3600) as u64,
+            idle_tick_sec: i64_env("CPK_IDLE_TICK_SEC", 5, 1, 60) as u64,
             selftest: bool_env("CPK_SELFTEST", false),
             smoke: bool_env("CPK_SMOKE", false),
             smoke_seconds: i64_env("CPK_SMOKE_SECONDS", 60, 10, 3600) as u64,
@@ -205,6 +216,9 @@ mod tests {
         assert_eq!(cfg.page_timer, false);
         assert_eq!(cfg.chrome_bin, "chrome-headless-shell");
         assert!(cfg.profile_dir.to_string_lossy().contains("profile-account1"));
+        // 空闲降频默认：60s 无活动进入空闲，tick 1s→5s
+        assert_eq!(cfg.idle_after_sec, 60);
+        assert_eq!(cfg.idle_tick_sec, 5);
 
         // 覆盖：显式 CPK_URL → 自动启动（mobile 视口）；自定义分辨率/周期
         std::env::set_var("CPK_ACCOUNT", "18612341234");
@@ -254,10 +268,18 @@ mod tests {
         std::env::set_var("CPK_INTERVAL_MS", "abc");
         std::env::set_var("CPK_TICK_FAIL_RELOAD", "99999");
         std::env::set_var("CPK_UA_MODE", "bogus");
+        std::env::set_var("CPK_IDLE_AFTER_SEC", "0");
+        std::env::set_var("CPK_IDLE_TICK_SEC", "abc");
         let cfg = Config::from_env();
         assert_eq!(cfg.interval_ms, 5000);
         assert_eq!(cfg.tick_fail_reload, 600);
         assert_eq!(cfg.ua_mode, "mobile", "非法 UA 模式应回退默认 mobile");
+        // 空闲旋钮：0 = 显式关闭；非法值回默认
+        assert_eq!(cfg.idle_after_sec, 0, "CPK_IDLE_AFTER_SEC=0 应关闭空闲降频");
+        assert_eq!(cfg.idle_tick_sec, 5, "非法 CPK_IDLE_TICK_SEC 应回默认 5");
+        std::env::set_var("CPK_IDLE_TICK_SEC", "30");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.idle_tick_sec, 30);
         // 合法覆盘：windows 仍可选（旧部署兼容）
         std::env::set_var("CPK_UA_MODE", "windows");
         let cfg = Config::from_env();
@@ -282,6 +304,8 @@ mod tests {
         std::env::remove_var("CPK_REPORT_PORT");
         std::env::remove_var("CPK_TICK_FAIL_RELOAD");
         std::env::remove_var("CPK_UA_MODE");
+        std::env::remove_var("CPK_IDLE_AFTER_SEC");
+        std::env::remove_var("CPK_IDLE_TICK_SEC");
         let _ = k; // 保留原值避免 unused 警告
     }
 }
