@@ -152,7 +152,7 @@ impl Config {
                 PLATFORM_MOBILE_H as i64,
             )
         };
-        let account = envs("CPK_ACCOUNT").unwrap_or_else(|| "account1".into());
+        let account = envs("CPK_ACCOUNT").unwrap_or_else(|| "1".into());
         let data_dir = match envs("CPK_DATA_DIR") {
             Some(p) => PathBuf::from(p),
             None => default_data_dir(),
@@ -244,7 +244,7 @@ mod tests {
         assert_eq!(cfg.ua_mode, "mobile", "默认 UA 应为移动（云机 H5 手机布局）");
         assert_eq!(cfg.page_timer, false);
         assert_eq!(cfg.chrome_bin, "chrome-headless-shell");
-        assert!(cfg.profile_dir.to_string_lossy().contains("profile-account1"));
+        assert!(cfg.profile_dir.to_string_lossy().contains("profile-1"));
         // 空闲降频默认：60s 无活动进入空闲，tick 1s→5s
         assert_eq!(cfg.idle_after_sec, 60);
         assert_eq!(cfg.idle_tick_sec, 5);

@@ -12,7 +12,8 @@
 `docker pull` 自动选择架构（无需 `--platform`，也不会有平台不匹配告警）。
 
 详细文档：[部署运维](docs/deploy.md) · [保活规则](../shared/docs/keepalive-rules.md) ·
-[配置参考](docs/configuration.md) · [排查指南](docs/diagnostics.md) · [架构](../shared/docs/architecture.md)。
+[配置参考](docs/configuration.md) · [排查指南](docs/diagnostics.md) · [架构](../shared/docs/architecture.md) ·
+[构建与发布](docs/build.md)。
 
 ## 为什么内存占用低
 
@@ -45,11 +46,11 @@
 ## 快速开始
 
 ```bash
-# 1. 启动
+# 1. 启动（单账号默认即可：CPK_ACCOUNT 默认 1，可不设；
+#    多账号才需要设 CPK_ACCOUNT 区分，建议用手机号）
 docker run -d --name cpk \
   -v cpk:/data \
   -p 127.0.0.1:8088:8088 \
-  -e CPK_ACCOUNT=138xxxx1234 \
   --shm-size 128m --init --restart unless-stopped \
   ghcr.io/xaxka/cloudphonekeep:latest
 
@@ -68,12 +69,12 @@ docker logs -f cpk     # 诊断日志实时镜像
 #    （宿主 resolv.conf 指向本机 dnsmasq），加 --dns 223.5.5.5 即可
 ```
 
-多账号：`docker run` 换容器名/`-v` 目录/`-p` 宿主端口（8089、8090…），或用本目录
-`docker-compose.yml` 复制服务块。常用环境变量见 [配置参考](docs/configuration.md)：
-`CPK_ACCOUNT` / `CPK_URL`；安全相关 `CPK_CONTROL_TOKEN`（公网可达时务必
-设置）、`CPK_EXTRA_CHROME_ARGS`（低内存调优）。平台（移动/联通）不在环境变量里
-设置——启动后留空，控制页「设置→平台」选择后才加载页面（显式 `CPK_URL`
-视为自动启动，供 CI 冒烟/自定义 H5）。
+多账号：`docker run` 换容器名/`-v` 目录/`-p` 宿主端口（8089、8090…）并加
+`-e CPK_ACCOUNT=手机号` 区分数据目录，或用本目录 `docker-compose.yml` 复制服务块。
+常用环境变量见 [配置参考](docs/configuration.md)：`CPK_PLATFORM` / `CPK_URL`；
+安全相关 `CPK_CONTROL_TOKEN`（公网可达时务必设置）、`CPK_EXTRA_CHROME_ARGS`
+（低内存调优）。平台（移动/联通）不在环境变量里设置——启动后留空，控制页
+「设置→平台」选择后才加载页面（显式 `CPK_URL` 视为自动启动，供 CI 冒烟/自定义 H5）。
 
 ## 裸机直跑（无 Docker）
 
@@ -99,8 +100,9 @@ chmod +x cloudphonekeep-linux-amd64
 #    中文字体可选（截图可读性）：fonts-wqy-microhei
 
 # 3. 运行（数据目录默认 ~/.local/share/cloudphonekeep，/data 存在时优先用它——
-#    与容器行为对齐；Profile/日志都在里面）
-CPK_ACCOUNT=138xxxx1234 ./cloudphonekeep-linux-amd64
+#    与容器行为对齐；Profile/日志都在里面；单账号可不设 CPK_ACCOUNT，
+#    多实例时才需要用它区分）
+./cloudphonekeep-linux-amd64
 
 # 4. 浏览器打开控制页（与 Docker 版完全一致）
 #    http://127.0.0.1:8088/

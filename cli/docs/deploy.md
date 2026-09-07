@@ -9,33 +9,29 @@ Silicon 均原生运行，`docker pull` 自动选架构）。不想用 Docker �
 ## 快速开始
 
 ```bash
-# 1. 拉镜像（本地无 Rust 也可 docker compose build）
+# 1. 拉镜像（本地无 Rust 也可 docker compose build，见 build.md）
 docker pull ghcr.io/xaxka/cloudphonekeep:latest
 
-# 2. 数据目录（每账号一个）
-mkdir -p data/138xxxx1234
-
-# 3. 启动
-docker run -d --name cpk-138xxxx1234 \
-  -v $PWD/data/138xxxx1234:/data \
+# 2. 启动（单账号默认即可：CPK_ACCOUNT 默认 1 可不设；平台留空，
+#    控制页「设置→平台」选移动/联通后引擎加载页面（约 10 秒）。
+#    也可 -e CPK_PLATFORM=mobile 启动即加载，免开控制页选择）
+docker run -d --name cpk \
+  -v cpk:/data \
   -p 127.0.0.1:8088:8088 \
-  -e CPK_ACCOUNT=138xxxx1234 \
-  -e CPK_PLATFORM=mobile \
   --shm-size 128m --init --restart unless-stopped \
   ghcr.io/xaxka/cloudphonekeep:latest
 
-# 4. 首次登录（docker run 示例已带 CPK_PLATFORM=mobile：启动即加载页面；
-#    也可留空启动，控制页「设置→平台」选移动/联通后引擎加载页面（约 10 秒））
-#    http://127.0.0.1:8088/
+# 3. 首次登录：浏览器打开 http://127.0.0.1:8088/（全屏实时画面，
+#    触摸/鼠标/键盘/剪贴板输入全覆盖）；
 #    登录一次后 Cookie/LocalStorage 持久化在 volume，之后自动保活
 
-# 5. 观察健康状态
+# 4. 观察健康状态
 curl http://127.0.0.1:8088/healthz
-docker logs -f cpk-138xxxx1234     # 诊断日志实时镜像
+docker logs -f cpk     # 诊断日志实时镜像
 ```
 
-多账号用 `cli/docker-compose.yml` 复制服务块即可（端口 8088、8089…
-递增，宿主端口可自由改）。
+多账号用 `cli/docker-compose.yml` 复制服务块即可（各账号设 `CPK_ACCOUNT`
+区分数据目录，建议手机号；端口 8088、8089… 递增，宿主端口可自由改）。
 
 ## 镜像构成与多架构
 
