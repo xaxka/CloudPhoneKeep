@@ -69,8 +69,7 @@ CLI 版构建（源码 / Docker / musl 交叉编译）与 CI 自动发布见
 ## 目录结构
 
 ```
-├── ui/          # 前端（Windows 版设置窗口，纯静态 HTML/JS，无构建步骤）
-├── src-tauri/   # Windows 版（Tauri，独立 workspace，含专属文档）
+├── src-tauri/   # Windows 版（Tauri，独立 workspace；ui/ 前端在本目录内）
 ├── shared/      # 双端共享 crate（保活脚本/平台预设/构建器，含共用文档）
 ├── cli/         # CLI 版（Rust 引擎 + Docker + 测试脚本 + 文档）
 └── Cargo.toml   # 根 workspace（cli + shared）

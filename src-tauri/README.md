@@ -42,8 +42,9 @@ cargo build --release --manifest-path src-tauri/Cargo.toml
 ```
 
 src-tauri 为独立 Cargo workspace（根 workspace `exclude`），自身 target/ 与
-CI 产物路径不变。前端为纯静态 HTML/JS（`../ui/` 目录，设置窗口），无 Node
-构建步骤。推送代码后 GitHub Actions 自动构建并发布到 `dev` 预发布版。
+CI 产物路径不变。前端为纯静态 HTML/JS（`src-tauri/ui/` 目录，设置窗口，
+随 Tauri 子项目就地维护），无 Node 构建步骤。推送代码后 GitHub Actions
+自动构建并发布到 `dev` 预发布版。
 
 ## 文档
 

@@ -7,9 +7,8 @@
 //! 职责边界（仓库目录约定）：
 //! ```text
 //! cli/       → CLI 专属（引擎/CDP/WS/报告服务/控制页）
-//! src-tauri/ → Tauri 专属（窗口/托盘/热键/IPC）
+//! src-tauri/ → Tauri 专属（窗口/托盘/热键/IPC；前端 ui/ 在其目录内）
 //! shared/    → CLI + Tauri 共享（本 crate）
-//! ui/        → 前端 UI（登录设置窗口，纯静态）
 //! ```
 
 pub mod keepalive;
