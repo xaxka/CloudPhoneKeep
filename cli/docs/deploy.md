@@ -93,8 +93,10 @@ CLI 版使用 **Google Chrome for Testing 官方预编译的 `chrome-headless-sh
 - headless-shell 本身即无头模式，恒不加 `--headless=new`（`CPK_HEADLESS` 开关
   已移除；极少数换用完整 Chromium 的场景经 `CPK_EXTRA_CHROME_ARGS` 自行追加）
 - 依赖最小化：运行层 apt 包为 readelf 直连 NEEDED + LD_DEBUG dlopen 全程
-  实测的最小集（17 个直连包，传递依赖由 apt 自动带入；fontconfig/freetype
-  全程零加载，见 `Dockerfile` 注释），curl/unzip 仅构建期使用后即删除
+  实测的精简集（直连 17 包 + 传递依赖 5 包显式列出——装父包时 apt 会自动
+  带入，显式列出可防「父包已预装而子包缺失」的边角环境；fontconfig/
+  freetype 既非直连、也无保留包依赖带入，且全程零加载，已删，见
+  `Dockerfile` 注释），curl/unzip 仅构建期使用后即删除
 
 ## 首次登录与控制台
 

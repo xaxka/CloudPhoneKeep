@@ -34,6 +34,10 @@ export CPK_SHELL=/path/to/chrome        # chromium / google-chrome / chrome-head
 | `ci_smoke.sh` | **CI 冒烟档**：真实引擎 + chrome 端到端（本地动画页/注入/画面流出帧/控制链路/healthz 字段/smoke PASS）。CI 用 install.sh 装好的 /opt 产物跑 |
 | `knob_e2e.py` | 三旋钮（fps/quality/scale）热更新端到端：healthz 即刻回读 + 帧实际尺寸/实测帧率证真实生效 + 越界 400 |
 | `auth_e2e.py` | Basic Auth 端到端：无凭据 401×4 + WWW-Authenticate + 免鉴权通道照常 + 心跳不断 + 凭据/token 叠加 |
+| `check_md_links.py` | 文档冒烟：全仓 md 相对链接有效性检查（改文档后随手跑，退出码可直接进脚本/CI） |
+
+双端组织约定：CLI（Linux/Docker）侧测试统一在本目录；Tauri（Windows）侧
+将来如需 e2e，对应放 `src-tauri/tests/`，命名与端口约定与本地保持一致。
 
 ## 用法
 
@@ -46,6 +50,7 @@ bash test_idle_smoke.sh       # 空闲降频引擎冒烟（先在仓库根 cargo
 bash ci_smoke.sh              # CI 冒烟档（需先 cargo build --release）
 python3 knob_e2e.py           # 三旋钮热更新（需 chrome-headless-shell）
 python3 auth_e2e.py           # Basic Auth 端到端（需 chrome-headless-shell）
+python3 check_md_links.py     # 全仓 md 链接检查（无外部依赖）
 ```
 
 真实引擎类脚本（`ci_smoke.sh` / `knob_e2e.py` / `auth_e2e.py` / `test_idle_smoke.sh`）

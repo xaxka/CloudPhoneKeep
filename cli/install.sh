@@ -33,15 +33,19 @@ RAW_VERSIONS="${CPK_VERSIONS_URL:-https://raw.githubusercontent.com/xaxka/CloudP
 SHELL_V_AMD64=""; SHELL_V_ARM64=""
 CFT_GOOGLE="https://storage.googleapis.com/chrome-for-testing-public"
 CFT_MIRROR="https://registry.npmmirror.com/-/binary/chrome-for-testing"
-# 运行库最小集（2026-09 实测 chrome-headless-shell 152：readelf 直连 NEEDED +
-# LD_DEBUG dlopen 全程审计）。被裁 7 个：libnspr4/libxcb1/libxrender1/libxi6/
-# libdrm2 是纯传递依赖，装直连包时 apt 自动带入；libfontconfig1/libfreetype6
-# 全程零加载（文字渲染不经动态 fontconfig）。libudev1 为直连依赖补入
-# （此前靠基础镜像默认存在）。libpci/libva/libwayland 为可选 dlopen 探测，
-# 缺失无害，故意不装
+# 运行库清单（2026-09 实测 chrome-headless-shell 152：readelf 直连 NEEDED +
+# LD_DEBUG dlopen 全程审计 + apt 依赖链核对）。判定标准：直连 NEEDED 必装；
+# 传递依赖即使装父包时 apt 会自动带入，也显式列出（幂等，且防「父包已预装
+# 而子包缺失」的边角环境）——libnss3→libnspr4、libgbm1→libdrm2、
+# libx11-6→libxcb1、libxrandr2→libxrender1、libatspi2.0-0→libxi6。
+# 仅删 2 个零价值包：libfontconfig1/libfreetype6——既非直连、又无任何保留包
+# 依赖带入，且 LD_DEBUG 全程审计零加载（含中文文字渲染场景，Chrome 自带
+# 渲染栈不经系统 fontconfig/freetype）。libudev1 为直连依赖补入。
+# libpci/libva/libwayland 为可选 dlopen 探测，缺失无害，故意不装
 RUNTIME_DEBS="libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libdbus-1-3 \
-libexpat1 libgbm1 libglib2.0-0 libnss3 libudev1 libx11-6 libxcomposite1 \
-libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2"
+libdrm2 libexpat1 libgbm1 libglib2.0-0 libnss3 libnspr4 libudev1 libx11-6 \
+libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
+libxrender1 libxcb1 libxi6"
 
 usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,2\}//'; }
 

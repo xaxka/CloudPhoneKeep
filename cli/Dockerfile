@@ -48,10 +48,11 @@ ARG TARGETARCH
 # 浏览器版本唯一源（与 install.sh / CI 冒烟同一份文件）
 COPY cli/chrome-versions.env /tmp/chrome-versions.env
 
-# 运行时依赖（readelf 直连 NEEDED + LD_DEBUG dlopen 实测最小集；被裁的
-# libnspr4/libxcb1/libxrender1/libxi6/libdrm2 为传递依赖由 apt 自动带入，
-# libfontconfig1/libfreetype6 全程零加载）+ 中文字体 + tzdata；
-# curl/unzip 仅构建期用完即删。
+# 运行时依赖（readelf 直连 NEEDED + LD_DEBUG dlopen 实测）：直连 17 包 +
+# 传递依赖 5 包（libnspr4/libdrm2/libxcb1/libxrender1/libxi6——装父包时
+# apt 会自动带入，仍显式列出防「父包已预装而子包缺失」的边角环境）；
+# libfontconfig1/libfreetype6 既非直连也无带入链且全程零加载，已删。
+# 中文字体 + tzdata；curl/unzip 仅构建期用完即删。
 # 镜像瘦身五连（amd64 579MB → 约 490MB，双架构同享）：
 #   1) dpkg path-exclude：doc/man/翻译文件自始不落盘（copyright 保留），比装完再删层更小
 #   2) 中文字体 wqy-zenhei(16MB) → wqy-microhei(5MB)：CJK 覆盖同源，截图可读
@@ -64,9 +65,9 @@ RUN printf 'path-exclude=/usr/share/doc/*\npath-include=/usr/share/doc/*/copyrig
     && apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates tzdata wget fonts-wqy-microhei fonts-liberation \
       libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libdbus-1-3 \
-      libexpat1 libgbm1 libglib2.0-0 libnss3 libudev1 \
-      libx11-6 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
-      libxkbcommon0 libxrandr2 \
+      libdrm2 libexpat1 libgbm1 libglib2.0-0 libnss3 libnspr4 \
+      libudev1 libx11-6 libxcomposite1 libxdamage1 libxext6 \
+      libxfixes3 libxkbcommon0 libxrandr2 libxrender1 libxcb1 libxi6 \
       curl unzip \
     && . /tmp/chrome-versions.env \
     && case "$TARGETARCH" in \
