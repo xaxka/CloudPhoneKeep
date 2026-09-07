@@ -1,8 +1,10 @@
-# Linux / Docker 部署
+# CLI 版部署（Linux / Docker / 裸机）
 
-一个容器 = 一个账号。镜像：`ghcr.io/xaxka/cloudphonekeep`（**多架构**：
+一个实例 = 一个账号（Docker 容器或裸机进程）。镜像：`ghcr.io/xaxka/cloudphonekeep`（**多架构**：
 `linux/amd64` + `linux/arm64` 单一 manifest，x86 服务器与 ARM 主机/Apple
-Silicon 均原生运行，`docker pull` 自动选架构）。
+Silicon 均原生运行，`docker pull` 自动选架构）。不想用 Docker 的机器
+（已装 chrome-headless-shell）可直接跑 CI 同源发布的 musl 静态二进制，
+见 [`cli/README.md「裸机直跑」`](../cli/README.md)。
 
 ## 快速开始
 
@@ -32,7 +34,7 @@ curl http://127.0.0.1:8088/healthz
 docker logs -f cpk-138xxxx1234     # 诊断日志实时镜像
 ```
 
-多账号用 `linux/docker-compose.yml` 复制服务块即可（端口 8088、8089…
+多账号用 `cli/docker-compose.yml` 复制服务块即可（端口 8088、8089…
 递增，宿主端口可自由改）。
 
 ## 镜像构成与多架构
@@ -179,14 +181,18 @@ Profile 持久化 + 上述分级，容器层面再叠 `restart: unless-stopped`�
 
 ## CI（GitHub Actions）
 
-推送 `main` 后 CI 自动（`.github/workflows/ci.yml` 的 `linux` job）：
+推送 `main` 后 CI 自动（`.github/workflows/ci.yml` 的 `linux` job，
+源码在 `cli/` + `shared/`，根 workspace）：
 
-1. `cargo test`（单元测试：协议编解码/脚本生成/配置/日志/HTTP 服务）
-2. `CPK_SELFTEST=1` 无浏览器自检
-3. Docker 构建镜像 → **容器内真实 Chromium 冒烟 60 秒**（WS 握手/CDP 注入/
-   看门狗/心跳指标验证后按指标退出）
-4. 多架构（amd64 + arm64）推送 `ghcr.io/xaxka/cloudphonekeep`
+1. runner 交叉编译 musl 静态二进制（amd64 + arm64，rust-lld）→
+   发布 `cloudphonekeep-linux-amd64` / `cloudphonekeep-linux-arm64` 到
+   `dev` Release（与镜像内引擎同源同构，裸机直跑用）
+2. Docker 多阶段构建（rust:1-alpine 交叉编译引擎 → debian 运行层）→
+   多架构（amd64 + arm64）推送 `ghcr.io/xaxka/cloudphonekeep`
    （`:latest` 与 commit SHA 双标签）
+
+> 单测/selftest/冒烟步骤已按用户要求移除（无浏览器环境的快速回归对真实
+> 问题无覆盖，验证靠生产日志留痕与 `cli/tests/` 本地复现脚本集）。
 
 > GHCR 包首次创建后默认私有：GitHub → Packages → cloudphonekeep → Settings
 > 改 Public，或 pull 前 `docker login ghcr.io`。
@@ -221,6 +227,6 @@ docker run -d --name cpk-138xxxx1234 --dns 223.5.5.5 \
 `CPK_EXTRA_CHROME_ARGS="--js-flags=--max-old-space-size=512"` 压制 V8 堆。
 
 **Q: Windows 版会被影响吗？**
-保活脚本 `shared/keepalive.inject.js` 两平台共用（改规则一处生效）；除此之外
-Linux 版全部文件在 `linux/` 目录，Windows 版其余代码独立，CI 双 job 分别
-验证。推送 GHCR / Release 的发布流程互不影响。
+保活脚本与平台预设在 `shared/`（双端唯一源，改规则一处生效）；CLI 版全部
+文件在 `cli/` 目录，Tauri 版在 `src-tauri/`，CI 双 job 分别验证。推送
+GHCR / Release 的发布流程互不影响。

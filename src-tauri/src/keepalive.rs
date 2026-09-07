@@ -1,26 +1,33 @@
 use crate::config::SlotConfig;
+use cloudphonekeep_shared::keepalive::{build_init_script as shared_build, InjectParams};
 
 /// 内嵌的触点光标 PNG（26×26，热点居中 13,13）。安卓官方风格触点指示器：
 /// Android 品牌绿(#3DDC84)主圆环 + 外层淡绿光晕 + 白色半透明触点面，
 /// 本地程序化绘制（抗锯齿），零第三方网络依赖。
-/// v1.7.2 起默认关闭（custom_cursor=false，使用系统默认鼠标指针），资源保留备用
+/// v1.7.2 起默认关闭（custom_cursor=false，使用系统默认鼠标指针），资源保留备用。
+/// Tauri 专属资源（CLI 无头端不需要），故留在 src-tauri/assets 而不进 shared。
 const CURSOR_PNG_B64: &str = include_str!("../assets/cursor.b64");
-
-/// 保活脚本唯一源文件：仓库根 `shared/keepalive.inject.js`。
-/// Windows / Linux 两个平台 include_str! 同一本文件——修改保活规则、
-/// 选择器、弹窗处理逻辑只需改那一份，双端构建后同时生效（见文件头注释）。
-const TEMPLATE: &str = include_str!("../../shared/keepalive.inject.js");
 
 /// 生成注入到云手机页面的保活初始化脚本。
 ///
-/// 定时器结构忠实还原原版 web.aardio 的双定时器：
+/// 脚本本体与占位符替换逻辑的唯一源在 `shared/keepalive.inject.js` +
+/// `cloudphonekeep_shared::keepalive`（CLI/Tauri 双端同源，改保活规则、
+/// 选择器、弹窗处理逻辑只需改那一份，双端构建后同时生效）。
+///
+/// Tauri 端策略（与 CLI 端的差异，见 shared::keepalive 模块注释）：
+///   - slot / platform / homeUri / 各开关取槽位配置（SlotConfig）
+///   - platform 空值回退 "unicom"（历史行为）
+///   - pageTimer 恒 true（窗口可见时页内 setInterval 驱动，隐藏时看门狗接管）
+///   - customCursor 取用户配置，光标 b64 用本端内嵌资源
+///
+/// 双定时器结构忠实还原原版 web.aardio：
 ///   stopTimer 1000ms → 脚本 stopCheck()：退出检测(#tabbar/.title-bar) + 到期「知道了」
 ///   runTimer  5000ms → 脚本 actionTick()：重连/进入/确认弹窗点击 + 解锁区/进入云机
 /// （窗口隐藏时由 Rust 看门狗每 1 秒 eval __CPK_TICK__ 驱动，tick 内自行按周期分流）
 ///
 /// 按槽位配置的 platform 分流（unicom 联通 / mobile 移动）：
 /// 联通：试用弹窗(.try-content/.try-btn)、无法连接(.phone-dialog-wrap，
-///       v1.9.0 起按钮宽松匹配 + miss 时记录弹窗全文/按钮清单 + 持续失败分级兜底)，
+///       v1.9.0 起按钮宽松匹配 + miss 时记录弹窗全文/按钮清单 + 持续失败分级兜底)、
 ///       详情页进入云机(.detail-info-container/.enter-intance)、到期(.van-dialog__confirm)、
 ///       退回首页检测(.title-bar)
 /// 移动：解锁区进入云机(.unlocked/.enter-intance)、重连/进入/确认按钮按文字包含匹配、
@@ -38,29 +45,21 @@ pub fn build_init_script(cfg: &SlotConfig, port: u16) -> String {
         cfg.platform.trim().to_string()
     };
 
-    let inject = serde_json::json!({
-        "slot": cfg.slot,
-        "port": port,
-        "platform": platform,
-        "homeUri": cfg.web_uri,
-        "keepAlive": cfg.keep_alive,
-        "intervalMs": cfg.interval_ms,
-        "simulateActivity": cfg.simulate_activity,
-        "customCursor": cfg.custom_cursor,
-        "blockContextMenu": cfg.block_context_menu,
-        // Windows：窗口可见时由页内 setInterval 驱动（隐藏时看门狗接管）。
-        // Linux 无头恒传 false（宿主 CDP 看门狗驱动），见 shared 脚本头注释
-        "pageTimer": true,
-    });
-
-    let cfg_json = serde_json::to_string(&inject).unwrap_or_else(|_| "{}".into());
-    let cursor_b64 = CURSOR_PNG_B64.trim();
-
-    // 占位符替换约定与 linux/src/keepalive.rs 完全一致（shared 脚本头有说明）
-    TEMPLATE
-        .replace("var CFG = __CPK_CFG__;", &format!("var CFG = {cfg_json};"))
-        .replace(
-            "data:image/png;base64,__CPK_CURSOR__",
-            &format!("data:image/png;base64,{cursor_b64}"),
-        )
+    shared_build(
+        &InjectParams {
+            slot: cfg.slot,
+            platform: &platform,
+            home_uri: &cfg.web_uri,
+            keep_alive: cfg.keep_alive,
+            interval_ms: cfg.interval_ms,
+            simulate_activity: cfg.simulate_activity,
+            custom_cursor: cfg.custom_cursor,
+            block_context_menu: cfg.block_context_menu,
+            // Windows：窗口可见时由页内 setInterval 驱动（隐藏时看门狗接管）。
+            // CLI 无头端传 false（宿主 CDP 看门狗驱动），见 shared 脚本头注释
+            page_timer: true,
+        },
+        port,
+        CURSOR_PNG_B64.trim(),
+    )
 }

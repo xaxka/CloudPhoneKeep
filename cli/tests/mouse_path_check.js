@@ -9,7 +9,7 @@ const SHELL = process.env.CPK_SHELL || ['/usr/bin/chromium', '/usr/bin/chromium-
   '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chrome-headless-shell']
   .find(p => fs.existsSync(p)) || (() => {
   console.error('未找到 Chrome：请 export CPK_SHELL=/path/to/chrome（或 chromium）'); process.exit(1); })();
-const SHARED = path.join(__dirname, '..', '..', 'shared');   // 仓库根 shared/
+const CLI = path.join(__dirname, '..');      // cli/ 根（控制页模板 control_page.html，CLI 专属）
 const ENG_PORT = 8940, B_PORT = 9560;
 const FLAGS = ['--remote-debugging-address=127.0.0.1','--remote-allow-origins=*','--window-size=414,896',
   '--force-device-scale-factor=1','--no-first-run','--no-default-browser-check','--disable-gpu',
@@ -36,7 +36,7 @@ async function main(){
      if(req.url==='/mouse'){mouseStats[form.action]++;console.log(`    [engine] MOUSE ${form.action} ${form.x||''},${form.y||''}`);}
      if(req.url==='/touch'){mouseStats.touch++;console.log(`    [engine] TOUCH ${form.phase}`);}
      res.writeHead(200);res.end('ok');});return;}
-   if(req.url==='/'){res.writeHead(200,{'content-type':'text/html; charset=utf-8'});return res.end(fs.readFileSync(path.join(SHARED,'control_page.html')));}
+   if(req.url==='/'){res.writeHead(200,{'content-type':'text/html; charset=utf-8'});return res.end(fs.readFileSync(path.join(CLI,'control_page.html')));}
    if(req.url==='/healthz'){res.writeHead(200,{'content-type':'application/json'});return res.end(JSON.stringify({ok:true,platform:'mobile',fps:10,page:'cloudAppList',url:'http://x/',alive:true}));}
    if(req.url==='/stream.mjpg'){res.writeHead(200,{'content-type':'multipart/x-mixed-replace; boundary=cpk'});
      const f=Buffer.from('/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDwsLDBkPEw8UFx8SFBcWGxQfGx8cJCwhJSUnMTM1MzIkKys1NDM1MzY7QTc5QTc5RTU8Pz//AAD//9sAhAAQEBAQEBAAAAAAAAAAAAAAAAAQIDCAkKCAoLCgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k=','base64');

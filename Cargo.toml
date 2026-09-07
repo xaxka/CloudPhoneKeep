@@ -1,0 +1,17 @@
+# 根 Cargo workspace：CLI + 共享库（Tauri 为独立工作区，见 src-tauri/Cargo.toml 的 [workspace] 标记）
+# 目录职责：
+#   cli/       → CLI 专属（Linux/Docker 引擎，musl 静态二进制 cloudphonekeep）
+#   shared/    → CLI + Tauri 共享（平台预设、保活注入脚本构建器）
+#   src-tauri/ → Tauri 专属（Windows GUI，独立工作区保持自身 target/ 与 CI 产物路径）
+[workspace]
+resolver = "2"
+members = ["cli", "shared"]
+exclude = ["src-tauri"]
+
+# 与两包原有的 release 设置完全一致（workspace 机制下 profile 必须收口到根，
+# 成员内的定义会被忽略）
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "s"

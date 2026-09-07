@@ -1,6 +1,6 @@
 # CloudPhoneKeep 云手机保活
 
-> 云手机网页版多开保活工具（移动云手机 / 联通云手机）— **Tauri 2 + WebView2 + Rust** 实现，界面还原原版 aardio 程序，单文件便携版。Windows 版之外另有 **Linux + Docker 版**（Alpine + Rust 引擎 + Chromium Headless + CDP，一个容器一个账号，见 [`linux/`](linux/README.md)）。
+> 云手机网页版多开保活工具（移动云手机 / 联通云手机）— **Tauri 2 + WebView2 + Rust** 实现，界面还原原版 aardio 程序，单文件便携版。Windows 版之外另有 **CLI 版**（Linux：Chrome Headless Shell + CDP，Rust 引擎，Docker 容器与裸机直跑两种形态，一个实例一个账号，见 [`cli/`](cli/README.md)）。
 
 ![Tauri](https://img.shields.io/badge/Tauri-2.x-blue) ![License](https://img.shields.io/badge/License-MIT-green) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20Docker-lightgrey) ![Portable](https://img.shields.io/badge/便携版-免安装-orange)
 
@@ -57,37 +57,47 @@
 cargo build --release --manifest-path src-tauri/Cargo.toml
 # 产物：src-tauri/target/release/CloudPhoneKeep.exe（单文件便携版）
 
-# Linux / Docker（一个容器一个账号；构建上下文在仓库根）
-cd linux && docker compose up -d --build
+# CLI 版（一个实例一个账号；构建上下文在仓库根）
+cd cli && docker compose up -d --build
+
+# CLI 裸机直跑（musl 静态二进制，机器只需 chrome-headless-shell；
+# CI 同步发布到 dev Release，用法见 cli/README.md「裸机直跑」）
+cargo build --release --target x86_64-unknown-linux-musl --manifest-path cli/Cargo.toml
 ```
 
-前端为纯静态 HTML/JS（`ui/` 目录），无 Node 构建步骤。推送代码后 GitHub Actions 自动构建并发布到 `dev` 预发布版（Windows exe），同时构建 Linux 多架构 Docker 镜像（amd64/arm64）推送 GHCR（`ghcr.io/xaxka/cloudphonekeep`）。
+前端为纯静态 HTML/JS（`ui/` 目录），无 Node 构建步骤。推送代码后 GitHub Actions 自动构建并发布到 `dev` 预发布版（Windows exe + CLI 静态二进制 amd64/arm64），同时构建 Linux 多架构 Docker 镜像（amd64/arm64）推送 GHCR（`ghcr.io/xaxka/cloudphonekeep`）。
 
 ## 目录结构
 
 ```
 ├── ui/                      # 前端（设置窗口，纯静态）
 │   ├── login.html / .css / .js
-├── src-tauri/
+├── src-tauri/               # Tauri 专属（Windows GUI，独立 Cargo workspace）
 │   ├── src/
 │   │   ├── main.rs          # 入口、panic 记录、托盘、菜单事件
 │   │   ├── browser.rs       # 窗口生命周期 / 原生菜单 / 老板键 / 托盘
-│   │   ├── keepalive.rs     # 注入脚本构建器（include_str! shared/）
+│   │   ├── keepalive.rs     # 注入脚本构建器适配层（核心在 shared crate）
 │   │   ├── report_server.rs # 127.0.0.1 状态回传服务
 │   │   ├── config.rs        # 便携配置、帐号数据目录隔离
 │   │   ├── commands.rs      # Tauri 命令
 │   │   ├── logger.rs        # 按天滚动诊断日志
 │   │   └── state.rs         # 槽位运行状态
+│   ├── assets/              # 触点光标等 Tauri 专属资源
 │   └── tauri.conf.json
-├── shared/
-│   └── keepalive.inject.js  # 保活脚本唯一源文件（Windows/Linux 共用，改一处双端生效）
-├── linux/                   # Linux + Docker 版（一容器一账号，详见 linux/README.md）
+├── shared/                  # CLI + Tauri 共享（crate cloudphonekeep-shared）
+│   ├── keepalive.inject.js  # 保活脚本唯一源文件（双端共用，改一处双端生效）
+│   └── src/
+│       ├── platform.rs      # 平台预设（移动/联通入口、视口）唯一源
+│       └── keepalive.rs     # 注入脚本构建器（占位符替换约定）唯一源
+├── cli/                     # CLI 专属（Linux/Docker/裸机，一实例一账号，详见 cli/README.md）
 │   ├── Dockerfile           # rust:1-alpine musl 交叉编译（多架构）→ debian + CfT chrome-headless-shell
 │   ├── docker-compose.yml
+│   ├── control_page.html    # 控制页模板（CLI 专属）
 │   ├── src/                 # Rust 保活引擎（手写 WS/CDP 客户端）
-│   └── Cargo.toml           # 仅依赖 serde_json
+│   └── tests/               # 本地复现/回归脚本集
+├── Cargo.toml               # 根 workspace（cli + shared）与锁文件；src-tauri 独立工作区
 ├── doc/                     # 技术文档（架构/保活规则/排查/配置/部署）
-└── .github/workflows/       # CI：Windows exe + Linux 多架构镜像（GHCR）
+└── .github/workflows/       # CI：Windows exe + CLI 静态二进制 + 多架构镜像（GHCR）
 ```
 
 ## 免责声明

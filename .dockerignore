@@ -1,12 +1,15 @@
-# Docker 构建上下文在仓库根（linux/Dockerfile 引用 linux/ 与 shared/）。
+# Docker 构建上下文在仓库根（cli/Dockerfile 引用根 workspace 清单 + cli/ + shared/）。
 # 白名单：只送构建所需文件，其余一概不进 context。
 *
-!linux
-linux/*
-!linux/Cargo.toml
-!linux/Cargo.lock
-!linux/src
+!Cargo.toml
+!Cargo.lock
+!cli
+cli/*
+!cli/Cargo.toml
+!cli/src
+!cli/control_page.html
 !shared
 shared/*
+!shared/Cargo.toml
+!shared/src
 !shared/keepalive.inject.js
-!shared/control_page.html

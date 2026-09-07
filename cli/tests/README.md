@@ -1,4 +1,4 @@
-# CloudPhoneKeep Linux 测试/复现脚本
+# CloudPhoneKeep CLI 测试/复现脚本
 
 本地复现与回归验证脚本集（不依赖 Rust 引擎：Node/Python 直接驱动 Chrome CDP，
 复刻生产链路：控制页 → 引擎 HTTP 端点 → CDP 输入 → 云机页面）。
@@ -35,15 +35,15 @@ export CPK_SHELL=/path/to/chrome        # chromium / google-chrome / chrome-head
 ## 用法
 
 ```bash
-cd linux/tests
+cd cli/tests
 node e2e_repro.js          # 主回归：末行应输出「控制页发出了 3 次 end」
 python3 mock_control_page.py   # 起控制页 mock：http://127.0.0.1:8899/
 node test_wall_clock_gate.js   # 墙钟门控（无外部依赖）
-bash test_idle_smoke.sh       # 空闲降频引擎冒烟（先 cd ../ && cargo build）
+bash test_idle_smoke.sh       # 空闲降频引擎冒烟（先在仓库根 cargo build，产物在根 target/）
 ```
 
-脚本从 `../../shared/` 读取控制页与保活脚本（与生产同一份文件），
-修改 shared 后重跑即验证。
+脚本读取的模板与生产同源：保活脚本取 `../../shared/keepalive.inject.js`，
+控制页取 `../control_page.html`（cli/ 根，CLI 专属）；修改后重跑即验证。
 
 历史背景：`e2e_repro.js` 曾实证控制页 `fin` 吞 end 的根因
 （所有 gap≥60ms 的触摸交互无收尾→点击无效）；`test_ack_*.py`

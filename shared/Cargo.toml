@@ -1,0 +1,11 @@
+[package]
+name = "cloudphonekeep-shared"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.74"
+description = "CloudPhoneKeep 双端共享库（CLI + Tauri）：平台预设、保活注入脚本构建器（唯一源）"
+authors = ["xixka"]
+license = "MIT"
+
+[dependencies]
+serde_json = "1"

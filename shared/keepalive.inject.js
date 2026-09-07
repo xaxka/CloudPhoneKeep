@@ -1,10 +1,11 @@
 (function(){
   // =====================================================================
-  // CloudPhoneKeep 保活脚本 —— Windows / Linux 双平台唯一源文件
+  // CloudPhoneKeep 保活脚本 —— Windows / CLI 双平台唯一源文件
   // ---------------------------------------------------------------------
-  // 注入方（两个 Rust 构建器 include_str! 同一本文件，只改此处即双端生效）：
+  // 注入方（构建器唯一实现在 shared crate：shared/src/keepalive.rs
+  // include_str! 本文件；两端适配层传各自策略参数，只改此处即双端生效）：
   //   Windows: src-tauri/src/keepalive.rs   （WebView2，Tauri 窗口）
-  //   Linux:   linux/src/keepalive.rs       （Chromium headless，CDP 驱动）
+  //   CLI:     cli/src/keepalive.rs         （Chromium headless，CDP 驱动）
   // 构建器只做两件事：生成 CFG JSON + 替换下方两个占位符。
   //   __CPK_CFG__     → 配置 JSON：slot/port/platform/homeUri/keepAlive/
   //                     intervalMs/simulateActivity/customCursor/

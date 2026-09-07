@@ -3,15 +3,16 @@
 ## 唯一源文件与修改指引
 
 保活脚本本体是 [`shared/keepalive.inject.js`](../shared/keepalive.inject.js)，
-被两个平台的 Rust 构建器 `include_str!` 内嵌进各自二进制：
+由共享 crate（`shared/src/keepalive.rs`）`include_str!` 内嵌——占位符替换
+与 CFG 生成只有这一份实现，两个平台的适配层只传各自策略参数后注入：
 
-| 平台 | 构建器 | 注入通道 |
+| 平台 | 适配层 | 注入通道 |
 | :--- | :--- | :--- |
 | Windows | `src-tauri/src/keepalive.rs` | WebView2 `AddScriptToExecuteOnDocumentCreated` |
-| Linux | `linux/src/keepalive.rs` | CDP `Page.addScriptToEvaluateOnNewDocument` |
+| CLI（Linux） | `cli/src/keepalive.rs` | CDP `Page.addScriptToEvaluateOnNewDocument` |
 
 **修改保活规则、选择器、弹窗处理逻辑，只需要改这一个 JS 文件**——两个平台
-重新构建后同时生效。两个 Rust 构建器只负责生成 CFG JSON 与替换两个占位符：
+重新构建后同时生效。构建器（shared crate）负责生成 CFG JSON 与替换两个占位符：
 
 - `__CPK_CFG__` → 配置 JSON（slot / port / platform / homeUri / keepAlive /
   intervalMs / simulateActivity / customCursor / blockContextMenu / pageTimer）

@@ -11,7 +11,8 @@ const SHELL = process.env.CPK_SHELL || ['/usr/bin/chromium', '/usr/bin/chromium-
   '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chrome-headless-shell']
   .find(p => fs.existsSync(p)) || (() => {
   console.error('未找到 Chrome：请 export CPK_SHELL=/path/to/chrome（或 chromium）'); process.exit(1); })();
-const SHARED = path.join(__dirname, '..', '..', 'shared');   // 仓库根 shared/
+const SHARED = path.join(__dirname, '..', '..', 'shared');   // 仓库根 shared/（保活脚本唯一源）
+const CLI = path.join(__dirname, '..');                        // cli/ 根（控制页模板，CLI 专属）
 const UA = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Mobile Safari/537.36';
 const PAGE_URL = 'https://cloudphoneh5.buy.139.com';
 const ENG_PORT = 8938, A_PORT = 9448, B_PORT = 9558;
@@ -195,7 +196,7 @@ async function ctrlSwipe(x, y1, y2, label, steps = 16) {
       });
       return;
     }
-    if (req.url === '/') { res.writeHead(200, {'content-type':'text/html; charset=utf-8'}); return res.end(fs.readFileSync(path.join(SHARED, 'control_page.html'))); }
+    if (req.url === '/') { res.writeHead(200, {'content-type':'text/html; charset=utf-8'}); return res.end(fs.readFileSync(path.join(CLI, 'control_page.html'))); }
     if (req.url === '/healthz') { res.writeHead(200, {'content-type':'application/json'});
       return res.end(JSON.stringify({ok:true,platform:'mobile',fps:10,page:'cloudAppList',url:PAGE_URL,alive:true})); }
     if (req.url === '/stream.mjpg') { res.writeHead(200, {'content-type':'multipart/x-mixed-replace; boundary=cpk'});

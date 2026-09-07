@@ -1,9 +1,11 @@
-# CloudPhoneKeep Linux / Docker 版
+# CloudPhoneKeep CLI 版（Linux / Docker / 裸机直跑）
 
-> 移动云手机 / 联通云手机保活的 **Linux 无头部署**版本 —— **一个 Docker 容器 = 一个账号**，
+> 移动云手机 / 联通云手机保活的 **Linux 无头部署**版本 —— **一个实例 = 一个账号**，
+> 三种部署形态同一 musl 静态二进制：**Docker 容器 / 裸机直跑 / 源码编译**。
 > 用 **chrome-headless-shell（Google Chrome for Testing 官方预编译）+ CDP** 替代 Windows 版的 WebView2，
 > 后端为 **纯 Rust 引擎**（musl 静态编译，零 Node / 零 npm 依赖，常驻内存约 10MB），
-> 保活逻辑与 Windows 版**同源共用**（`shared/keepalive.inject.js`，改一处双端生效）。
+> 保活逻辑与 Windows 版**同源共用**（`shared/` crate：注入脚本模板 + 构建器 +
+> 平台预设，改一处双端生效）。
 
 **镜像多架构**：`ghcr.io/xaxka/cloudphonekeep` 同时提供 `linux/amd64` 与
 `linux/arm64`——x86 服务器与 ARM 主机 / Apple Silicon 均原生运行，
@@ -27,7 +29,7 @@
 
 ## 与 Windows 版的关系
 
-| | Windows 版 | Linux 版 |
+| | Windows 版 | CLI 版（Linux） |
 | :--- | :--- | :--- |
 | 内核 | WebView2（Edge） | chrome-headless-shell（CfT 官方预编译，双架构） |
 | 宿主引擎 | Rust（Tauri 窗口 + 看门狗） | Rust（CDP 客户端 + 看门狗） |
@@ -36,8 +38,8 @@
 | 首次登录 | 直接在窗口里点 | 浏览器打开控制页：全屏实时画面（手机端点底部 iOS 圆点弹抽屉控制台），输入全覆盖：触摸跟手（多点/长按/双指缩放）、鼠标真实点击/滚轮/悬停、物理键盘全键位、输入法与剪贴板双向复制粘贴、运行时帧率限制（或外部 DevTools）；退出/到期状态转换时控制页发系统通知（对齐 Windows 版托盘通知语义） |
 | 平台选择 | 登录窗口「移动云手机/联通云手机」下拉选择器 | **启动后平台留空（无弹窗、不加载页面）**：控制页「设置→平台」选移动/联通后引擎才启动并加载页面，可随时切换（换首页/视口/保活选择器并自动重启实例，Profile 保留双平台登录态） |
 | 页内地址栏 | Ctrl+U 全局热键呼出 | **无**（按需求不提供；导航走控制页「回首页」/页面内跳转，外部脚本可 `/nav`） |
-| 保活脚本 | `shared/keepalive.inject.js`（`include_str!` 内嵌） | 同一本 `shared/keepalive.inject.js`（`include_str!` 内嵌） |
-| 数据位置 | `AppData\LocalLow\CloudPhoneKeep` | `/data`（volume 持久化 Profile + 日志） |
+| 保活脚本 | `shared/keepalive.inject.js`（`include_str!` 内嵌） | 同一本（shared crate 内嵌，构建器统一） |
+| 数据位置 | `AppData\LocalLow\CloudPhoneKeep` | Docker：`/data`（volume）；裸机默认 `~/.local/share/cloudphonekeep`（可 `CPK_DATA_DIR` 覆盖） |
 
 保活脚本唯一源文件、平台差异收敛、分级恢复等说明见 [doc/architecture.md](../doc/architecture.md) 与 [doc/keepalive-rules.md](../doc/keepalive-rules.md)。
 
@@ -74,24 +76,84 @@ docker logs -f cpk     # 诊断日志实时镜像
 设置——启动后留空，控制页「设置→平台」选择后才加载页面（显式 `CPK_URL`
 视为自动启动，供 CI 冒烟/自定义 H5）。
 
+## 裸机直跑（无 Docker）
+
+CI 每次推送发布**与镜像同源同构**的 musl 静态二进制到 `dev` Release：
+`cloudphonekeep-linux-amd64` / `cloudphonekeep-linux-arm64`（glibc 机器也能跑，
+musl 静态自包含 libc）。机器上只需要装好 chrome-headless-shell：
+
+```bash
+# 1. 取二进制（或源码编译：仓库根 cargo build --release
+#    --target x86_64-unknown-linux-musl，纯 Rust 无 C 依赖）
+curl -LO https://github.com/xaxka/CloudPhoneKeep/releases/download/dev/cloudphonekeep-linux-amd64
+chmod +x cloudphonekeep-linux-amd64
+
+# 2. 安装 chrome-headless-shell（Chrome for Testing 官方下载）：
+#    https://googlechromelabs.github.io/chrome-for-testing/
+#    解压后把二进制放进 PATH，或用 CPK_CHROME_BIN 指向绝对路径
+#    （默认在 PATH 里找 "chrome-headless-shell"）
+#    运行库（Debian/Ubuntu）：
+#    apt install libnss3 libnspr4 libglib2.0-0 libexpat1 libx11-6 libxcb1 \
+#        libxext6 libxrender1 libxi6 libxcomposite1 libxdamage1 libxfixes3 \
+#        libxrandr2 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libdbus-1-3 \
+#        libasound2 libdrm2 libgbm1 libxkbcommon0 libfontconfig1 libfreetype6
+#    中文字体可选（截图可读性）：fonts-wqy-microhei
+
+# 3. 运行（数据目录默认 ~/.local/share/cloudphonekeep，/data 存在时优先用它——
+#    与容器行为对齐；Profile/日志都在里面）
+CPK_ACCOUNT=138xxxx1234 ./cloudphonekeep-linux-amd64
+
+# 4. 浏览器打开控制页（与 Docker 版完全一致）
+#    http://127.0.0.1:8088/
+
+curl http://127.0.0.1:8088/healthz
+```
+
+环境变量与 Docker 版完全一致（[doc/configuration.md](../doc/configuration.md)）
+——`CPK_PLATFORM`/`CPK_URL`/`CPK_FPS`/`CPK_JPEG_QUALITY`/`CPK_STREAM_SCALE`/
+`CPK_IDLE_AFTER_SEC` 等；裸机差异只有两点：
+
+- `CPK_CHROME_BIN`：默认按 PATH 查找 `chrome-headless-shell`（容器里是绝对路径）
+- 数据目录：默认 `~/.local/share/cloudphonekeep`（容器里是 `/data`）
+
+多实例多账号：不同 `CPK_ACCOUNT` + `CPK_REPORT_PORT`（8088/8089…）各起一个进程，
+数据目录按账号自动隔离（`profile-<账号>`）。systemd 常驻示例：
+
+```ini
+# /etc/systemd/system/cpk@.service（cpk@138xxxx1234 启动）
+[Unit]
+Description=CloudPhoneKeep %i
+After=network-online.target
+
+[Service]
+Environment=CPK_ACCOUNT=%i CPK_REPORT_PORT=8088
+ExecStart=/opt/cloudphonekeep/cloudphonekeep-linux-amd64
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
 ## 目录结构
 
 ```
-linux/
+cli/
 ├── Dockerfile                # 多阶段多架构：rust:1-alpine 交叉编译（rust-lld）→ 运行层 + 无头浏览器
 ├── docker-compose.yml        # 一账号一服务（含多账号示例）
 ├── README.md                 # 本文件
-├── Cargo.toml / Cargo.lock   # 仅依赖 serde_json
-└── src/
-    ├── main.rs               # 入口：装配 + 信号 + selftest/smoke 模式
-    ├── config.rs             # 环境变量配置（对齐 config.rs 平台预设）
-    ├── keepalive.rs          # 注入脚本构建器（include_str! shared/keepalive.inject.js）
-    ├── engine.rs             # Chromium 进程/CDP 会话/注入/看门狗/分级恢复/控制 API
-    ├── cdp.rs                # CDP 客户端（事件内联处理，alert/confirm 自动应答）
-    ├── ws.rs                 # 手写 RFC6455 WebSocket 客户端（含单元测试回环服务器）
-    ├── report_server.rs      # 回环上报 + 健康检查 + 极简控制页（纯 std HTTP）
-    ├── logger.rs             # 按天滚动日志（对齐 logger.rs，7 天保留）
-    └── util.rs               # 时间/SHA-1/base64/urldecode/HTTP GET（纯 std）
+├── control_page.html         # 控制页模板（CLI 专属；report_server.rs include_str! 内嵌）
+├── Cargo.toml                # 依赖 cloudphonekeep-shared（../shared）+ serde_json；锁文件在仓库根
+├── src/
+│   ├── main.rs               # 入口：装配 + 信号 + selftest/smoke 模式
+│   ├── config.rs             # 环境变量配置（平台预设再导出自 shared；数据目录裸机自适应）
+│   ├── keepalive.rs          # 注入脚本构建器适配层（模板与替换逻辑唯一源在 shared crate）
+│   ├── engine.rs             # Chromium 进程/CDP 会话/注入/看门狗/分级恢复/控制 API
+│   ├── cdp.rs                # CDP 客户端（事件内联处理，alert/confirm 自动应答）
+│   ├── ws.rs                 # 手写 RFC6455 WebSocket 客户端（含单元测试回环服务器）
+│   ├── report_server.rs      # 回环上报 + 健康检查 + 极简控制页（纯 std HTTP）
+│   ├── logger.rs             # 按天滚动日志（7 天保留）
+│   └── util.rs               # 时间/SHA-1/base64/urldecode/HTTP GET（纯 std）
+└── tests/                    # 本地复现/回归脚本集（见 tests/README.md）
 ```
 
 ## 免责声明

@@ -15,9 +15,11 @@
 | 数据位置 | `AppData\LocalLow\CloudPhoneKeep` | `/data`（volume 持久化 Profile + 日志） |
 | 内存 | 单账号 WebView2 300-500MB | Rust 引擎 ~10MB + headless-shell 250-450MB |
 
-**保活脚本唯一源文件**：`shared/keepalive.inject.js` 被两个平台的 Rust 构建器
-`include_str!` 进各自二进制——修改保活规则只需改这一份文件，双端重新构建后
-同时生效。平台差异全部收敛为 CFG 开关（见 [keepalive-rules.md](keepalive-rules.md)）。
+**保活脚本唯一源文件**：`shared/keepalive.inject.js` 由共享 crate
+（`shared/src/keepalive.rs`）`include_str!` 内嵌，双端适配层
+（`src-tauri/src/keepalive.rs` / `cli/src/keepalive.rs`）传各自策略参数后注入——
+修改保活规则只需改这一份文件，双端重新构建后同时生效。平台差异全部收敛为
+CFG 开关（见 [keepalive-rules.md](keepalive-rules.md)）。
 
 ### 浏览器选型说明（chrome-headless-shell）
 
@@ -31,7 +33,7 @@ Linux 版使用 **Google Chrome for Testing 官方预编译的 `chrome-headless-
   静态二进制，与运行层 libc 无耦合）
 - **版本**：amd64 用 stable `152.0.7977.82`（开发环境端到端冒烟验证过的
   版本）；arm64 用 beta `154.0.8037.0`（stable 渠道尚无 arm64，取 arm64
-  可用的最近渠道），见 `linux/Dockerfile` 的 ARG
+  可用的最近渠道），见 `cli/Dockerfile` 的 ARG
 - headless-shell 本身即无头模式，恒不加 `--headless=new`（`CPK_HEADLESS` 开关
   已移除；极少数换用完整 Chromium 的场景经 `CPK_EXTRA_CHROME_ARGS` 自行追加）
 - 依赖最小化：运行层 apt 包为 `ldd` 实测结果（nss/glib/X11 基础库/alsa/

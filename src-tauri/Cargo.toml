@@ -7,10 +7,16 @@ license = "MIT"
 edition = "2021"
 rust-version = "1.77"
 
+# 独立工作区（不加入根 Cargo workspace）：保持自身 target/ 目录与 CI 产物路径
+# （src-tauri/target/release/CloudPhoneKeep.exe）不变。共享库经 path 依赖引入，
+# 在本工作区内编译。根 workspace 只管 cli/ + shared/。
+[workspace]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+cloudphonekeep-shared = { path = "../shared" }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"

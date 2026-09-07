@@ -7,11 +7,11 @@
 #   ②运行中 healthz 的 tickIdle=true
 #   ③空闲态 ticks 仍每 ~5s 前进（保活动作周期不变——墙钟门控）
 #   ④smoke 结束 PASS（browser=running && ticks≥5）
-# 用法：bash test_idle_smoke.sh [二进制路径]（默认 ../target/debug/cloudphonekeep）
+# 用法：bash test_idle_smoke.sh [二进制路径]（默认 仓库根/target/debug/cloudphonekeep，根 workspace 产物）
 set -u
 # 二进制路径解析为绝对路径（后面会 cd，相对路径会失效）
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
-BIN="${1:-$SELF_DIR/../target/debug/cloudphonekeep}"
+BIN="${1:-$SELF_DIR/../../target/debug/cloudphonekeep}"
 if [ ! -x "$BIN" ]; then echo "二进制不存在：$BIN（先 cargo build）"; exit 1; fi
 
 # Chrome 可执行：CPK_SHELL 显式指定优先，否则探测常见路径

@@ -1,41 +1,23 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const DEFAULT_WEB_URI: &str = "https://uphone.wo-adv.cn/cloudphone/#/home";
-/// 移动云手机 H5 入口
-pub const MOBILE_WEB_URI: &str = "https://cloudphoneh5.buy.139.com";
+use cloudphonekeep_shared::platform as shared_platform;
 
-/// 支持的平台预设
-pub struct PlatformPreset {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub web_uri: &'static str,
-    pub width: f64,
-    pub height: f64,
-}
+/// 联通云手机 H5 入口（历史名；唯一源在 shared。当前 crate 内无直接使用点，
+/// 保留作为与 MOBILE_WEB_URI 对称的公开口径，bin crate 显式豁免死码检查）
+#[allow(dead_code)]
+pub const DEFAULT_WEB_URI: &str = shared_platform::PLATFORM_UNICOM_URI;
+/// 移动云手机 H5 入口（唯一源在 shared）
+pub const MOBILE_WEB_URI: &str = shared_platform::PLATFORM_MOBILE_URI;
 
-pub const PLATFORMS: [PlatformPreset; 2] = [
-    PlatformPreset {
-        id: "mobile",
-        label: "移动云手机",
-        web_uri: MOBILE_WEB_URI,
-        width: 414.0,
-        height: 896.0,
-    },
-    PlatformPreset {
-        id: "unicom",
-        label: "联通云手机",
-        web_uri: DEFAULT_WEB_URI,
-        width: 405.0,
-        height: 720.0,
-    },
-];
+/// 支持的平台预设（类型与数据唯一源在 shared：视口为 u32，使用处按需转 f64）。
+/// 此前两端各自维护等值常量表，现收敛为单一出处，双端口径不漂移。
+/// 全表直接访问用 `cloudphonekeep_shared::platform::PLATFORMS`
+pub use shared_platform::PlatformPreset;
 
+/// 平台 id 查预设；未知回退 mobile（历史行为：空/非法配置兜底到移动云手机）
 pub fn platform_preset(id: &str) -> &'static PlatformPreset {
-    PLATFORMS
-        .iter()
-        .find(|p| p.id == id)
-        .unwrap_or(&PLATFORMS[0])
+    shared_platform::find(id).unwrap_or(&shared_platform::PLATFORMS[0])
 }
 
 // ---------------------------------------------------------------------------
@@ -245,8 +227,8 @@ impl SlotConfig {
             c.web_uri = preset.web_uri.to_string();
         }
         if c.width < 280.0 || c.height < 400.0 {
-            c.width = preset.width;
-            c.height = preset.height;
+            c.width = preset.width as f64;
+            c.height = preset.height as f64;
         }
         if c.interval_ms < 1000 {
             c.interval_ms = 5000;

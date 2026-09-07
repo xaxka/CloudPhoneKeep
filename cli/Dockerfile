@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # =====================================================================
-# CloudPhoneKeep Linux — 一个容器 = 一个账号（多架构，chrome-headless-shell）
+# CloudPhoneKeep CLI — 一个容器 = 一个账号（多架构，chrome-headless-shell）
 #
 # 浏览器：Google Chrome for Testing 官方预编译 chrome-headless-shell
 #   （无头渲染内核，无 Chrome UI/标签页/扩展，单页面场景比完整 Chrome
@@ -13,25 +13,32 @@
 #   构建阶段固定在 BUILDPLATFORM 原生运行（CI 上 amd64 全速编译），
 #   按目标架构选择 musl target 三元组，用 rustc 自带的 rust-lld 交叉链接——
 #   纯 Rust + musl 静态自包含 libc，无需目标架构 gcc，也不用 QEMU 跑 rustc。
-#   本地构建（在仓库根目录）：docker build -f linux/Dockerfile .
+#   本地构建（在仓库根目录）：docker build -f cli/Dockerfile .
+#
+# 产物：musl 静态二进制 /usr/local/bin/cloudphonekeep——与 CI 发布的
+#   裸机直跑二进制（cloudphonekeep-linux-amd64/arm64）同源同构，
+#   装了 chrome-headless-shell 的机器上可直接运行（见 cli/README.md）。
 # =====================================================================
 
 # —— 构建阶段：BUILDPLATFORM 原生交叉编译（产物为目标架构静态二进制）——
 FROM --platform=$BUILDPLATFORM rust:1-alpine AS builder
 ARG TARGETARCH
 WORKDIR /build
-COPY linux/Cargo.toml linux/Cargo.lock ./
-COPY linux/src ./src
-# include_str!("../../shared/…") 相对 /build/src 解析到 /shared
-# （keepalive.inject.js + control_page.html 控制页模板）
-COPY shared /shared
+# 根 workspace（cli + shared；src-tauri 被 exclude，无需进入构建上下文）
+# + 仓库锁文件保证依赖版本可复现
+COPY Cargo.toml Cargo.lock ./
+COPY shared ./shared
+COPY cli/Cargo.toml ./cli/Cargo.toml
+COPY cli/src ./cli/src
+# 控制页模板（cli/src/report_server.rs include_str!("../control_page.html")）
+COPY cli/control_page.html ./cli/control_page.html
 # rust-lld 链接 + test -s 产物断言（二进制缺失时构建立刻失败，防静默空镜像）
 # 双架构构建并行共享 cargo 缓存挂载：cargo 自带 target 目录文件锁，天然串行安全
 RUN --mount=type=cache,target=/build/target \
     --mount=type=cache,target=/usr/local/cargo/registry \
     TARGET=$(case "$TARGETARCH" in arm64) echo aarch64-unknown-linux-musl;; *) echo x86_64-unknown-linux-musl;; esac) \
     && rustup target add "$TARGET" \
-    && RUSTFLAGS="-C linker=rust-lld" cargo build --release --target "$TARGET" \
+    && RUSTFLAGS="-C linker=rust-lld" cargo build --release --target "$TARGET" --manifest-path cli/Cargo.toml \
     && cp "target/$TARGET/release/cloudphonekeep" /usr/local/bin/cloudphonekeep \
     && test -s /usr/local/bin/cloudphonekeep
 

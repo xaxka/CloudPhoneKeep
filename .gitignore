@@ -17,5 +17,5 @@ Thumbs.db
 # Logs
 *.log
 
-# Rust (Linux)
-/linux/target/
+# Rust（根 workspace：cli + shared 共用 target/）
+/target/

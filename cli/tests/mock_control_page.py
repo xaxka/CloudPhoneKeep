@@ -9,7 +9,7 @@ except ImportError:
     sys.exit("需要 PIL：pip install pillow")
 
 PORT = 8899
-HTML = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "shared", "control_page.html"), encoding="utf-8").read()
+HTML = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "control_page.html"), encoding="utf-8").read()
 
 # 生成一张 414×896 模拟云机画面（移动 H5 首页观感：状态栏/卡片/底部导航）
 img = Image.new("RGB", (414, 896), (243, 246, 251))

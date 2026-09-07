@@ -18,7 +18,7 @@ C:\Users\<用户名>\AppData\LocalLow\CloudPhoneKeep\
 
 多实例共用数据根目录，按帐号目录名隔离；登录态随目录保留。
 
-## Linux 版环境变量
+## CLI 版环境变量（Docker 与裸机通用）
 
 | 变量 | 默认 | 说明 |
 | :--- | :--- | :--- |
@@ -35,12 +35,12 @@ C:\Users\<用户名>\AppData\LocalLow\CloudPhoneKeep\
 | `CPK_BIND` | `0.0.0.0` | 上述端口绑定地址（`127.0.0.1` 最保守；默认配合端口映射/防火墙） |
 | `CPK_CONTROL_TOKEN` | 空 | 控制页/截图/触摸端点的访问令牌（强烈建议公网可达时设置） |
 | `CPK_CDP_PORT` | `0` | Chromium DevTools 固定端口（0=自动分配；固定端口可用于外部 DevTools） |
-| `CPK_CHROME_BIN` | `/opt/chrome-headless-shell/chrome-headless-shell` | 浏览器二进制路径（镜像内为 CfT chrome-headless-shell；调试时可指向其他 Chrome） |
+| `CPK_CHROME_BIN` | `chrome-headless-shell`（按 PATH 查找；镜像内 ENV 设为绝对路径 `/opt/chrome-headless-shell/chrome-headless-shell`） | 浏览器二进制路径（调试时可指向其他 Chrome） |
 | `CPK_NO_SANDBOX` | `1` | 容器内通常需关闭 Chromium 沙箱 |
-| `CPK_UA_MODE` | `windows` | UA 策略：`windows` 伪装 Windows Chrome / `auto` 去 Headless 字样 / `none` 原样 |
+| `CPK_UA_MODE` | `mobile` | UA 策略：`mobile`（默认，Android Chrome + 手机布局）/ `windows` 伪装 Windows Chrome（旧部署兼容）/ `auto` 去 Headless 字样 / `none` 原样 |
 | `CPK_LANG` | `zh-CN` | Chromium UI 语言 |
 | `TZ` | `Asia/Shanghai` | 时区（日志时间戳 + Chromium） |
-| `CPK_DATA_DIR` | `/data` | 数据根目录（Profile + 日志） |
+| `CPK_DATA_DIR` | 未设时：`/data` 存在则用 `/data`（Docker），否则 `~/.local/share/cloudphonekeep`（裸机）；镜像内 ENV 固定为 `/data` | 数据根目录（Profile + 日志） |
 | `CPK_EXTRA_CHROME_ARGS` | 空 | 透传给 Chromium 的额外参数（如 `--js-flags=--max-old-space-size=512` 压 V8 堆） |
 | `CPK_TICK_FAIL_RELOAD` | `10` | tick 连续失败 N 次后导航回首页 |
 | `CPK_FROZEN_RELOAD` | `3` | 状态冻结 N 个采样周期后导航回首页 |

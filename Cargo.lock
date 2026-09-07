@@ -3,7 +3,15 @@
 version = 3
 
 [[package]]
-name = "cloudphonekeep-linux"
+name = "cloudphonekeep-cli"
+version = "1.0.0"
+dependencies = [
+ "cloudphonekeep-shared",
+ "serde_json",
+]
+
+[[package]]
+name = "cloudphonekeep-shared"
 version = "1.0.0"
 dependencies = [
  "serde_json",

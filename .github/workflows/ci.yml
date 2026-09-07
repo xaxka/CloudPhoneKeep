@@ -13,6 +13,8 @@ permissions:
 jobs:
   # =====================================================================
   # Windows 便携版（原有流程，保持不变）
+  # src-tauri 为独立 Cargo workspace（见其 Cargo.toml 的 [workspace] 标记），
+  # target/ 仍在 src-tauri/ 下，缓存与产物路径与重构前完全一致。
   # =====================================================================
   build:
     runs-on: windows-latest
@@ -59,12 +61,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # =====================================================================
-  # Linux + Docker 版（linux/ + shared/）：Rust musl 引擎 + Alpine Chromium + CDP
-  # 一容器一账号；全部编译在 CI 完成（本地无需 Rust 工具链）
+  # CLI 版（cli/ + shared/，根 workspace）：Rust musl 静态引擎 + Alpine 交叉编译
+  # + Debian Chromium + CDP；一容器一账号；全部编译在 CI 完成（本地无需 Rust）
   # 镜像多架构（linux/amd64 + linux/arm64）：Rust 交叉编译走 rust-lld
   # 原生速度，QEMU 仅用于 arm64 运行层的 apk 安装
   # —— 测试已移除（单元/selftest/冒烟按用户要求删除：无浏览器环境下的
   #    快速回归对真实问题无覆盖，真正的验证靠生产环境日志留痕）——
+  #
+  # 另产出与镜像同源的 musl 静态二进制（amd64/arm64）发布到 dev Release：
+  # 装了 chrome-headless-shell 的机器无需 Docker 可直接运行（裸机直跑）。
   # =====================================================================
   linux:
     runs-on: ubuntu-latest
@@ -72,13 +77,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          platforms: arm64
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      # CLI 静态二进制（与 Docker 镜像内引擎同源同构）：runner 原生交叉编译，
+      # 纯 Rust + musl 自包含 libc，rust-lld 链接无需目标架构 gcc；
+      # PR 也执行（相当于 cli 的编译校验，失败快速拦截）
+      - name: Build static CLI binaries (musl, amd64 + arm64)
+        run: |
+          for T in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            RUSTFLAGS="-C linker=rust-lld" cargo build --release --target "$T" --manifest-path cli/Cargo.toml
+          done
+          cp target/x86_64-unknown-linux-musl/release/cloudphonekeep cloudphonekeep-linux-amd64
+          cp target/aarch64-unknown-linux-musl/release/cloudphonekeep cloudphonekeep-linux-arm64
+          strip cloudphonekeep-linux-amd64 cloudphonekeep-linux-arm64 || true
+          chmod +x cloudphonekeep-linux-amd64 cloudphonekeep-linux-arm64
+          test -s cloudphonekeep-linux-amd64 && test -s cloudphonekeep-linux-arm64
+          file cloudphonekeep-linux-amd64 cloudphonekeep-linux-arm64
 
       - name: Login to GHCR
         if: github.event_name != 'pull_request'
@@ -88,7 +110,32 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 多阶段构建（context=仓库根，Dockerfile 引用 linux/ 与 shared/）：
+      # 裸机直跑二进制入 dev Release（与 Windows exe 同一处发布）：
+      # musl 静态自包含，机器上只需 chrome-headless-shell 及其运行库。
+      # 不带 body：已存在的 dev Release 描述保持不变（Windows job 维护）
+      - name: Upload CLI binaries to Release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev
+          name: Dev Build
+          files: |
+            cloudphonekeep-linux-amd64
+            cloudphonekeep-linux-arm64
+          prerelease: true
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 多阶段构建（context=仓库根，Dockerfile 引用 cli/ 与 shared/ + 根 workspace 清单）：
       # Rust 编译在容器内完成（cargo 缓存挂载走 GHA cache）
       # 多架构推送（amd64 + arm64 单一 manifest 列表）：
       # arm64 层与 amd64 共享 GHA 层缓存，Rust 交叉编译原生速度
@@ -97,7 +144,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: linux/Dockerfile
+          file: cli/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
@@ -112,7 +159,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: linux/Dockerfile
+          file: cli/Dockerfile
           platforms: linux/amd64
           load: true
           tags: cpk:pr-check

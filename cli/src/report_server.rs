@@ -67,7 +67,7 @@ impl ReportCfg {
     }
 }
 
-const CONTROL_PAGE_HTML: &str = include_str!("../../shared/control_page.html");
+const CONTROL_PAGE_HTML: &str = include_str!("../control_page.html");
 
 /// 启动服务（端口绑定必须在保活脚本注入前完成——脚本里写死了端口号）
 pub fn start(

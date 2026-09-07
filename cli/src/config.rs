@@ -1,31 +1,21 @@
-//! 环境变量配置（一个容器 = 一个账号）。
-//! 字段语义与 Windows 版 src-tauri/src/config.rs 的 SlotConfig/platforms 对齐：
+//! 环境变量配置（一个容器 = 一个账号，裸机亦可直跑）。
+//! 字段语义与 Tauri 版 src-tauri/src/config.rs 的 SlotConfig/platforms 对齐：
 //!   mobile  → https://cloudphoneh5.buy.139.com       414×896
 //!   unicom  → https://uphone.wo-adv.cn/cloudphone/#/home  405×720
+//! 平台预设常量与查表函数的唯一源在 shared（cloudphonekeep-shared::platform），
+//! 此处再导出保持全仓调用点（engine.rs 等 `config::PLATFORM_*`）零改动。
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-pub const PLATFORM_MOBILE_URI: &str = "https://cloudphoneh5.buy.139.com";
-pub const PLATFORM_UNICOM_URI: &str = "https://uphone.wo-adv.cn/cloudphone/#/home";
-
-/// 平台运行时描述（控制面板 /platform 切换的目标全貌）：
-/// 切平台 = 换首页 URL + 换视口 + 重注入保活脚本（选择器按平台走）
-pub const PLATFORM_UNICOM_LABEL: &str = "联通云手机";
-pub const PLATFORM_MOBILE_LABEL: &str = "移动云手机";
-pub const PLATFORM_UNICOM_W: u32 = 405;
-pub const PLATFORM_UNICOM_H: u32 = 720;
-pub const PLATFORM_MOBILE_W: u32 = 414;
-pub const PLATFORM_MOBILE_H: u32 = 896;
-
-/// 平台名 → (label, url, w, h)；未知平台 None
-pub fn platform_profile(platform: &str) -> Option<(&'static str, &'static str, u32, u32)> {
-    match platform {
-        "mobile" => Some((PLATFORM_MOBILE_LABEL, PLATFORM_MOBILE_URI, PLATFORM_MOBILE_W, PLATFORM_MOBILE_H)),
-        "unicom" => Some((PLATFORM_UNICOM_LABEL, PLATFORM_UNICOM_URI, PLATFORM_UNICOM_W, PLATFORM_UNICOM_H)),
-        _ => None,
-    }
-}
+// 平台预设家族整体再导出（engine/测试用其中一部分；bin crate 无外部
+// 消费者故显式豁免 unused 检查，保持 config::PLATFORM_* 口径完整）
+#[allow(unused_imports)]
+pub use cloudphonekeep_shared::platform::{
+    platform_profile, PLATFORM_MOBILE_H, PLATFORM_MOBILE_LABEL, PLATFORM_MOBILE_URI,
+    PLATFORM_MOBILE_W, PLATFORM_UNICOM_H, PLATFORM_UNICOM_LABEL, PLATFORM_UNICOM_URI,
+    PLATFORM_UNICOM_W,
+};
 
 #[derive(Clone)]
 pub struct Config {
@@ -110,6 +100,26 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
+/// 未设 CPK_DATA_DIR 时的默认数据目录（裸机直跑友好）：
+/// - `/data` 已存在（Docker VOLUME 场景）→ 沿用 `/data`（容器行为不变）；
+/// - 否则落 XDG 数据目录 `~/.local/share/cloudphonekeep`（普通用户可写）；
+/// - 无 HOME 时兜底当前目录 `./data`。
+/// Docker 镜像同时显式设置 ENV CPK_DATA_DIR=/data，双保险不走此分支。
+fn default_data_dir() -> PathBuf {
+    pick_data_dir(Path::new("/data").exists(), env::var_os("HOME"))
+}
+
+/// default_data_dir 的决策核心（纯函数，便于单测）
+fn pick_data_dir(data_root_exists: bool, home: Option<std::ffi::OsString>) -> PathBuf {
+    if data_root_exists {
+        PathBuf::from("/data")
+    } else if let Some(h) = home {
+        PathBuf::from(h).join(".local/share/cloudphonekeep")
+    } else {
+        PathBuf::from("./data")
+    }
+}
+
 impl Config {
     pub fn from_env() -> Config {
         // 平台三态启动（还原 CPK_PLATFORM 启动参数）：
@@ -143,7 +153,10 @@ impl Config {
             )
         };
         let account = envs("CPK_ACCOUNT").unwrap_or_else(|| "account1".into());
-        let data_dir = PathBuf::from(envs("CPK_DATA_DIR").unwrap_or_else(|| "/data".into()));
+        let data_dir = match envs("CPK_DATA_DIR") {
+            Some(p) => PathBuf::from(p),
+            None => default_data_dir(),
+        };
         let profile_dir = match envs("CPK_PROFILE_DIR") {
             Some(p) => PathBuf::from(p),
             None => data_dir.join(format!("profile-{}", sanitize(&account))),
@@ -194,6 +207,22 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_data_dir_decision() {
+        // Docker 场景：/data 存在 → 沿用（容器行为不变）
+        assert_eq!(
+            pick_data_dir(true, Some("/home/u".into())),
+            PathBuf::from("/data")
+        );
+        // 裸机场景：/data 不存在 → XDG 数据目录（普通用户可写）
+        assert_eq!(
+            pick_data_dir(false, Some("/home/u".into())),
+            PathBuf::from("/home/u/.local/share/cloudphonekeep")
+        );
+        // 极端兜底：无 HOME → 当前目录 ./data
+        assert_eq!(pick_data_dir(false, None), PathBuf::from("./data"));
+    }
 
     // env 是进程级全局——所有环境用例合并在单个测试函数内串行执行
     #[test]
