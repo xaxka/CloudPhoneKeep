@@ -78,6 +78,7 @@ mod tests {
             selftest: false,
             smoke: false,
             smoke_seconds: 60,
+            max_conns: 16,
         }
     }
 

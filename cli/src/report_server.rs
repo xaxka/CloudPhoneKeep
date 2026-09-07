@@ -88,13 +88,21 @@ pub fn start(
     thread::spawn(move || {
         for conn in listener.incoming() {
             match conn {
-                Ok(stream) => {
+                Ok(mut stream) => {
+                    // 连接闸门（CPK_MAX_CONNS，默认 16）：超限直接 503 短回包，
+                    // 不解析不开线程——连接洪峰下也只花一个 accept 循环的功夫。
+                    // 画面流等长连接在生命周期内占名额（这正是要保护的资源）
+                    if !shared.conn_enter() {
+                        respond_overloaded(&mut stream);
+                        continue;
+                    }
                     let cfg = cfg.clone();
                     let logger = logger.clone();
-                    let shared = shared.clone();
+                    let shared2 = shared.clone();
                     let ctrl = ctrl.clone();
                     thread::spawn(move || {
-                        let _ = handle_conn(stream, &cfg, &logger, &shared, &ctrl);
+                        let _ = handle_conn(stream, &cfg, &logger, &shared2, &ctrl);
+                        shared2.conn_exit(); // 名额严格配对释放（含长连接退出）
                     });
                 }
                 Err(_) => thread::sleep(Duration::from_millis(200)),
@@ -102,6 +110,20 @@ pub fn start(
         }
     });
     Ok(port)
+}
+
+/// 超限连接的短回包（503 + Retry-After: 1 + 立即断开；不做任何解析）
+fn respond_overloaded(stream: &mut TcpStream) {
+    let body = "too many concurrent connections";
+    let _ = stream.write_all(
+        format!(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nRetry-After: 1\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .as_bytes(),
+    );
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
 struct Req {
@@ -874,6 +896,54 @@ mod tests {
     /// base64(user:pass)（测试用；util::base64_encode 面向二进制，此处拼 UTF-8 即可）
     fn b64(s: &str) -> String {
         crate::util::base64_encode(s.as_bytes())
+    }
+
+    #[test]
+    fn conn_limit_gates_excess_and_reports_fields() {
+        let (port, shared, _tx) = start_server("");
+        // 压低上限到 2（生产默认 16 由 CPK_MAX_CONNS 提供；测试走运行时回写
+        // 避免进程级环境变量在并行测试间串扰）
+        shared.set_max_conns(2);
+        // 占满两个名额：只连接不发包——handler 阻塞在请求解析（读超时 10s），
+        // 名额被持有（画面流长连接同理，这正是闸门要保护的占用形态）
+        let hold: Vec<std::net::TcpStream> = (0..2)
+            .map(|_| std::net::TcpStream::connect(("127.0.0.1", port)).unwrap())
+            .collect();
+        thread::sleep(Duration::from_millis(400));
+        // 第 3 个连接：超限 → 503 短回包（不解析请求，body 为限流提示）
+        let (st, body) = http(
+            port,
+            "GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 503, "超限连接应被 503 拒绝：{st} {body}");
+        assert!(
+            body.contains("too many concurrent connections"),
+            "限流提示体：{body}"
+        );
+        assert_eq!(shared.snapshot().conns, 2, "占用的两个名额应如实计数");
+        // 释放名额：客户端断开 → handler 解析失败退出 → 名额回收
+        drop(hold);
+        let mut freed = false;
+        for _ in 0..40 {
+            thread::sleep(Duration::from_millis(100));
+            if shared.snapshot().conns == 0 {
+                freed = true;
+                break;
+            }
+        }
+        assert!(freed, "名额应随连接断开回收");
+        // 恢复后正常服务：未运行浏览器 → 常规 503 + healthz JSON（与限流 503
+        // 以 body 区分），并回显 conns / maxConns 字段
+        let (st, body) = http(
+            port,
+            "GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(st, 503);
+        assert!(body.contains("\"conns\""), "healthz 缺 conns 字段：{body}");
+        assert!(
+            body.contains("\"maxConns\":2"),
+            "healthz 缺 maxConns 字段：{body}"
+        );
     }
 
     #[test]

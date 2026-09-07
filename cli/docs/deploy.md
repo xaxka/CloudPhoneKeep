@@ -21,6 +21,10 @@ curl -fsSL https://raw.githubusercontent.com/xaxka/CloudPhoneKeep/main/cli/insta
     画面流/输入注入/设置端点全保护；`/healthz` `/status` `/report` `/log` 保持开放
     （Docker 健康检查与页内脚本上报通道，不含敏感控制能力）
   - `CPK_CONTROL_TOKEN`：URL `?token=` 或 `X-CPK-Token` 头（脚本集成友好）
+- **并发连接上限**（`CPK_MAX_CONNS`，默认 16）：超限连接直接 503，不解析
+  不开线程——公网暴露时防连接无界增长撑爆线程/内存；画面流等长连接在
+  生命周期内占名额（多观众同看按名额计）。healthz 回显 `conns`/`maxConns`
+  可远程观察占用
 - 免鉴权通道的内容是只读诊断与页面状态上报（已做限长与控制字符过滤），
   不含任何控制能力；真正的控制面（触摸/键盘/导航/设置）全部在鉴权之后
 

@@ -36,6 +36,7 @@ curl http://127.0.0.1:8088/healthz
 | `lastError` | 最近错误结论 | 含 DNS/TCP 探测结果（导航失败时最有价值） |
 | `fps` / `quality` / `scale` | 三旋钮当前值 | 与控制页「设置」一致；运行时可调（POST 即生效） |
 | `tickIdle` | 空闲降频是否生效中 | 见下 |
+| `conns` / `maxConns` | 当前并发连接数 / 上限 | 长期贴近 `maxConns` = 有客户端反复重连占满名额（画面流重连风暴/爬虫扫描），可调大 `CPK_MAX_CONNS` 或排查客户端 |
 
 - `ticks` 持续增长 = 保活看门狗在跑；`clicks` = 已执行的保活点击数
 - `tickIdle` = `true` 表示空闲降频生效中（无人观看且无操作 ≥

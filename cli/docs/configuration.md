@@ -18,6 +18,7 @@ CLI 版全部配置走环境变量；Windows 版配置见
 | `CPK_BIND` | `127.0.0.1`（镜像内 ENV 固定 `0.0.0.0`） | 上述端口绑定地址；要从其他机器访问控制页设 `0.0.0.0`（务必同时设鉴权：`CPK_AUTH_USER`/`CPK_AUTH_PASS` 或 `CPK_CONTROL_TOKEN`） |
 | `CPK_CONTROL_TOKEN` | 空 | 控制页/截图/触摸端点的访问令牌（强烈建议公网可达时设置） |
 | `CPK_AUTH_USER` / `CPK_AUTH_PASS` | 空 | HTTP Basic Auth（两者同时非空才启用）：控制页/画面流/控制端点弹账号密码登录框；`/healthz` `/status` `/report` `/log` 保持开放（探活与页内脚本上报通道）。与 `CPK_CONTROL_TOKEN` 可叠加（先过 Basic 再过 token） |
+| `CPK_MAX_CONNS` | `16` | 报告服务并发连接上限（1-256）：超限连接直接 503（不解析不开线程）。画面流等长连接在生命周期内占名额——公网暴露时防连接无界增长撑爆线程/内存；多观众同看或代理探活频繁时可调大。healthz 回显 `conns`/`maxConns` |
 | `CPK_CDP_PORT` | `0` | Chromium DevTools 固定端口（0=自动分配；固定端口可用于外部 DevTools） |
 | `CPK_CHROME_BIN` | `chrome-headless-shell`（按 PATH 查找；镜像内 ENV 设为绝对路径 `/opt/chrome-headless-shell/chrome-headless-shell`） | 浏览器二进制路径（调试时可指向其他 Chrome） |
 | `CPK_NO_SANDBOX` | `1` | 容器内通常需关闭 Chromium 沙箱 |

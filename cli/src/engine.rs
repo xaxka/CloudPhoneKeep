@@ -92,6 +92,10 @@ pub struct Health {
     /// 当前监督周期是否处于空闲降频态（tick/采样 eval 已放缓）。
     /// 远程验证降频是否生效：curl /healthz 看 tickIdle
     pub tick_idle: bool,
+    /// 报告服务当前并发连接数（含画面流长连接；连接闸门回显）
+    pub conns: u32,
+    /// 并发连接上限（CPK_MAX_CONNS，默认 16；超限连接直接 503）
+    pub max_conns: u32,
 }
 
 /// 运行时平台全貌（控制面板 /platform 切换后由 SharedState 持有；
@@ -120,6 +124,12 @@ pub struct SharedState {
     last_activity: Mutex<Instant>,
     /// 空闲降频态回显（healthz tickIdle）
     tick_idle: AtomicBool,
+    /// 报告服务并发连接计数（连接闸门：conn_enter/conn_exit 配对）。
+    /// 画面流等长连接在生命周期内占用名额——防止公网暴露时连接无界增长
+    /// 撑爆线程/内存；普通短请求毫秒级进出几乎不占
+    conns: AtomicU32,
+    /// 并发连接上限（CPK_MAX_CONNS 初值；运行时不变）
+    max_conns: AtomicU32,
 }
 
 impl SharedState {
@@ -154,6 +164,8 @@ impl SharedState {
             title: String::new(),
             last_status: String::new(),
             tick_idle: false,
+            conns: 0,
+            max_conns: cfg.max_conns.clamp(1, 256),
         };
         Arc::new(SharedState {
             health: Mutex::new(health),
@@ -166,7 +178,32 @@ impl SharedState {
             scale: AtomicU32::new(cfg.stream_scale_pct.clamp(30, 100)),
             last_activity: Mutex::new(Instant::now()),
             tick_idle: AtomicBool::new(false),
+            conns: AtomicU32::new(0),
+            max_conns: AtomicU32::new(cfg.max_conns.clamp(1, 256)),
         })
+    }
+
+    /// 连接闸门：进入时计数并判断是否超限（超限返回 false 且不占用名额）。
+    /// report_server 接入循环对每个新连接调用；conn_exit 与之严格配对
+    pub fn conn_enter(&self) -> bool {
+        let cur = self.conns.fetch_add(1, Ordering::AcqRel);
+        if cur >= self.max_conns.load(Ordering::Acquire) {
+            self.conns.fetch_sub(1, Ordering::AcqRel);
+            false
+        } else {
+            true
+        }
+    }
+
+    /// 连接闸门：连接关闭（正常/超时/写失败均可）时释放名额
+    pub fn conn_exit(&self) {
+        self.conns.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// 上限回写（测试用；生产初值来自 CPK_MAX_CONNS 不再变动）
+    #[cfg(test)]
+    pub fn set_max_conns(&self, n: u32) {
+        self.max_conns.store(n.clamp(1, 256), Ordering::Release);
     }
 
     pub fn snapshot(&self) -> Health {
@@ -177,6 +214,8 @@ impl SharedState {
         h.quality = self.quality.load(Ordering::Relaxed);
         h.scale = self.scale.load(Ordering::Relaxed);
         h.tick_idle = self.tick_idle.load(Ordering::Relaxed);
+        h.conns = self.conns.load(Ordering::Relaxed);
+        h.max_conns = self.max_conns.load(Ordering::Relaxed);
         let age = if h.last_beat_ms > 0 {
             Some(((util::now_ms() - h.last_beat_ms).max(0) / 1000) as u64)
         } else {
@@ -310,6 +349,8 @@ pub fn health_json(h: &Health) -> Value {
         "title": h.title,
         "lastStatus": h.last_status,
         "tickIdle": h.tick_idle,
+        "conns": h.conns,
+        "maxConns": h.max_conns,
     })
 }
 
@@ -2053,6 +2094,7 @@ mod tests {
             selftest: false,
             smoke: false,
             smoke_seconds: 60,
+            max_conns: 16,
         }
     }
 
@@ -2181,6 +2223,7 @@ mod tests {
             selftest: false,
             smoke: false,
             smoke_seconds: 60,
+            max_conns: 16,
         };
         let shared = SharedState::new(&cfg);
         assert!(shared.snapshot().title.is_empty());
@@ -2236,6 +2279,7 @@ mod tests {
             selftest: false,
             smoke: false,
             smoke_seconds: 60,
+            max_conns: 16,
         };
         let shared = SharedState::new(&cfg);
         // 初始：mobile 414x896
@@ -2327,6 +2371,7 @@ mod tests {
             selftest: false,
             smoke: false,
             smoke_seconds: 60,
+            max_conns: 16,
         };
         let args = build_args(&cfg);
         assert!(args.contains(&"--user-data-dir=/data/profile-t".to_string()));

@@ -68,6 +68,10 @@ pub struct Config {
     /// 采样周期同步放缓保证冻结检测不误报；若该配置会打破「页面级恢复
     /// 先于心跳硬重启」的分级安全，引擎自动放弃降频（维持 1s/5s）
     pub idle_tick_sec: u64,
+    /// 报告服务并发连接上限（CPK_MAX_CONNS，默认 16，1..256）：
+    /// 超限连接直接 503（不解析不开线程）；画面流等长连接在生命周期内
+    /// 占用名额——公网暴露时防连接无界增长；healthz 回显 conns/maxConns
+    pub max_conns: u32,
     pub selftest: bool,
     pub smoke: bool,
     pub smoke_seconds: u64,
@@ -207,6 +211,7 @@ impl Config {
             stream_scale_pct: i64_env("CPK_STREAM_SCALE", 100, 30, 100) as u32,
             idle_after_sec: i64_env("CPK_IDLE_AFTER_SEC", 60, 0, 3600) as u64,
             idle_tick_sec: i64_env("CPK_IDLE_TICK_SEC", 5, 1, 60) as u64,
+            max_conns: i64_env("CPK_MAX_CONNS", 16, 1, 256) as u32,
             selftest: bool_env("CPK_SELFTEST", false),
             smoke: bool_env("CPK_SMOKE", false),
             smoke_seconds: i64_env("CPK_SMOKE_SECONDS", 60, 10, 3600) as u64,
@@ -260,6 +265,8 @@ mod tests {
         // 空闲降频默认：60s 无活动进入空闲，tick 1s→5s
         assert_eq!(cfg.idle_after_sec, 60);
         assert_eq!(cfg.idle_tick_sec, 5);
+        // 连接上限默认 16（公网防连接无界增长）
+        assert_eq!(cfg.max_conns, 16);
 
         // 覆盖：显式 CPK_URL → 自动启动（mobile 视口）；自定义分辨率/周期
         std::env::set_var("CPK_ACCOUNT", "18612341234");
@@ -321,6 +328,13 @@ mod tests {
         std::env::set_var("CPK_IDLE_TICK_SEC", "30");
         let cfg = Config::from_env();
         assert_eq!(cfg.idle_tick_sec, 30);
+        // 连接上限：越界钳回 256，非法回默认 16
+        std::env::set_var("CPK_MAX_CONNS", "99999");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.max_conns, 256);
+        std::env::set_var("CPK_MAX_CONNS", "abc");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.max_conns, 16);
         // 合法覆盘：windows 仍可选（旧部署兼容）
         std::env::set_var("CPK_UA_MODE", "windows");
         let cfg = Config::from_env();
@@ -347,6 +361,7 @@ mod tests {
         std::env::remove_var("CPK_UA_MODE");
         std::env::remove_var("CPK_IDLE_AFTER_SEC");
         std::env::remove_var("CPK_IDLE_TICK_SEC");
+        std::env::remove_var("CPK_MAX_CONNS");
         let _ = k; // 保留原值避免 unused 警告
     }
 }
