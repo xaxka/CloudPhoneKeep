@@ -577,9 +577,13 @@
         send(acted);
       } else {
         send('alive');
-        // 心跳采样：每 20 次动作周期记录一次选择器命中全貌。
-        // 「全0即疑似改版」仅对顶层页面的首页/未识别路由成立；
-        // iframe（手机画面）与云机内路由全 0 是正常态，不再误报
+        // 心跳采样：每 20 次动作周期（约 100 秒）记录一次选择器命中全貌。
+        // 「全0即疑似改版」仅对顶层页面的首页/未识别路由成立；iframe（手机画面）
+        // 与云机内路由全 0 是标注过的正常态——这两类上下文全 0 时单条无任何诊断
+        // 信息，却占日志量 ~95%，降为 360 周期（约 30 分钟）一条存活节拍（仍证明
+        // 脚本在跑、tick 在走）；其余上下文（非 0 命中 / 首页全 0 / 未识别路由）
+        // 维持 100 秒全量采样一屏不漏，改版预警能力不缩水。360 是 20 的整倍数，
+        // 与既有节拍天然对齐；tick=1 的首条心跳两档都会发出（注入即留痕）。
         if (state.ticks % 20 === 1) {
           var all0 = true;
           for (var hi = 0; hi < hits.length; hi++){ if (/:[1-9][0-9]*$/.test(hits[hi])) { all0 = false; break; } }
@@ -587,8 +591,11 @@
                   : (inPhoneRoute() ? '云机内(无弹窗无待点按钮,全0正常)'
                   : (onHomeRoute() ? '首页' : ('路由' + (routeOf() || '/') + '(未识别)')));
           var verdict = (all0 && !IS_FRAME && !inPhoneRoute()) ? ' 全0即疑似改版' : '';
-          diag('beat', 'tick=' + state.ticks + ' url=' + (location.pathname + location.hash).slice(0, 90) +
-               ' platform=' + CFG.platform + ' 上下文=' + ctx + ' hits=[' + hits.join(',') + ']' + verdict + routeSampleOnce());
+          var quiet = all0 && (IS_FRAME || inPhoneRoute());
+          if (!quiet || state.ticks % 360 === 1) {
+            diag('beat', 'tick=' + state.ticks + ' url=' + (location.pathname + location.hash).slice(0, 90) +
+                 ' platform=' + CFG.platform + ' 上下文=' + ctx + ' hits=[' + hits.join(',') + ']' + verdict + routeSampleOnce());
+          }
         }
       }
 
