@@ -533,7 +533,7 @@
             cf.click(); acted = 'confirm'; diag('click', 'confirm -> ' + desc(cf));
           } else {
             var dg = q('.van-dialog') || cf;
-            var dgTxt = ((dg.innerText || '').trim().slice(0, 160)).replace(/\s+/g, ' ');
+            var dgTxt = ((dg.innerText || '').trim().slice(0, 400)).replace(/\s+/g, ' ');
             // ===== 已知场景：云机更新/维护弹窗（见 cpk-20261005.log 08:13）=====
             // 「云机更新中，请稍后再试」+ 唯一按钮「返回首页」。按钮不能点：点击是
             // SPA 路由跳回首页（非整页加载，不走 restoreEnter 自动重进），退出检测
@@ -544,8 +544,11 @@
             // 「返回首页」不含重连/进入/确认，天然只会落到这里。
             if (dgTxt.indexOf('更新') >= 0 || dgTxt.indexOf('维护') >= 0 || dgTxt.indexOf('稍后再试') >= 0) {
               state.updMiss++;
-              diag('miss', '云机更新/维护弹窗(第' + state.updMiss + '次)（不点按钮"' + cfTxt +
-                   '"——点击会退回首页停用保活，60 秒后整页重载重试） | 弹窗全文="' + dgTxt + '"');
+              // 只在首见与触发重载时留痕：持续期每 5 秒一条重复 miss 无信息量
+              if (state.updMiss === 1) {
+                diag('miss', '云机更新/维护弹窗(首见)（不点按钮"' + cfTxt +
+                     '"——点击会退回首页停用保活，60 秒后整页重载重试） | 弹窗全文="' + dgTxt + '"');
+              }
               if (state.updMiss >= 12) {
                 state.updMiss = 0;
                 diag('sys', '云机更新/维护持续 60 秒，自动重载页面重试（重载后站点自动重进云机） ' + safeUrl(location.href).slice(0, 120));
