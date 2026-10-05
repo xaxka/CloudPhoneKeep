@@ -80,6 +80,30 @@
     } catch(e){}
   }
 
+  // ===== URL 日志脱敏（与 shared/src/redact.rs 双端同款规则）=====
+  // 页面 URL 常带会话凭证（ai-helper-phone 的 token 等），日志会被拿来分享排障，
+  // 敏感参数值统一打码 ***；参数名集合与 Rust 侧 redact_url 保持同步。
+  var CPK_SENS_KEYS = { token:1, session:1, sess:1, key:1, secret:1, auth:1, ticket:1,
+                        password:1, pwd:1, signature:1, sign:1, code:1 };
+  function safeUrl(u){
+    try {
+      var s = String(u), out = '', inQ = false, i = 0;
+      while (i < s.length) {
+        var c = s.charAt(i);
+        if (c === '?' || c === '#') { inQ = true; out += c; i++; continue; }
+        if (!inQ) { out += c; i++; continue; }
+        var j = i;
+        while (j < s.length && s.charAt(j) !== '&' && s.charAt(j) !== '#') j++;
+        var p = s.slice(i, j), eq = p.indexOf('=');
+        if (eq > 0 && CPK_SENS_KEYS[p.slice(0, eq).toLowerCase()]) out += p.slice(0, eq) + '=***';
+        else out += p;
+        if (j < s.length) { var sp = s.charAt(j); if (sp === '#') inQ = false; out += sp; i = j + 1; }
+        else i = j;
+      }
+      return out;
+    } catch(e) { return ''; }
+  }
+
   // 诊断缓冲（取走即清空，最多 200 条防泄漏；由 Linux 宿主经 CDP 调用）
   window.__CPK_DRAIN__ = function(){
     var b = state.diagBuf;
@@ -486,7 +510,7 @@
                    '"——点击会退回首页停用保活，60 秒后整页重载重试） | 弹窗全文="' + dgTxt + '"');
               if (state.updMiss >= 12) {
                 state.updMiss = 0;
-                diag('sys', '云机更新/维护持续 60 秒，自动重载页面重试（重载后站点自动重进云机） ' + location.href.slice(0, 120));
+                diag('sys', '云机更新/维护持续 60 秒，自动重载页面重试（重载后站点自动重进云机） ' + safeUrl(location.href).slice(0, 120));
                 try { location.reload(); } catch(e) {}
               }
             } else {
@@ -498,7 +522,7 @@
                    dgTxt + '" 按钮清单=' + btnTexts(dg));
               if (state.cfMiss >= 36) {
                 state.cfMiss = 0;
-                diag('sys', '确认弹窗持续 3 分钟未识别（疑似改版），自动重载页面 ' + location.href.slice(0, 120));
+                diag('sys', '确认弹窗持续 3 分钟未识别（疑似改版），自动重载页面 ' + safeUrl(location.href).slice(0, 120));
                 try { location.reload(); } catch(e) {}
               }
             }
@@ -551,7 +575,7 @@
             } else if (state.pdwMiss >= 36) {
               // 兜底二：3 分钟未恢复 -> 整页重载（登录态在本地数据目录，重载自动回云机页）
               state.pdwMiss = 0;
-              diag('sys', '断连弹窗持续 3 分钟未恢复，自动重载页面 ' + location.href.slice(0, 120));
+              diag('sys', '断连弹窗持续 3 分钟未恢复，自动重载页面 ' + safeUrl(location.href).slice(0, 120));
               try { location.reload(); } catch(e) {}
             }
           }
@@ -634,7 +658,7 @@
     // 路由变化检测（SPA 页面改版定位的第一线索）——纯 location 读取，不触发布局，resize 期间也保留
     if (state.lastUrl !== location.href) {
       state.lastUrl = location.href;
-      diag('nav', '进入 ' + location.href.slice(0, 300) + ' title=' + (document.title || '').slice(0, 40));
+      diag('nav', '进入 ' + safeUrl(location.href).slice(0, 300) + ' title=' + (document.title || '').slice(0, 40));
     }
     if (resizing) return;  // resize 期间跳过 DOM 强制布局操作（stopCheck/actionTick 的 vis()）
     stopCheck();                                    // 原版 stopTimer：每 1 秒
@@ -686,10 +710,10 @@
       var rs = document.readyState;
       var kids = document.body ? document.body.children.length : -1;
       if ((rs !== 'complete' && rs !== 'interactive') || kids <= 0) {
-        diag('error', '页面未正常加载 readyState=' + rs + ' body子元素=' + kids + ' url=' + location.href.slice(0, 160));
+        diag('error', '页面未正常加载 readyState=' + rs + ' body子元素=' + kids + ' url=' + safeUrl(location.href).slice(0, 160));
         showLoadBar('页面似乎没有加载出来（空白）。请检查网络后重试：');
       } else {
-        diag('sys', '页面加载正常 readyState=' + rs + ' body子元素=' + kids + ' url=' + location.href.slice(0, 120));
+        diag('sys', '页面加载正常 readyState=' + rs + ' body子元素=' + kids + ' url=' + safeUrl(location.href).slice(0, 120));
       }
     } catch(e) {}
   }, 15000);
@@ -707,5 +731,5 @@
        ' 触点光标=' + (CFG.customCursor ? '开' : '关') +
        ' 鼠标操控模拟=' + (tsOn ? '已安装(ontouchstart存在,页面自带模拟器未加载)' : '未安装(页面自带模拟器生效)') +
        ' 驱动=' + (CFG.pageTimer !== false ? '页内定时器' : '宿主CDP看门狗') +
-       ' url=' + location.href.slice(0, 120));
+       ' url=' + safeUrl(location.href).slice(0, 120));
 })();

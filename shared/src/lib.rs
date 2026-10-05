@@ -13,3 +13,4 @@
 
 pub mod keepalive;
 pub mod platform;
+pub mod redact;

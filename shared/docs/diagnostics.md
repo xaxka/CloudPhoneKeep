@@ -35,7 +35,9 @@
    [`shared/keepalive.inject.js`](../keepalive.inject.js) 中的选择器
    （双平台同时生效，见 [keepalive-rules.md](keepalive-rules.md)）
 
-日志不记录任何帐号凭证，只含页面结构与保活动作。
+日志不记录任何帐号凭证，只含页面结构与保活动作：URL 中的敏感参数
+（token/session/key/secret 等 12 类，双端同款规则）输出前统一打码为 `***`
+（见 `shared/src/redact.rs` 与注入脚本 `safeUrl()`；非凭证参数如 phoneId 保留）。
 
 ## 版本专属排查
 

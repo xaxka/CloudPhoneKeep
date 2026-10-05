@@ -82,7 +82,7 @@ fn phase(
     code_win: i32,
     code_nav: i32,
 ) -> Option<i32> {
-    out(app, &format!("PHASE {name}: 创建窗口 slot={slot} url={url}"));
+    out(app, &format!("PHASE {name}: 创建窗口 slot={slot} url={}", cloudphonekeep_shared::redact::redact_url(url)));
     {
         let state: tauri::State<AppState> = app.state();
         let mut cfg = state.config.lock().unwrap();

@@ -151,7 +151,7 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
                     tauri::webview::PageLoadEvent::Started => "Started(开始加载)",
                     tauri::webview::PageLoadEvent::Finished => "Finished(加载完成)",
                 };
-                logger::log(&nav_app, slot, "debug", &format!("页面加载事件 {ev}：{}", payload.url()));
+                logger::log(&nav_app, slot, "debug", &format!("页面加载事件 {ev}：{}", cloudphonekeep_shared::redact::redact_url(payload.url())));
             })
             // SPA 路由切换会改标题：标题出现变化 = 页面确实渲染出来了
             .on_document_title_changed(move |_w, t| {

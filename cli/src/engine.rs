@@ -1289,7 +1289,7 @@ fn nav_home(
     stats.reloads_window += 1;
     shared.bump_reloads();
     shared.set_page("reloading");
-    logger.log(1, "nav", &format!("恢复性导航 {url}"));
+    logger.log(1, "nav", &format!("恢复性导航 {}", cloudphonekeep_shared::redact::redact_url(&url)));
     // 发后即忘：不等应答（理由同 nav_error_step），成败由采样周期回看 URL
     cdp.fire("Page.navigate", json!({ "url": url }), Some(session));
     Ok(())
@@ -1673,7 +1673,7 @@ fn dispatch_input(
             let _ = reply.send(Ok(()));
         }
         ControlRequest::Navigate { url, reply } => {
-            logger.log(1, "nav", &format!("控制页导航 {url}"));
+            logger.log(1, "nav", &format!("控制页导航 {}", cloudphonekeep_shared::redact::redact_url(&url)));
             // 发后即忘：导航本身可费时数十秒（弱网/慢站），同步等完会把引擎线程
             // 占住最多 20s——期间触摸/输入全部压队（表现为「回首页后无法操作」）；
             // 结果由实时画面流直接看到，传输断裂则立刻报错走重连
@@ -1981,7 +1981,7 @@ fn attach_all(
                 logger.log(0, "nav", &format!("初始导航失败：{et}"));
                 shared.set_last_error(&format!("导航失败：{et}"));
             }
-            _ => logger.log(1, "nav", &format!("导航 {url}")),
+            _ => logger.log(1, "nav", &format!("导航 {}", cloudphonekeep_shared::redact::redact_url(&url))),
         }
     }
     Ok((cdp, session))
