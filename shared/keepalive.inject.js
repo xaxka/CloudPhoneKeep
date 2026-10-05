@@ -418,6 +418,38 @@
     return null;
   }
 
+  // ===== 被踢退出自动重进（v1.12.1）=====
+  // 退出检测（#tabbar / .title-bar）此前只上报 exited + 系统通知就停用保活，
+  // 人不在场手机就此离线到天亮。退出多为被踢/会话抖动，登录态在本地数据目录，
+  // 整页重载后站点自动重进云机（cpk-20261004/05.log 多次实证：cloudAppList→
+  // cloudphone→instance / restoreData→restoreEnter），重进即恢复。
+  // 防死循环：跨文档计数走 localStorage（同域持久），1 小时窗口内最多 3 次，
+  // 连续失败第 3 次后放弃并留痕（疑似会话真失效，等人工登录，通知仍照发）；
+  // 存活清零：非退出态稳定 60 个动作周期（约 5 分钟）计数归零。
+  var CPK_REENTRY_KEY = 'cpk_reentry_v1';
+  function reenterReset(){
+    try { localStorage.setItem(CPK_REENTRY_KEY, JSON.stringify({ n: 0, t: Date.now() })); } catch(e){}
+  }
+  function tryAutoReenter(reason){
+    try {
+      var now = Date.now(), rec = null;
+      try { rec = JSON.parse(localStorage.getItem(CPK_REENTRY_KEY) || 'null'); } catch(e){}
+      if (!rec || typeof rec.n !== 'number' || now - (rec.t || 0) > 3600e3) rec = { n: 0, t: now };
+      if (rec.n >= 3) {
+        diag('sys', '自动重进已达上限（1 小时内 ' + rec.n + ' 次），暂停自动重进——疑似会话失效，需人工重新登录；系统通知已发');
+        return;
+      }
+      rec.n += 1; rec.t = now;
+      try { localStorage.setItem(CPK_REENTRY_KEY, JSON.stringify(rec)); } catch(e2){}
+      diag('sys', '退出云机自动重进 ' + rec.n + '/3（' + reason + '）：整页重载——登录态在本地数据目录，重载后站点自动回云机');
+      // 延迟 800ms 再重载：exited 上报与日志的回环 fetch 先发出，避免被 reload 取消
+      setTimeout(function(){
+        try { location.reload(); return; } catch(e3){}
+        try { location.href = CFG.homeUri; } catch(e4){}
+      }, 800);
+    } catch(e) {}
+  }
+
   // ===== stopTimer 语义（原版 1000ms）：退出/到期检测 =====
   // 还原原版：任一分支触发后 topTimerStatus=true，stopTimer 停用（本会话内只检测一次）
   function stopCheck(){
@@ -433,6 +465,8 @@
         state.stopDone = true; state.wasExited = true;
         diag('exit', '已退出云机（' + (vis(tb) ? '检测到 #tabbar 首页特征' : '路由从云机回到首页') + '），DOM 采样: ' + domSample());
         send('exited');
+        // 被/疑似被踢：整页重载自动重进（1 小时 3 次上限，见 tryAutoReenter）
+        tryAutoReenter(vis(tb) ? '#tabbar 首页特征' : '路由从云机回到首页');
         return;
       }
       var cf = q('.van-dialog__confirm');
@@ -449,6 +483,8 @@
         state.stopDone = true; state.wasExited = true;
         diag('exit', '已退出云机（检测到 .title-bar 首页特征），DOM 采样: ' + domSample());
         send('exited');
+        // 被/疑似被踢：整页重载自动重进（1 小时 3 次上限，见 tryAutoReenter）
+        tryAutoReenter('.title-bar 首页特征');
         return;
       }
       var cf2 = q('.van-dialog__confirm');
@@ -466,6 +502,8 @@
   function actionTick(){
     state.ticks++;
     if (!CFG.keepAlive) { send('paused'); return; }
+    // 自动重进计数存活清零：非退出态稳定 60 拍（约 5 分钟）说明重进已成功/本来健康
+    if (state.ticks % 60 === 0 && !state.wasExited) reenterReset();
     var acted = '';
     var exitedNow = state.wasExited;
     // 选择器命中摘要：beat 日志核心数据（全 0 是否异常由上下文决定，见下方心跳块）

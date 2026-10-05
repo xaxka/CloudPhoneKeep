@@ -192,7 +192,7 @@ fn on_report(app: &tauri::AppHandle, slot: u32, status: &str) {
                     if prev != "exited" {
                         notify = Some((
                             "已退出云手机".into(),
-                            format!("帐号槽位 {slot} 已退回云手机首页，请检查会话"),
+                            format!("帐号槽位 {slot} 已退回云手机首页；正在自动重进（1 小时内最多 3 次，详见日志），若持续收到本通知请重新登录"),
                         ));
                     }
                 }
