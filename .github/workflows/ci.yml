@@ -96,14 +96,19 @@ jobs:
       - name: Install via install.sh (engine = current build)
         run: sudo bash cli/install.sh --engine "$PWD/target/release/cloudphonekeep"
 
-      - name: Smoke 1/3 — engine + chrome end-to-end
+      - name: Smoke 1/4 — engine + chrome end-to-end
         run: bash cli/tests/ci_smoke.sh
 
-      - name: Smoke 2/3 — knob hot-reload e2e
+      - name: Smoke 2/4 — knob hot-reload e2e
         run: python3 cli/tests/knob_e2e.py
 
-      - name: Smoke 3/3 — basic auth e2e
+      - name: Smoke 3/4 — basic auth e2e
         run: python3 cli/tests/auth_e2e.py
+
+      # 弹窗决策回归：真浏览器 + 真 keepalive.inject.js，139 弹窗 fixture
+      # 端到端断言该点/不该点/兜底重载/退出自动重进（改保活规则必须过这关）
+      - name: Smoke 4/4 — popup decision e2e
+        run: node cli/tests/popup_decide.js
 
   # =====================================================================
   # CLI 版（cli/ + shared/，根 workspace）：Rust musl 静态引擎 + Alpine 交叉编译

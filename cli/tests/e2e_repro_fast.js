@@ -180,7 +180,8 @@ async function startCloudChrome() {
     keepAlive: true, intervalMs: 5000, simulateActivity: true, customCursor: false,
     blockContextMenu: true, pageTimer: false };
   let js = fs.readFileSync(path.join(SHARED, 'keepalive.inject.js'), 'utf8');
-  js = js.replace('__CPK_CFG__', JSON.stringify(cfg)).replace(/__CPK_CURSOR__/g, '');
+  // 只替换代码占位符：文件头注释里也有 __CPK_CFG__ 字样，String.replace(字符串) 只换第一次出现
+  js = js.replace(/__CPK_CFG__;/, JSON.stringify(cfg) + ';').replace(/__CPK_CURSOR__/g, '');
   await chromeA.call('Page.addScriptToEvaluateOnNewDocument', { source: js, runImmediately: true }, sessionA);
   await chromeA.call('Page.navigate', { url: PAGE_URL }, sessionA);
   await waitLoad(chromeA, sessionA);

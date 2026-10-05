@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>popup fixture</title>
+</head>
+<body>
+<div id="app">CPK popup fixture</div>
+<div id="tabbar" style="display:none">首页</div>
+<script>
+// 弹窗决策回归测试夹具（popup_decide.js 用）：按 hash 呈现 139 站点各弹窗形态。
+// __CLICKED__ 记录页面按钮被点击的文字——保活脚本若点了不该点的按钮，这里就有记录。
+window.__CLICKED__ = [];
+function showDialog(text, btn){
+  var d = document.createElement('div'); d.className = 'van-dialog';
+  var p = document.createElement('div'); p.textContent = text;
+  var b = document.createElement('button');
+  b.className = 'van-dialog__confirm'; b.textContent = btn;
+  b.onclick = function(){ window.__CLICKED__.push(btn); };
+  d.appendChild(p); d.appendChild(b); document.body.appendChild(d);
+}
+var h = location.hash || '';
+if (h.indexOf('update') >= 0)        showDialog('云机更新中，请稍后再试', '返回首页');
+else if (h.indexOf('unknown') >= 0) showDialog('神秘提示文案', '随便按钮');
+else if (h.indexOf('reconnect') >= 0) showDialog('连接超时', '点击重连');
+else if (h.indexOf('know') >= 0)     showDialog('时间已到期', '知道了');
+else if (h.indexOf('enterbtn') >= 0) showDialog('点击进入云机', '进入云机');
+if (h.indexOf('hometab') >= 0) document.getElementById('tabbar').style.display = 'block';
+</script>
+</body>
+</html>
