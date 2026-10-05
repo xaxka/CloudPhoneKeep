@@ -130,10 +130,13 @@ fn pick_data_dir(data_root_exists: bool, home: Option<std::ffi::OsString>) -> Pa
 impl Config {
     pub fn from_env() -> Config {
         // 平台三态启动（还原 CPK_PLATFORM 启动参数）：
-        //   ① CPK_URL 显式 → 自动启动（CI 冒烟/自定义 H5），按 mobile 视口起
+        //   ① CPK_URL 显式 → 自动启动（CI 冒烟/自定义 H5），custom 通用保活
+        //      （v1.12.2 前误标 mobile——对非 139 站点会启用 139 特定的弹窗
+        //      点击/退出检测，无对应 DOM 虽无实害，但语义错：任意 URL 应走
+        //      通用规则：心跳 + 空闲鼠标模拟 + 路由留痕，不点任何站点按钮）
         //   ② CPK_PLATFORM=mobile/unicom 显式 → 自动启动该平台（环境变量
         //      直达：compose/CLI 部署免开控制页选择；非法值忽略走待机，
-        //      不会静默起错平台）
+        //      不会静默起错平台）。custom 不在此列：无默认 URL，必须配 CPK_URL
         //   ③ 两者都无 → 平台留空待机（控制页「设置→平台」选择后启动）。
         //      Profile 保留双平台登录态，切回已登过的平台无需重登
         let explicit_url = envs("CPK_URL");
@@ -141,11 +144,11 @@ impl Config {
             .filter(|p| p == "mobile" || p == "unicom");
         let (platform, platform_label, default_url, w, h) = if let Some(u) = &explicit_url {
             (
-                "mobile".to_string(),
-                PLATFORM_MOBILE_LABEL.to_string(),
+                "custom".to_string(),
+                cloudphonekeep_shared::platform::PLATFORM_CUSTOM_LABEL.to_string(),
                 u.clone(),
-                PLATFORM_MOBILE_W as i64,
-                PLATFORM_MOBILE_H as i64,
+                cloudphonekeep_shared::platform::PLATFORM_CUSTOM_W as i64,
+                cloudphonekeep_shared::platform::PLATFORM_CUSTOM_H as i64,
             )
         } else if let Some(p) = &platform_env {
             let (label, url, pw, ph) = platform_profile(p).expect("已过滤合法平台");
@@ -268,7 +271,8 @@ mod tests {
         // 连接上限默认 16（公网防连接无界增长）
         assert_eq!(cfg.max_conns, 16);
 
-        // 覆盖：显式 CPK_URL → 自动启动（mobile 视口）；自定义分辨率/周期
+        // 覆盖：显式 CPK_URL → 自动启动（custom 通用保活，414x896 默认视口）；
+        // 自定义分辨率/周期
         std::env::set_var("CPK_ACCOUNT", "18612341234");
         std::env::set_var("CPK_URL", "https://example.com/h5");
         std::env::set_var("CPK_WIDTH", "405");
@@ -277,8 +281,8 @@ mod tests {
         std::env::set_var("CPK_KEEP_ALIVE", "no");
         std::env::set_var("CPK_REPORT_PORT", "9090");
         let cfg = Config::from_env();
-        assert_eq!(cfg.platform, "mobile", "显式 CPK_URL 应自动启动");
-        assert_eq!(cfg.platform_label, "移动云手机");
+        assert_eq!(cfg.platform, "custom", "显式 CPK_URL 应以 custom 通用保活自动启动");
+        assert_eq!(cfg.platform_label, "自定义 URL");
         assert_eq!(cfg.url, "https://example.com/h5");
         assert_eq!(cfg.width, 405);
         assert_eq!(cfg.interval_ms, 8000);
@@ -298,7 +302,7 @@ mod tests {
         // CPK_URL 优先级高于 CPK_PLATFORM（自定义 H5 明确意图）
         std::env::set_var("CPK_URL", "https://example.com/h5");
         let cfg = Config::from_env();
-        assert_eq!(cfg.platform, "mobile", "CPK_URL 优先于 CPK_PLATFORM");
+        assert_eq!(cfg.platform, "custom", "CPK_URL 优先于 CPK_PLATFORM");
         assert_eq!(cfg.url, "https://example.com/h5");
         // 非法平台值忽略 → 待机（不静默起错平台）
         std::env::remove_var("CPK_URL");

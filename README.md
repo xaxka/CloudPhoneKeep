@@ -17,6 +17,8 @@
 | **CLI 版** [`cli/`](cli/README.md) | chrome-headless-shell + CDP + Rust | Linux 服务器，Docker / 裸机，一实例一账号 |
 
 支持平台：移动云手机（`cloudphoneh5.buy.139.com`）与联通云手机（`uphone.wo-adv.cn`），
+另支持**任意自定义 URL**（通用保活：心跳 + 空闲鼠标模拟，不点站点弹窗——
+Windows 设置窗口选「自定义 URL」填地址；CLI/Docker 配 `CPK_URL`）。
 每个账号独立选择平台，保活规则明细见 [shared/docs/keepalive-rules.md](shared/docs/keepalive-rules.md)。
 
 ## 使用方法

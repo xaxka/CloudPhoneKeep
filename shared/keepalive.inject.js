@@ -14,6 +14,9 @@
   //                     Linux 无可见光标，恒替换为空串且 customCursor=false）
   //
   // 平台差异全部收敛为 CFG 开关（其余逻辑双端 100% 一致）：
+  //  0) CFG.platform 分支：mobile 移动 139 / unicom 联通 / custom 自定义
+  //     URL 通用保活（不点弹窗不检测退出，规则明细见 shared/docs/
+  //     keepalive-rules.md）；改动平台分支必须配 cli/tests/popup_decide.js 用例
   //  1) CFG.pageTimer：true = 页内 setInterval 1 秒驱动（Windows 窗口可见态；
   //     隐藏/最小化时仍由 Rust 看门狗 eval __CPK_TICK__ 接管）；false = 完全
   //     由宿主看门狗驱动（Linux CDP 恒定态——无头页面永不可见，避免
@@ -353,7 +356,7 @@
   var IS_FRAME = false;
   try { IS_FRAME = (window.top !== window); } catch(e) { IS_FRAME = true; }
   function routeOf(){ try { return (location.hash || '').split('?')[0]; } catch(e) { return ''; } }
-  function inPhoneRoute(){ var r = routeOf(); return r.indexOf('/instance') >= 0 || (CFG.platform !== 'mobile' && r.indexOf('/phone') >= 0); }
+  function inPhoneRoute(){ var r = routeOf(); return r.indexOf('/instance') >= 0 || (CFG.platform === 'unicom' && r.indexOf('/phone') >= 0); }
   function onHomeRoute(){ return routeOf().indexOf('/cloudAppList') >= 0; }
   // 每个路由首次心跳时落一份 DOM class 清单：真改版时日志里直接有证据可对照换选择器
   var sampledRoutes = {};
@@ -478,7 +481,7 @@
         diag('click', 'expired(知道了) -> ' + desc(cf));
         send('expired');
       }
-    } else {
+    } else if (CFG.platform === 'unicom') {
       if (vis(q('.title-bar'))) {
         state.stopDone = true; state.wasExited = true;
         diag('exit', '已退出云机（检测到 .title-bar 首页特征），DOM 采样: ' + domSample());
@@ -496,6 +499,10 @@
         send('expired');
       }
     }
+    // custom（自定义 URL 通用保活）：无退出/到期检测——退出与到期特征是
+    // 移动/联通站点特定的（#tabbar / .title-bar / 「知道了」），对任意 URL
+    // 无从判定，宁可不检测也不误报误点；页面是否健康由宿主看门狗
+    // （心跳超时）与 CLI 引擎 chrome-error 检测兜底
   }
 
   // ===== runTimer 语义（原版 5000ms）：保活动作 =====
@@ -583,7 +590,7 @@
         if (!acted && vis(ei) && ((ei.innerText || '').indexOf('进入云机') >= 0)) {
           ei.click(); acted = 'enter'; diag('click', 'enter(enter-intance) -> ' + desc(ei));
         }
-      } else {
+      } else if (CFG.platform === 'unicom') {
         // ===== 联通云手机（uphone.wo-adv.cn）=====
         // 1. 试用弹窗 -> 立即启用云手机
         var tc = q('.try-content');
@@ -633,6 +640,13 @@
         }
         hits.push('title-bar:' + (vis(q('.title-bar')) ? 1 : 0));
       }
+      // custom（自定义 URL 通用保活）：不检测不点击任何站点弹窗——任意 URL
+      // 的弹窗语义无从判定（哪颗按钮是「重连」哪颗是「退出」），通用版规则
+      // 只做与站点无关的保活：心跳上报（下方向宿主证明页面活着）、空闲鼠标
+      // 模拟（防空闲会话回收，见下方共用块）、路由 nav 留痕（改版排查线索）、
+      // readyState/空白页检查（15 秒档）。页面异常由宿主看门狗与 CLI 引擎
+      // chrome-error 检测兜底。站点特定规则将来要加：在本文件加 custom 分支
+      // + popup_decide.js 加用例（见 cli/tests/README.md）。
 
       // 状态上报
       if (exitedNow) {
@@ -652,11 +666,15 @@
         if (state.ticks % 20 === 1) {
           var all0 = true;
           for (var hi = 0; hi < hits.length; hi++){ if (/:[1-9][0-9]*$/.test(hits[hi])) { all0 = false; break; } }
-          var ctx = IS_FRAME ? 'iframe手机画面(选择器属外层页面,全0恒正常)'
+          // custom 无选择器：hits 恒空属正常（无站点规则可命中），不能按
+          // 「全 0 疑似改版」解读——归入 30 分钟存活节拍，verdict 恒空
+          var isCustom = CFG.platform === 'custom';
+          var ctx = isCustom ? '自定义URL(无选择器,hits恒空属正常)'
+                  : (IS_FRAME ? 'iframe手机画面(选择器属外层页面,全0恒正常)'
                   : (inPhoneRoute() ? '云机内(无弹窗无待点按钮,全0正常)'
-                  : (onHomeRoute() ? '首页' : ('路由' + (routeOf() || '/') + '(未识别)')));
-          var verdict = (all0 && !IS_FRAME && !inPhoneRoute()) ? ' 全0即疑似改版' : '';
-          var quiet = all0 && (IS_FRAME || inPhoneRoute());
+                  : (onHomeRoute() ? '首页' : ('路由' + (routeOf() || '/') + '(未识别)'))));
+          var verdict = (!isCustom && all0 && !IS_FRAME && !inPhoneRoute()) ? ' 全0即疑似改版' : '';
+          var quiet = all0 && (isCustom || IS_FRAME || inPhoneRoute());
           if (!quiet || state.ticks % 360 === 1) {
             diag('beat', 'tick=' + state.ticks + ' url=' + (location.pathname + location.hash).slice(0, 90) +
                  ' platform=' + CFG.platform + ' 上下文=' + ctx + ' hits=[' + hits.join(',') + ']' + verdict + routeSampleOnce());

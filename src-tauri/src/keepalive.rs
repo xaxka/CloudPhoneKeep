@@ -25,7 +25,7 @@ const CURSOR_PNG_B64: &str = include_str!("../assets/cursor.b64");
 ///   runTimer  5000ms → 脚本 actionTick()：重连/进入/确认弹窗点击 + 解锁区/进入云机
 /// （窗口隐藏时由 Rust 看门狗每 1 秒 eval __CPK_TICK__ 驱动，tick 内自行按周期分流）
 ///
-/// 按槽位配置的 platform 分流（unicom 联通 / mobile 移动）：
+/// 按槽位配置的 platform 分流（unicom 联通 / mobile 移动 / custom 自定义）：
 /// 联通：试用弹窗(.try-content/.try-btn)、无法连接(.phone-dialog-wrap，
 ///       v1.9.0 起按钮宽松匹配 + miss 时记录弹窗全文/按钮清单 + 持续失败分级兜底)、
 ///       详情页进入云机(.detail-info-container/.enter-intance)、到期(.van-dialog__confirm)、
@@ -34,6 +34,9 @@ const CURSOR_PNG_B64: &str = include_str!("../assets/cursor.b64");
 ///       到期「知道了」(.van-dialog__confirm)、退回 H5 首页检测(#tabbar)；
 ///       未知文字的确认弹窗 miss 附弹窗全文与按钮清单，持续 3 分钟未识别
 ///       自动整页重载（对齐 v1.9.0 联通同款分级兜底，改版不再静默失效）
+/// custom：自定义 URL 通用保活——心跳 + 空闲鼠标模拟 + 路由留痕，不检测
+///       不点击任何站点弹窗（任意 URL 的弹窗语义无从判定），健康由宿主
+///       看门狗兜底
 /// 通用：触点光标（默认关闭，系统默认指针）、屏蔽右键、鼠标→触摸操控模拟
 ///       （WebView2 里页面自带的模拟器不加载，鼠标拖不动云机——移植页面同款 TouchEmulator 补上）、
 ///       空闲鼠标活动模拟、

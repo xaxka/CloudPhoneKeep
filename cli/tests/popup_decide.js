@@ -292,6 +292,47 @@ async function main() {
       : fail('退出自动重进', `nav=${r.nav} exited=${exited} reentered=${reentered} capped=${capped} n=${ls.value}`);
   }
 
+  // —— 8. custom 平台：通用保活——弹窗不点、不检测退出、心跳正常 ——
+  // CFG.platform 注入时定死，custom 用例需独立 Chrome 实例重新注入
+  {
+    const CDP2 = CDP_PORT + 1;
+    const udd2 = '/tmp/cpk-popup-test-custom';
+    fs.rmSync(udd2, { recursive: true, force: true });
+    const proc2 = spawn(SHELL, [...FLAGS, `--remote-debugging-port=${CDP2}`, `--user-data-dir=${udd2}`, 'about:blank'], { stdio: 'ignore' });
+    await waitPort(CDP2);
+    const cdp2 = await Cdp.connect(CDP2);
+    cdp2.start();
+    const t2 = await cdp2.call('Target.createTarget', { url: 'about:blank' });
+    const sid2 = (await cdp2.call('Target.attachToTarget', { targetId: t2.targetId, flatten: true })).sessionId;
+    await cdp2.call('Page.enable', {}, sid2);
+    await cdp2.call('Runtime.enable', {}, sid2);
+    await cdp2.call('Emulation.setUserAgentOverride', { userAgent: UA, platform: 'Linux armv8l' }, sid2);
+    const cfg2 = { ...cfg, platform: 'custom' };
+    // 从原始模板重新读：上面主用例的 js 已完成占位符替换，replace 会落空
+    const js2 = fs.readFileSync(path.join(SHARED, 'keepalive.inject.js'), 'utf8')
+      .replace(/__CPK_CFG__;/, JSON.stringify(cfg2) + ';').replace(/__CPK_CURSOR__/g, '');
+    await cdp2.call('Page.addScriptToEvaluateOnNewDocument', { source: js2, runImmediately: true }, sid2);
+    // 页面带 unknown 弹窗 + 首页特征（hometab）：custom 一律不点不检测
+    await cdp2.call('Page.navigate', { url: `${BASE}?r=99#hometab&unknown` }, sid2);
+    await sleep(3500);
+    const ev2 = await cdp2.eval(
+      `(function(){
+         var d = (window.__CPK_DRAIN__ && window.__CPK_DRAIN__()) || [];
+         return JSON.stringify({ d: d, clicked: window.__CLICKED__ || [],
+           hasDialog: !!document.querySelector('.van-dialog__confirm'),
+           hasTabbar: document.getElementById('tabbar').style.display === 'block' });
+       })()`, sid2);
+    const s2 = JSON.parse(ev2.value || '{}');
+    const noClick = (s2.clicked || []).length === 0;
+    const noDetect = !s2.d.some(e => e.l === 'exit' || e.l === 'miss' || String(e.m).indexOf('自动重进') >= 0);
+    const alive = s2.d.some(e => e.l === 'sys' && String(e.m).indexOf('保活脚本已注入') >= 0);
+    (s2.hasDialog && s2.hasTabbar && noClick && noDetect && alive)
+      ? pass('custom 平台 → 通用保活：弹窗/首页特征一律不点不检测，心跳留痕正常')
+      : fail('custom 平台', `dialog=${s2.hasDialog} tabbar=${s2.hasTabbar} clicked=${JSON.stringify(s2.clicked)} noDetect=${noDetect} alive=${alive}`,
+             { drain: s2.d });
+    try { proc2.kill(); } catch (e) {}
+  }
+
   srv.close();
   try { proc.kill(); } catch (e) {}
   console.log(failed ? '\nFAIL: 存在未通过的用例' : '\nPASS: 弹窗决策回归全部通过');

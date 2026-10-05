@@ -29,8 +29,14 @@ pub struct PlatformPreset {
     pub height: u32,
 }
 
+/// 自定义平台（通用保活）显示名
+pub const PLATFORM_CUSTOM_LABEL: &str = "自定义 URL";
+/// 自定义平台默认视口（移动 H5 常见值，界面可改）
+pub const PLATFORM_CUSTOM_W: u32 = 414;
+pub const PLATFORM_CUSTOM_H: u32 = 896;
+
 /// 全部平台预设（数组顺序与两端历史行为一致：mobile 在前，Tauri 未知回退取 [0]）
-pub const PLATFORMS: [PlatformPreset; 2] = [
+pub const PLATFORMS: [PlatformPreset; 3] = [
     PlatformPreset {
         id: "mobile",
         label: PLATFORM_MOBILE_LABEL,
@@ -44,6 +50,16 @@ pub const PLATFORMS: [PlatformPreset; 2] = [
         web_uri: PLATFORM_UNICOM_URI,
         width: PLATFORM_UNICOM_W,
         height: PLATFORM_UNICOM_H,
+    },
+    // 自定义平台：URL 由用户填写（web_uri 空 = 无默认值），保活走通用规则
+    // （心跳 + 空闲鼠标模拟 + 路由留痕；不识别不点击任何站点弹窗——详见
+    // keepalive.inject.js 的 custom 分支与 keepalive-rules.md）
+    PlatformPreset {
+        id: "custom",
+        label: PLATFORM_CUSTOM_LABEL,
+        web_uri: "",
+        width: PLATFORM_CUSTOM_W,
+        height: PLATFORM_CUSTOM_H,
     },
 ];
 
@@ -79,6 +95,7 @@ mod tests {
                     PLATFORM_UNICOM_URI,
                     PLATFORM_UNICOM_LABEL,
                 ),
+                "custom" => (PLATFORM_CUSTOM_W, PLATFORM_CUSTOM_H, "", PLATFORM_CUSTOM_LABEL),
                 _ => panic!("未知平台 {}", p.id),
             };
             assert_eq!(p.width, w);
@@ -92,6 +109,7 @@ mod tests {
     fn find_exact_and_unknown() {
         assert_eq!(find("mobile").unwrap().web_uri, PLATFORM_MOBILE_URI);
         assert_eq!(find("unicom").unwrap().label, PLATFORM_UNICOM_LABEL);
+        assert_eq!(find("custom").unwrap().web_uri, "", "custom 无默认 URL，必须用户填");
         assert!(find("telecom").is_none());
         assert!(find("").is_none());
         assert!(find("Mobile").is_none(), "平台 id 区分大小写");

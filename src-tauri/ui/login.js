@@ -26,7 +26,10 @@
   var el = function (id) { return document.getElementById(id); };
   var PRESETS = {
     mobile: { width: 414, height: 896, url: "https://cloudphoneh5.buy.139.com" },
-    unicom: { width: 405, height: 720, url: "https://uphone.wo-adv.cn/cloudphone/#/home" }
+    unicom: { width: 405, height: 720, url: "https://uphone.wo-adv.cn/cloudphone/#/home" },
+    // 自定义 URL（通用保活）：地址必填（界面校验），保活走通用规则
+    // （心跳 + 空闲鼠标模拟 + 路由留痕，不识别不点击站点弹窗）
+    custom: { width: 414, height: 896, url: "" }
   };
 
   // 醒目横幅：错误(红) / 警告(黄)。此前错误只显示在底部小灰字里，用户根本看不见
@@ -57,15 +60,26 @@
     invoke("get_slot", { slot: n })
       .then(function (cfg) {
         el("platform").value = PRESETS[cfg.platform] ? cfg.platform : "mobile";
+        syncUrlVisibility();
         el("name").value = cfg.name || "";
+        // 自定义平台回填已保存的地址；其他平台地址是预设值不展示（避免误导改动）
+        if (cfg.platform === "custom" && cfg.webUri) el("url").value = cfg.webUri;
         el("width").value = cfg.width;
         el("height").value = cfg.height;
       })
       .catch(function () {});
   }
 
+  // 自定义平台：显示 URL 输入框；预设平台：隐藏（地址由平台决定）
+  function syncUrlVisibility() {
+    var isCustom = el("platform").value === "custom";
+    el("url").hidden = !isCustom;
+    el("url-lbl").hidden = !isCustom;
+  }
+
   // 平台切换 → 联动默认分辨率（原版两个 exe 各自的默认值）
   el("platform").addEventListener("change", function () {
+    syncUrlVisibility();
     var p = PRESETS[this.value];
     if (!p) return;
     el("width").value = p.width;
@@ -146,11 +160,26 @@
     }
     var platform = el("platform").value;
     var p = PRESETS[platform] || PRESETS.mobile;
+    // 自定义平台：地址必填且须 http(s):// 开头（拼错协议的地址 WebView2 无法打开）
+    var urlVal = "";
+    if (platform === "custom") {
+      urlVal = el("url").value.trim();
+      if (!urlVal) {
+        showBanner("err", "自定义平台必须填写页面地址（http:// 或 https:// 开头）");
+        el("url").focus();
+        return;
+      }
+      if (!/^https?:\/\//i.test(urlVal)) {
+        showBanner("err", "页面地址必须以 http:// 或 https:// 开头（当前值：" + urlVal.slice(0, 60) + "）");
+        el("url").focus();
+        return;
+      }
+    }
     var cfg = {
       slot: n,
       name: nameVal,
       platform: platform,
-      webUri: p.url,
+      webUri: platform === "custom" ? urlVal : p.url,
       width: parseFloat(el("width").value) || p.width,
       height: parseFloat(el("height").value) || p.height,
       keepAlive: true,

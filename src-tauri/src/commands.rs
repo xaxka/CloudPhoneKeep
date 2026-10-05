@@ -48,6 +48,19 @@ pub async fn launch_slot(app: AppHandle, cfg: SlotConfig) -> Result<Vec<String>,
         logger::log(&app, cfg.slot, "error", &format!("进入被拒：{e}"));
         return Err(e);
     }
+    // 自定义平台兜底校验（前端已拦，此处防手改 config.json 直启）：
+    // URL 必填且 http(s):// 开头，空值会在窗口创建时变成 about:blank 静默白屏
+    if cfg.platform == "custom" {
+        let u = cfg.web_uri.trim();
+        if u.is_empty() {
+            return Err("自定义平台必须填写页面地址（http:// 或 https:// 开头）".into());
+        }
+        if !u.starts_with("http://") && !u.starts_with("https://") {
+            // 字符级截断（非字节切片）：URL 可能含多字节字符，&u[..60] 会 panic
+            let head: String = u.chars().take(60).collect();
+            return Err(format!("自定义平台地址必须以 http:// 或 https:// 开头（当前值：{head}）"));
+        }
+    }
 
     {
         let state: tauri::State<AppState> = app.state();

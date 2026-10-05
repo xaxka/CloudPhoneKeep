@@ -27,7 +27,7 @@ pub const TEMPLATE: &str = include_str!("../keepalive.inject.js");
 pub struct InjectParams<'a> {
     /// 槽位编号（CLI：恒 1；Tauri：1..9，同时是老板键 Ctrl+N 的 N）
     pub slot: u32,
-    /// 平台 id：mobile / unicom（空值兜底策略由调用方决定）
+    /// 平台 id：mobile / unicom / custom（空值兜底策略由调用方决定）
     pub platform: &'a str,
     /// 云机首页 URL（重连/回退目标）
     pub home_uri: &'a str,

@@ -34,7 +34,7 @@ export CPK_SHELL=/path/to/chrome        # chromium / google-chrome / chrome-head
 | `ci_smoke.sh` | **CI 冒烟档**：真实引擎 + chrome 端到端（本地动画页/注入/画面流出帧/控制链路/healthz 字段/smoke PASS）。CI 用 install.sh 装好的 /opt 产物跑 |
 | `knob_e2e.py` | 三旋钮（fps/quality/scale）热更新端到端：healthz 即刻回读 + 帧实际尺寸/实测帧率证真实生效 + 越界 400 |
 | `auth_e2e.py` | Basic Auth 端到端：无凭据 401×4 + WWW-Authenticate + 免鉴权通道照常 + 心跳不断 + 凭据/token 叠加 |
-| `popup_decide.js` | **弹窗决策回归（CI smoke 4/4）**：真浏览器 + 真 `keepalive.inject.js` + `popup_page.html` fixture（139 弹窗 DOM）——重连/进入/知道了该点必点、云机更新弹窗不点「返回首页」+ 12 拍兜底重载、未知弹窗不盲点、URL token 脱敏、#tabbar 退出 → 自动重进 3 次达上限 |
+| `popup_decide.js` | **弹窗决策回归（CI smoke 4/4）**：真浏览器 + 真 `keepalive.inject.js` + `popup_page.html` fixture（139 弹窗 DOM）——重连/进入/知道了该点必点、云机更新弹窗不点「返回首页」+ 12 拍兜底重载、未知弹窗不盲点、URL token 脱敏、#tabbar 退出 → 自动重进 3 次达上限、custom 平台通用保活（弹窗/首页特征一律不点不检测） |
 | `check_md_links.py` | 文档冒烟：全仓 md 相对链接有效性检查（改文档后随手跑，退出码可直接进脚本/CI） |
 
 双端组织约定：CLI（Linux/Docker）侧测试统一在本目录；Tauri（Windows）侧

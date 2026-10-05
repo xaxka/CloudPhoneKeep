@@ -173,7 +173,8 @@ pub struct SlotConfig {
     pub slot: u32,
     /// 帐号名称（建议填手机号），用于缓存目录隔离
     pub name: String,
-    /// 平台：mobile 移动云手机 / unicom 联通云手机
+    /// 平台：mobile 移动云手机 / unicom 联通云手机 / custom 自定义 URL
+    /// （通用保活：web_uri 必填，launch_slot 兜底校验 http(s):// 前缀）
     pub platform: String,
     /// 浏览器地址
     pub web_uri: String,
