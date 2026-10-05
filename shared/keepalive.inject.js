@@ -38,7 +38,7 @@
   // 且两个转换器天然互斥，绝不会双重转换。
   try { if (!('ontouchstart' in window)) window.ontouchstart = null; } catch(e){}
 
-  var state = { ticks: 0, clicks: 0, last: '', diagAt: {}, lastUrl: '', wasExited: false, stopDone: false, entered: false, nextActionAt: 0, pdwMiss: 0, cfMiss: 0, diagBuf: [] };
+  var state = { ticks: 0, clicks: 0, last: '', diagAt: {}, lastUrl: '', wasExited: false, stopDone: false, entered: false, nextActionAt: 0, pdwMiss: 0, cfMiss: 0, updMiss: 0, diagBuf: [] };
   window.__CPK_STATE__ = state;
 
   // document_start 阶段 body/head 可能尚未解析（初始化脚本在文档创建时执行）：
@@ -470,23 +470,43 @@
           } else if (cfTxt.indexOf('确认') >= 0) {
             cf.click(); acted = 'confirm'; diag('click', 'confirm -> ' + desc(cf));
           } else {
-            // 未知文字的确认弹窗：不盲点（还原原版决策），但补齐 v1.9.0 联通同款
-            // 诊断与分级兜底——miss 附弹窗全文与按钮清单（改版最直接证据），
-            // 持续 3 分钟未识别自动整页重载（登录态在本地数据目录，重载自动回云机页）
-            state.cfMiss++;
             var dg = q('.van-dialog') || cf;
-            diag('miss', 'confirm 按钮出现未知文字 "' + cfTxt + '"(第' + state.cfMiss + '次) | 弹窗全文="' +
-                 ((dg.innerText || '').trim().slice(0, 160)).replace(/\s+/g, ' ') +
-                 '" 按钮清单=' + btnTexts(dg));
-            if (state.cfMiss >= 36) {
-              state.cfMiss = 0;
-              diag('sys', '确认弹窗持续 3 分钟未识别（疑似改版），自动重载页面 ' + location.href.slice(0, 120));
-              try { location.reload(); } catch(e) {}
+            var dgTxt = ((dg.innerText || '').trim().slice(0, 160)).replace(/\s+/g, ' ');
+            // ===== 已知场景：云机更新/维护弹窗（见 cpk-20261005.log 08:13）=====
+            // 「云机更新中，请稍后再试」+ 唯一按钮「返回首页」。按钮不能点：点击是
+            // SPA 路由跳回首页（非整页加载，不走 restoreEnter 自动重进），退出检测
+            // 会判定「已退出云机」并停用保活，手机就此挂机。正确动作是整页重载——
+            // 实测重载后站点自动重进云机（cloudAppList→cloudphone→instance，
+            // 登录态在本地数据目录）：更新完成即恢复；未完成弹窗复现，60 秒节流
+            // 再重载，直至恢复。匹配词取弹窗正文（更新/维护/稍后再试），按钮文字
+            // 「返回首页」不含重连/进入/确认，天然只会落到这里。
+            if (dgTxt.indexOf('更新') >= 0 || dgTxt.indexOf('维护') >= 0 || dgTxt.indexOf('稍后再试') >= 0) {
+              state.updMiss++;
+              diag('miss', '云机更新/维护弹窗(第' + state.updMiss + '次)（不点按钮"' + cfTxt +
+                   '"——点击会退回首页停用保活，60 秒后整页重载重试） | 弹窗全文="' + dgTxt + '"');
+              if (state.updMiss >= 12) {
+                state.updMiss = 0;
+                diag('sys', '云机更新/维护持续 60 秒，自动重载页面重试（重载后站点自动重进云机） ' + location.href.slice(0, 120));
+                try { location.reload(); } catch(e) {}
+              }
+            } else {
+              // 未知文字的确认弹窗：不盲点（还原原版决策），但补齐 v1.9.0 联通同款
+              // 诊断与分级兜底——miss 附弹窗全文与按钮清单（改版最直接证据），
+              // 持续 3 分钟未识别自动整页重载（登录态在本地数据目录，重载自动回云机页）
+              state.cfMiss++;
+              diag('miss', 'confirm 按钮出现未知文字 "' + cfTxt + '"(第' + state.cfMiss + '次) | 弹窗全文="' +
+                   dgTxt + '" 按钮清单=' + btnTexts(dg));
+              if (state.cfMiss >= 36) {
+                state.cfMiss = 0;
+                diag('sys', '确认弹窗持续 3 分钟未识别（疑似改版），自动重载页面 ' + location.href.slice(0, 120));
+                try { location.reload(); } catch(e) {}
+              }
             }
           }
         } else {
           // 弹窗已消失：未知弹窗兜底计数复位
           state.cfMiss = 0;
+          state.updMiss = 0;
         }
 
         // 解锁区：原作者直接点击 .unlocked 容器本身（文字含 进入 即可点）
