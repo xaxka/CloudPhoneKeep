@@ -345,43 +345,6 @@
     if (on) { addrInput.value = location.href; addrInput.focus(); addrInput.select(); }
   };
 
-  // 窗口置顶按钮：悬浮于页面右上角（紧贴标题栏关闭 X 按钮下方），
-  // 点击切换窗口置顶。窗口用系统原生标题栏，Win32/Tauri 无法往原生标题栏里
-  // 插自定义按钮，这是唯一可行位置。点击经保活同一条回环通道上报
-  // /topmost（Rust 侧 browser::set_topmost 应用后 eval __CPK_TOP__ 回推状态，
-  // 托盘菜单「窗口置顶」同走 set_topmost → 按钮状态始终一致）。
-  try {
-    var topIsTop = false;
-    try { topIsTop = (window.top === window); } catch(e) { topIsTop = false; }
-    if (topIsTop) {
-      var topBtn = document.createElement('div');
-      topBtn.id = 'cpk-top-btn';
-      topBtn.setAttribute('data-no-touch-simulate', '1');
-      topBtn.title = '窗口置顶（保持最前，点击切换）';
-      topBtn.style.cssText = 'position:fixed;top:2px;right:6px;z-index:2147483647;width:26px;height:26px;line-height:24px;text-align:center;cursor:pointer;border-radius:13px;background:rgba(0,0,0,0.35);user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;';
-      topBtn.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" style="vertical-align:-3px;pointer-events:none;"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" fill="none" stroke="#fff" stroke-width="2"/></svg>';
-      function renderTop(on){
-        try {
-          var p = topBtn.querySelector('path');
-          if (p) { p.setAttribute('fill', on ? '#fff' : 'none'); p.setAttribute('stroke', on ? 'none' : '#fff'); }
-          topBtn.style.background = on ? 'rgba(255,140,0,0.85)' : 'rgba(0,0,0,0.35)';
-          topBtn.title = on ? '取消窗口置顶' : '窗口置顶（保持最前，点击切换）';
-        } catch(e) {}
-      }
-      topBtn.addEventListener('click', function(ev){
-        try { ev.stopPropagation(); ev.preventDefault(); } catch(e) {}
-        try {
-          fetch('http://127.0.0.1:' + PORT + '/topmost?slot=' + SLOT + '&t=' + Date.now(),
-                { mode: 'no-cors', cache: 'no-store' }).catch(function(){});
-        } catch(e) {}
-        diag('click', '置顶按钮点击（已上报切换请求）');
-      });
-      whenDom(function(){ (document.body || document.documentElement).appendChild(topBtn); });
-      // Rust 侧状态回推入口（set_topmost / 页面加载完成时 eval 调用）
-      window.__CPK_TOP__ = renderTop;
-    }
-  } catch(e) { diag('error', '置顶按钮创建失败: ' + (e && e.message)); }
-
   function vis(el){ return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length)); }
   function q(s){ try { return document.querySelector(s); } catch(e) { return null; } }
 
