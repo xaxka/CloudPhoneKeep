@@ -146,12 +146,27 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
             .data_directory(profile.clone())
             // 页面加载事件落盘（debug 级）：「窗口开了但白屏/加载不出来」时，
             // 据此分辨是导航根本没开始（网络/站点问题）还是加载完了但渲染异常
-            .on_page_load(move |_w, payload| {
+            .on_page_load(move |w, payload| {
                 let ev = match payload.event() {
                     tauri::webview::PageLoadEvent::Started => "Started(开始加载)",
                     tauri::webview::PageLoadEvent::Finished => "Finished(加载完成)",
                 };
                 logger::log(&nav_app, slot, "debug", &format!("页面加载事件 {ev}：{}", cloudphonekeep_shared::redact::redact_url(payload.url().as_str())));
+                // 页面（重）加载后页内脚本是全新的一份，内置顶按钮初始为「未置顶」——
+                // 已置顶的窗口导航/重载后必须回推一次真实状态，否则按钮显示与实际不符
+                if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                    let top = nav_app
+                        .state::<AppState>()
+                        .states
+                        .lock()
+                        .unwrap()
+                        .get(&slot)
+                        .map(|s| s.topmost)
+                        .unwrap_or(false);
+                    let _ = w.eval(&format!(
+                        "try{{window.__CPK_TOP__&&window.__CPK_TOP__({top})}}catch(e){{}}"
+                    ));
+                }
             })
             // SPA 路由切换会改标题：标题出现变化 = 页面确实渲染出来了
             .on_document_title_changed(move |_w, t| {
@@ -597,12 +612,17 @@ pub fn set_topmost(app: &AppHandle, slot: u32, top: bool) -> Result<(), String> 
         win.set_always_on_top(top)
             .map_err(|e| format!("置顶设置失败: {e}"))?;
         sync_state(app, slot, |s| s.topmost = top);
+        // 同步页内置顶按钮状态（页面按钮与托盘菜单同走本函数，状态不会分叉；
+        // 页面未注入脚本时 __CPK_TOP__ 未定义，eval 含 try/catch 静默降级）
+        let _ = win.eval(&format!(
+            "try{{window.__CPK_TOP__&&window.__CPK_TOP__({top})}}catch(e){{}}"
+        ));
         logger::log(
             app,
             slot,
             "sys",
             if top {
-                "窗口已置顶（悬浮于其他窗口之上；再次点击「窗口置顶」取消）"
+                "窗口已置顶（悬浮于其他窗口之上；再次点击「窗口置顶」或页内按钮取消）"
             } else {
                 "已取消置顶"
             },
