@@ -2,6 +2,7 @@ use crate::config::{self, SlotConfig};
 use crate::keepalive;
 use crate::logger;
 use crate::state::SlotState;
+use crate::vdesk;
 use crate::AppState;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;

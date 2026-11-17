@@ -326,7 +326,7 @@ fn main() {
             // 设置窗口同样 skipTaskbar：一并绑定到当前虚拟桌面
             // （多桌面用户否则会在每个桌面都看到设置窗口）
             if let Some(login) = app.get_webview_window("login") {
-                vdesk::pin_window(app.handle(), login, 0);
+                vdesk::pin_window(app.handle(), &login, 0);
             }
 
             // 不创建全局托盘：多开走多 exe 运行（再开一个云手机 = 再运行一个
