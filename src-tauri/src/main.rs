@@ -10,6 +10,7 @@ mod logger;
 mod report_server;
 mod selftest;
 mod state;
+mod vdesk;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32};
@@ -321,6 +322,12 @@ fn main() {
 
             // 启动本地回环上报服务（页面内脚本回传保活状态）
             report_server::spawn(app.handle().clone());
+
+            // 设置窗口同样 skipTaskbar：一并绑定到当前虚拟桌面
+            // （多桌面用户否则会在每个桌面都看到设置窗口）
+            if let Some(login) = app.get_webview_window("login") {
+                vdesk::pin_window(app.handle(), login, 0);
+            }
 
             // 不创建全局托盘：多开走多 exe 运行（再开一个云手机 = 再运行一个
             // 程序实例），托盘菜单也没有「新开账号」入口，启动阶段托盘区保持干净。
