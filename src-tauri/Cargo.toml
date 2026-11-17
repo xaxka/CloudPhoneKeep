@@ -25,6 +25,17 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "macros", "rt"] }
 
+# Win32 虚拟桌面绑定（vdesk.rs）：与 tauri 2.x 自带的 windows 0.62 同源，
+# 只取 COM/Shell/DWM/窗口四类最小特性
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dwm",
+  "Win32_System_Com",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
 [profile.release]
 strip = true
 lto = true

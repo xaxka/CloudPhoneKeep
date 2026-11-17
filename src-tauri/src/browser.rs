@@ -2,6 +2,7 @@ use crate::config::{self, SlotConfig};
 use crate::keepalive;
 use crate::logger;
 use crate::state::SlotState;
+use crate::vdesk;
 use crate::AppState;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
@@ -42,6 +43,8 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
         let _ = win.show();
         let _ = win.set_focus();
         reapply_topmost(app, slot);
+        // 呼出时跟随当前桌面（用户可能已切换到别的虚拟桌面）
+        vdesk::pin_window(app, &win, slot);
         sync_state(app, slot, |s| {
             s.running = true;
             s.visible = true;
@@ -262,6 +265,10 @@ pub fn start_slot_ex(app: &AppHandle, slot: u32) -> Result<Vec<String>, String> 
         "sys",
         &format!("窗口已启动 platform={} url={} profile={final_profile_name}", cfg.platform, url),
     );
+
+    // 绑定到当前虚拟桌面：skipTaskbar 窗口（DeleteTab 后）不被资源管理器
+    // 登记桌面归属，多桌面环境下会在每个桌面都显示
+    vdesk::pin_window(app, &win, slot);
 
     {
         let w = win.clone();
@@ -484,6 +491,9 @@ fn cleanup_slot(app: &AppHandle, slot: u32) {
 /// （tao 的 is_visible() 为 true），但页面已被 Chromium 当后台页节流——
 /// 标题栏去掉最小化按钮（minimizable(false)）挡不住 Win+D / 显示桌面 /
 /// Win+Down 等系统级最小化，此前这类窗口的保活会静默停摆且无任何日志。
+/// 同理「其他虚拟桌面上的窗口」：DWM cloak 保留 WS_VISIBLE（is_visible 为
+/// true）但 Chromium 按遮挡/后台页处理定时器照样被节流——被 cloak 的窗口
+/// 同样由看门狗接管（vdesk.rs 修复多桌面全显后补齐的驱动路径）。
 /// 周期 1 秒 = 原版 stopTimer；页面内 tick 自行分流：
 ///   - 每 1 秒：退出/到期检测（stopTimer 语义）
 ///   - 每 intervalMs：保活动作（runTimer 5 秒语义）
@@ -491,8 +501,9 @@ fn spawn_watchdog(app: AppHandle, slot: u32) {
     let task_app = app.clone();
     let handle = tauri::async_runtime::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(1000));
-        // 状态转换只记一次日志（避免每秒刷屏）：最小化接管 / 恢复
+        // 状态转换只记一次日志（避免每秒刷屏）：最小化/被cloak 接管 / 恢复
         let mut was_minimized_driven = false;
+        let mut was_cloak_driven = false;
         // eval 连续失败计数：首次与每 30 次落盘防刷屏；连续 10 次给出明确结论
         let mut eval_fails: u32 = 0;
         let mut escalated = false;
@@ -504,13 +515,14 @@ fn spawn_watchdog(app: AppHandle, slot: u32) {
             };
             let visible = win.is_visible().unwrap_or(true);
             let minimized = win.is_minimized().unwrap_or(false);
+            let cloaked = vdesk::is_cloaked(&win);
             sync_state(&task_app, slot, |s| {
                 s.running = true;
                 s.visible = visible;
             });
-            // 仅隐藏/最小化时驱动：可见且未最小化时页面定时器自己在跑，
-            // eval 会造成双倍 tick
-            let need_drive = !visible || minimized;
+            // 仅隐藏/最小化/被cloak（其他桌面）时驱动：可见且呈现中时
+            // 页面定时器自己在跑，eval 会造成双倍 tick
+            let need_drive = !visible || minimized || cloaked;
             if minimized && !was_minimized_driven {
                 was_minimized_driven = true;
                 logger::log(
@@ -521,6 +533,17 @@ fn spawn_watchdog(app: AppHandle, slot: u32) {
                 );
             } else if !minimized {
                 was_minimized_driven = false;
+            }
+            if cloaked && !was_cloak_driven {
+                was_cloak_driven = true;
+                logger::log(
+                    &task_app,
+                    slot,
+                    "sys",
+                    "窗口在其他虚拟桌面（DWM cloak）：页内定时器被节流，看门狗已接管保活驱动（呼出窗口请用老板键/托盘左键）",
+                );
+            } else if !cloaked {
+                was_cloak_driven = false;
             }
             if need_drive {
                 if let Err(e) = win.eval("try{window.__CPK_TICK__&&window.__CPK_TICK__()}catch(e){}") {
@@ -562,9 +585,24 @@ fn spawn_watchdog(app: AppHandle, slot: u32) {
 }
 
 /// 老板键：可见则瞬间隐藏，隐藏则显示并置前（还原原版 reghotkey Ctrl+N）
+/// 多桌面语义（vdesk.rs 修复后）：窗口绑定单个桌面，切到别的桌面时被 DWM
+/// cloak——IsWindowVisible 仍为 true，但不呈现给用户。此时按「呼出到当前
+/// 桌面」处理，不能误判为可见而把窗口藏掉
 pub fn toggle_slot(app: &AppHandle, slot: u32) {
     if let Some(win) = app.get_webview_window(&slot_label(slot)) {
         match win.is_visible() {
+            Ok(true) if !vdesk::is_on_current_desktop(&win) => {
+                // 在别的桌面显示着：拉回当前桌面并聚焦
+                let moved = vdesk::pin_window(app, &win, slot);
+                let _ = win.set_focus();
+                reapply_topmost(app, slot);
+                sync_state(app, slot, |s| s.visible = true);
+                logger::log(app, slot, "sys", if moved {
+                    "窗口已在其他桌面显示 → 按老板键拉回当前桌面"
+                } else {
+                    "窗口已在其他桌面显示 → 老板键呼出到当前桌面（未触发移动）"
+                });
+            }
             Ok(true) => {
                 let _ = win.hide();
                 sync_state(app, slot, |s| s.visible = false);
@@ -575,6 +613,8 @@ pub fn toggle_slot(app: &AppHandle, slot: u32) {
                 let _ = win.show();
                 let _ = win.set_focus();
                 reapply_topmost(app, slot);
+                // 呼出跟随当前桌面（隐藏期间用户可能切了桌面）
+                vdesk::pin_window(app, &win, slot);
                 sync_state(app, slot, |s| s.visible = true);
                 logger::log(app, slot, "sys", "窗口已显示");
             }
@@ -591,6 +631,8 @@ pub fn show_slot(app: &AppHandle, slot: u32, visible: bool) {
             let a = win.show();
             let _ = win.set_focus();
             reapply_topmost(app, slot);
+            // 呼出跟随当前桌面（隐藏期间用户可能切了桌面）
+            vdesk::pin_window(app, &win, slot);
             a
         } else {
             win.hide()
