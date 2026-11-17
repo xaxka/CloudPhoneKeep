@@ -104,6 +104,24 @@ async fn handle_conn(app: tauri::AppHandle, mut stream: TcpStream) {
         if (1..=9).contains(&slot) && !status.is_empty() {
             on_report(&app, slot, &status);
         }
+    } else if path == "/topmost" {
+        // 页内置顶按钮：页面点击 → 反转当前置顶态。
+        // 状态应用与按钮同步都在 set_topmost 内（eval __CPK_TOP__ 回推），
+        // 与托盘菜单「窗口置顶」走同一条路，两端状态不会分叉。
+        let slot = params.get("slot").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+        if (1..=9).contains(&slot) {
+            let top = !app
+                .state::<AppState>()
+                .states
+                .lock()
+                .unwrap()
+                .get(&slot)
+                .map(|s| s.topmost)
+                .unwrap_or(false);
+            if let Err(e) = crate::browser::set_topmost(&app, slot, top) {
+                crate::logger::log(&app, slot, "error", &format!("页内置顶按钮切换失败：{e}"));
+            }
+        }
     }
 
     let _ = stream
